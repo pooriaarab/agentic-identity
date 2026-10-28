@@ -61,9 +61,15 @@ App code talks to ports, not to a vendor. Two ports exist now: `Store` and
   `query`, and `transaction`. A query takes equality filters, one `orderBy`, a
   `limit`, and a `cursor`. There are no joins, so a Firestore adapter fits.
 - `Blobs` keeps bytes by key. It has `put`, `get`, `delete`, and `signedUrl`.
-- Every adapter takes a `region` option and exposes it. The default is `"eu"`.
-  Call `assertRegion("eu", store, blobs)` at start-up to fail when an adapter
-  keeps data elsewhere.
+- Every adapter takes a `region` option (`"eu"`, `"us"`, or `"unknown"`) and
+  exposes it. The default is `"unknown"`. The region is a claim that you make:
+  an adapter cannot always see where its data lives. Call
+  `assertRegion("eu", store, blobs)` at start-up to fail when a claim is
+  missing or says another region.
+- A transaction reads first and writes after. A read after a write throws. This
+  is the Firestore rule, and every adapter follows it. A transaction runs again
+  when a doc it read changed, so keep it free of side effects. Use the doc id,
+  not a query, to keep a value unique.
 
 `createMemoryStore` and `createMemoryBlobs` are for tests and local work. They
 lose data on exit. To write an adapter, run the contract suites against it. They
