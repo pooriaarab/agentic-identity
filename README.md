@@ -7,29 +7,28 @@
 
 People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
 
-> Status: scaffold. This repository holds the starter code only. It is not on npm
+> Status: in development. The package exports `VERSION` only. It is not on npm
 > yet, and none of the features below work yet.
 
 ## Planned features
 
-- Sign in with Google.
+- Sign in with any OpenID Connect provider (Keycloak, EU Login, Google).
 - Five kinds of principal: a person, an agent for a person, an agent made by an agent, an agent with its own identity, and a token that acts as the user.
 - Delegation chains where each step can only narrow scopes.
 - Roles per resource: owner, editor, commenter, viewer.
 - Invites by email and share links with expiry.
-- API keys, OAuth, and personal access tokens for agents.
-- An audit trail that shows who acted, and for whom.
+- API keys and personal access tokens for agents.
+- An audit trail that shows who acted, and for whom. Each entry keeps the principal kind.
 - Storage behind ports, so you can move from Cloudflare D1 to another store.
+- Region settings on every adapter, so data stays in the EU.
+- Per-user data export and hard delete.
 
-## Surfaces
-
-One package gives you each way in:
+## Planned surfaces
 
 - **Library and SDK**: `import { ... } from "agentic-identity"`.
-- **CLI**: `npx agentic-identity --help`.
+- **CLI**: `npx agentic-identity`.
 - **MCP server**: `npx agentic-identity mcp`, for Claude Code and other MCP clients.
 - **HTTP API**: a Cloudflare Worker you deploy to your own account.
-- **Web UI**: a small app served by the same Worker.
 
 ## Develop
 
