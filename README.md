@@ -118,7 +118,13 @@ App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
 - `Store` keeps JSON docs in named collections. It has `get`, `put`, `delete`,
   `query`, and `transaction`. A query takes equality filters, one `orderBy`, a
   `limit`, and a `cursor`. There are no joins, so a Firestore adapter fits.
-- `Blobs` keeps bytes by key. It has `put`, `get`, `delete`, and `signedUrl`.
+- `Blobs` keeps bytes by key. It has `put`, `get`, `head`, `delete`, and `signedUrl`.
+  Every object has a version. `put` takes `ifMatch` (a version) or `ifNoneMatch: "*"`
+  (create only), checks it and writes in one step, and returns `{ version }`, or `null`
+  when the condition failed. A refused put changes nothing. A version is opaque: an R2
+  etag, a GCS generation, a counter. `signedUrl` for a GET can sign in
+  `responseContentDisposition` and `responseContentType`, so the holder of the link
+  cannot change how the bytes are served.
 - `Auth` reads the credential on a `Request` and returns a principal context, or
   `null`. `Realtime` issues and verifies room tokens. `createHmacRealtime` signs
   with HMAC-SHA256 and takes a list of keys: the first signs, all verify, so you
@@ -133,7 +139,11 @@ App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
 - A transaction reads first and writes after. A read after a write throws. This
   is the Firestore rule, and every adapter follows it. A transaction runs again
   when a doc it read changed, so keep it free of side effects. Use the doc id,
-  not a query, to keep a value unique.
+  not a query, to keep a value unique: write a claim doc such as `names/<folder>:<name>`
+  in the same transaction as the item, and two writers cannot both claim it. To edit one
+  doc without losing a concurrent edit (a lock in other stores), read it, change it, and
+  write it back inside one transaction. When other writers keep winning, the transaction
+  throws `StoreConflictError` and writes nothing.
 
 `createMemoryStore` and `createMemoryBlobs` are for tests and local work. They
 lose data on exit. To write an adapter, run the contract suites against it. They

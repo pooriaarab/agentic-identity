@@ -22,6 +22,9 @@ import {
   type Scalar,
   type Store,
   type StoreOps,
+  StoreConflictError,
+  assertBlobPutOptions,
+  assertResponseHeaders,
 } from "../ports.js";
 
 export interface D1Statement {
@@ -247,13 +250,25 @@ export function createD1Store(db: D1Like, options: AdapterOptions & { region: Re
         if (!String(error instanceof Error ? error.message : error).includes("malformed JSON")) throw error;
       }
     }
-    throw new Error(`transaction kept conflicting after ${MAX_TRANSACTION_ATTEMPTS} attempts`);
+    throw new StoreConflictError(`transaction kept conflicting after ${MAX_TRANSACTION_ATTEMPTS} attempts`);
   }
 }
 
+export interface R2ObjectLike {
+  etag: string;
+  size: number;
+  httpMetadata?: { contentType?: string };
+}
+
 export interface R2Like {
-  put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
-  get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer>; httpMetadata?: { contentType?: string } } | null>;
+  /** Returns null when `onlyIf` did not hold. */
+  put(
+    key: string,
+    value: Uint8Array,
+    options?: { httpMetadata?: { contentType?: string }; onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } },
+  ): Promise<{ etag: string } | null>;
+  get(key: string): Promise<(R2ObjectLike & { arrayBuffer(): Promise<ArrayBuffer> }) | null>;
+  head(key: string): Promise<R2ObjectLike | null>;
   delete(key: string): Promise<unknown>;
 }
 
@@ -267,7 +282,9 @@ function assertSecret(secret: unknown): void {
   if (typeof secret !== "string" || new TextEncoder().encode(secret).length < 32) throw new Error("the URL secret must be a string of at least 32 bytes");
 }
 
-const signedText = (key: string, method: string, expires: string) => new TextEncoder().encode(`${method}\n${key}\n${expires}`);
+// A JSON list reads one way, so no two tuples share a signed text.
+const signedText = (key: string, method: string, expires: string, disposition: string | null, type: string | null) =>
+  new TextEncoder().encode(JSON.stringify([method, key, expires, disposition, type]));
 
 export interface R2Options extends AdapterOptions {
   region: Region;
@@ -292,38 +309,54 @@ export function createR2Blobs(bucket: R2Like, options: R2Options): Blobs {
     region,
     async put(key, data, opts) {
       need(key);
-      await bucket.put(key, data, opts?.contentType ? { httpMetadata: { contentType: opts.contentType } } : undefined);
+      assertBlobPutOptions(opts);
+      // The bucket checks the condition and writes in one step. A null means it did not hold.
+      const onlyIf = opts?.ifMatch !== undefined ? { etagMatches: opts.ifMatch } : opts?.ifNoneMatch === "*" ? { etagDoesNotMatch: "*" } : undefined;
+      const metadata = opts?.contentType ? { httpMetadata: { contentType: opts.contentType } } : {};
+      const stored = await bucket.put(key, data, onlyIf || opts?.contentType ? { ...metadata, ...(onlyIf ? { onlyIf } : {}) } : undefined);
+      return stored ? { version: stored.etag } : null;
     },
     async get(key) {
       need(key);
       const object = await bucket.get(key);
       if (!object) return null;
       const contentType = object.httpMetadata?.contentType;
-      return { data: new Uint8Array(await object.arrayBuffer()), ...(contentType ? { contentType } : {}) };
+      return { data: new Uint8Array(await object.arrayBuffer()), version: object.etag, ...(contentType ? { contentType } : {}) };
+    },
+    async head(key) {
+      need(key);
+      const object = await bucket.head(key);
+      const contentType = object?.httpMetadata?.contentType;
+      return object ? { size: object.size, version: object.etag, ...(contentType ? { contentType } : {}) } : null;
     },
     async delete(key) {
       need(key);
       await bucket.delete(key);
     },
-    async signedUrl(key, { method, expiresInSeconds }) {
+    async signedUrl(key, opts) {
       need(key);
+      const { method, expiresInSeconds } = opts;
       if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 1 || expiresInSeconds > 604800) {
         throw new RangeError("expiresInSeconds must be an integer from 1 to 604800");
       }
+      assertResponseHeaders(opts);
+      const [disposition, type] = [opts.responseContentDisposition ?? null, opts.responseContentType ?? null];
       const expires = String(now() + expiresInSeconds * 1000);
-      const sig = hex(await crypto.subtle.sign("HMAC", await hmacKey(options.urlSecret, "sign"), signedText(key, method, expires)));
+      const sig = hex(await crypto.subtle.sign("HMAC", await hmacKey(options.urlSecret, "sign"), signedText(key, method, expires, disposition, type)));
       const url = new URL(options.urlBase);
       for (const [name, value] of Object.entries({ key, method, expires, sig })) url.searchParams.set(name, value);
+      if (disposition !== null) url.searchParams.set("disposition", disposition);
+      if (type !== null) url.searchParams.set("type", type);
       return url.toString();
     },
   };
 }
 
-/** Checks a URL made by `signedUrl`. Returns the key and method, or null for any problem. */
+/** Checks a URL made by `signedUrl`. Returns the key, the method, and any signed response headers, or null for any problem. */
 export async function verifySignedBlobUrl(
   url: string,
   options: { secret: string; now?: () => number },
-): Promise<{ key: string; method: "GET" | "PUT" } | null> {
+): Promise<{ key: string; method: "GET" | "PUT"; responseContentDisposition?: string; responseContentType?: string } | null> {
   // A missing secret is a setup error. Throw, so it is never a quiet "invalid URL".
   assertSecret(options.secret);
   try {
@@ -335,8 +368,10 @@ export async function verifySignedBlobUrl(
     if (!key || !expires || !sig || (method !== "GET" && method !== "PUT")) return null;
     if (!/^[0-9a-f]{64}$/.test(sig) || !/^\d{1,16}$/.test(expires) || !(Number(expires) > (options.now ?? Date.now)())) return null;
     const bytes = Uint8Array.from(sig.match(/../g) as string[], (pair) => Number.parseInt(pair, 16));
-    const valid = await crypto.subtle.verify("HMAC", await hmacKey(options.secret, "verify"), bytes, signedText(key, method, expires));
-    return valid ? { key, method } : null;
+    const [disposition, type] = [params.get("disposition"), params.get("type")];
+    assertResponseHeaders({ method, ...(disposition === null ? {} : { responseContentDisposition: disposition }), ...(type === null ? {} : { responseContentType: type }) });
+    const valid = await crypto.subtle.verify("HMAC", await hmacKey(options.secret, "verify"), bytes, signedText(key, method, expires, disposition, type));
+    return valid ? { key, method, ...(disposition === null ? {} : { responseContentDisposition: disposition }), ...(type === null ? {} : { responseContentType: type }) } : null;
   } catch {
     return null;
   }
