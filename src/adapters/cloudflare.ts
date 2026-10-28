@@ -1,19 +1,24 @@
 // Cloudflare adapters. They use small structural types, so this file imports
 // nothing from Cloudflare. Pass in a D1 or R2 binding.
 //
-// Residency is fixed when you create the resource, so `region` here declares
-// where the resource lives. Create it in the EU:
+// Residency is fixed when you create the resource, so `region` here is a claim:
+// it declares where the resource lives, and it has no default. D1 also reports
+// the region that served a query, and the store refuses one that disagrees.
+// Create the resources in the EU:
 //   wrangler d1 create <name> --location weur        (or eeur)
 //   wrangler r2 bucket create <name> --jurisdiction eu
 import {
   DEFAULT_LIMIT,
   assertCollection,
+  assertField,
   assertId,
+  parseRegion,
   type AdapterOptions,
   type Blobs,
   type Doc,
   type Page,
   type Query,
+  type Region,
   type Scalar,
   type Store,
   type StoreOps,
@@ -22,7 +27,7 @@ import {
 export interface D1Statement {
   bind(...values: unknown[]): D1Statement;
   first<T>(): Promise<T | null>;
-  all<T>(): Promise<{ results: T[] }>;
+  all<T>(): Promise<{ results: T[]; meta?: { served_by_region?: string } }>;
   run(): Promise<unknown>;
 }
 
@@ -43,18 +48,28 @@ export const D1_SCHEMA =
 
 const MAX_TRANSACTION_ATTEMPTS = 50;
 
+// Every write takes a new random version, below 2^53 so JavaScript reads it exactly.
+// A counter would restart when a doc is deleted and made again, and a stale
+// transaction would then pass its check. Zero means "missing".
+const NEW_VERSION = "1 + abs(random() % 9007199254740990)";
+
 const UPSERT =
-  "INSERT INTO store_docs (collection, id, body) VALUES (?, ?, ?) ON CONFLICT (collection, id) DO UPDATE SET body = excluded.body, version = store_docs.version + 1";
+  `INSERT INTO store_docs (collection, id, body, version) VALUES (?, ?, ?, ${NEW_VERSION}) ON CONFLICT (collection, id) DO UPDATE SET body = excluded.body, version = ${NEW_VERSION}`;
 
 // Fails the whole batch with "malformed JSON" when the doc changed since it was read.
 const GUARD =
   "SELECT CASE WHEN COALESCE((SELECT version FROM store_docs WHERE collection = ? AND id = ?), 0) = ? THEN 1 ELSE json('!') END";
 
-const toBase64Url = (value: unknown) =>
-  btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))))
+const toBase64Url = (value: unknown) => {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  // Spreading a long array into one call overflows the stack.
+  for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  return btoa(binary)
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
+};
 
 function fromBase64Url(text: string): [Scalar, string] {
   try {
@@ -67,14 +82,24 @@ function fromBase64Url(text: string): [Scalar, string] {
   }
 }
 
-function assertField(field: string): string {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`invalid field name "${field}"`);
+function jsonPath(field: string): string {
+  assertField(field);
   return `$.${field}`;
+}
+
+const SERVED_IN_EU = new Set(["WEUR", "EEUR"]);
+const SERVED_OUTSIDE_EU = new Set(["WNAM", "ENAM", "APAC", "OC"]);
+
+function assertServedIn(region: Region, served: string | undefined): void {
+  if (served === undefined) return;
+  if ((region === "eu" && SERVED_OUTSIDE_EU.has(served)) || (region === "us" && SERVED_IN_EU.has(served))) {
+    throw new Error(`the database served a query from ${served}, outside the declared region "${region}"`);
+  }
 }
 
 // A match on both the JSON type and the value, so true never equals 1.
 function equals(field: string, value: Scalar): { sql: string; params: unknown[] } {
-  const path = assertField(field);
+  const path = jsonPath(field);
   if (value === null) return { sql: "json_type(body, ?) = 'null'", params: [path] };
   if (typeof value === "boolean") return { sql: "json_type(body, ?) = ?", params: [path, value ? "true" : "false"] };
   const types = typeof value === "number" ? "'integer', 'real'" : "'text'";
@@ -88,12 +113,12 @@ interface Row {
   v: Scalar;
 }
 
-async function runQuery(db: D1Like, collection: string, query: Query): Promise<{ rows: Row[]; next?: string }> {
+async function runQuery(db: D1Like, region: Region, collection: string, query: Query): Promise<{ rows: Row[]; next?: string }> {
   assertCollection(collection);
   const limit = query.limit ?? DEFAULT_LIMIT;
   if (!Number.isInteger(limit) || limit < 1) throw new RangeError("limit must be an integer of 1 or more");
   const field = query.orderBy?.field;
-  const path = field === undefined ? undefined : assertField(field);
+  const path = field === undefined ? undefined : jsonPath(field);
   const desc = query.orderBy?.direction === "desc";
   const value = path === undefined ? "id" : "json_extract(body, ?)";
   const valueParams = path === undefined ? [] : [path];
@@ -118,10 +143,11 @@ async function runQuery(db: D1Like, collection: string, query: Query): Promise<{
   }
   const dir = desc ? "DESC" : "ASC";
   const sql = `SELECT id, body, version, ${value} AS v FROM store_docs WHERE ${where.join(" AND ")} ORDER BY v ${dir}, id ${dir} LIMIT ?`;
-  const { results } = await db
+  const { results, meta } = await db
     .prepare(sql)
     .bind(...valueParams, ...params, limit + 1)
     .all<Row>();
+  assertServedIn(region, meta?.served_by_region);
   const page = results.slice(0, limit);
   const last = page[page.length - 1];
   return { rows: page, next: results.length > limit && last ? toBase64Url([last.v, last.id]) : undefined };
@@ -132,7 +158,8 @@ const toPage = <T extends Doc>(rows: Row[], next?: string): Page<T> => ({
   ...(next === undefined ? {} : { nextCursor: next }),
 });
 
-export function createD1Store(db: D1Like, options: AdapterOptions = {}): Store {
+export function createD1Store(db: D1Like, options: AdapterOptions & { region: Region }): Store {
+  const region = parseRegion(options.region);
   const readRow = async (collection: string, id: string) => {
     assertCollection(collection);
     assertId(id);
@@ -152,7 +179,7 @@ export function createD1Store(db: D1Like, options: AdapterOptions = {}): Store {
   let turn: Promise<unknown> = Promise.resolve();
 
   return {
-    region: options.region ?? "eu",
+    region,
     async get<T extends Doc>(collection: string, id: string) {
       const row = await readRow(collection, id);
       return row ? (JSON.parse(row.body) as T) : null;
@@ -164,7 +191,7 @@ export function createD1Store(db: D1Like, options: AdapterOptions = {}): Store {
       await remove(collection, id).run();
     },
     async query<T extends Doc>(collection: string, query: Query = {}) {
-      const { rows, next } = await runQuery(db, collection, query);
+      const { rows, next } = await runQuery(db, region, collection, query);
       return toPage<T>(rows, next);
     },
     // D1 has no interactive transactions. Reads record the version they saw,
@@ -183,9 +210,16 @@ export function createD1Store(db: D1Like, options: AdapterOptions = {}): Store {
     for (let attempt = 0; attempt < MAX_TRANSACTION_ATTEMPTS; attempt++) {
       const seen = new Map<string, { collection: string; id: string; version: number }>();
       const writes: D1Statement[] = [];
-      const note = (collection: string, id: string, version: number) => seen.set(`${collection}/${id}`, { collection, id, version });
+      // Keep the first version seen. A later read of a changed doc must not hide the change.
+      const note = (collection: string, id: string, version: number) => {
+        if (!seen.has(`${collection}/${id}`)) seen.set(`${collection}/${id}`, { collection, id, version });
+      };
+      const readFirst = () => {
+        if (writes.length > 0) throw new Error("a transaction must read before it writes");
+      };
       const result = await fn({
         async get<T extends Doc>(collection: string, id: string) {
+          readFirst();
           const row = await readRow(collection, id);
           note(collection, id, row?.version ?? 0);
           return row ? (JSON.parse(row.body) as T) : null;
@@ -197,12 +231,14 @@ export function createD1Store(db: D1Like, options: AdapterOptions = {}): Store {
           writes.push(remove(collection, id));
         },
         async query<T extends Doc>(collection: string, query: Query = {}) {
-          const { rows, next } = await runQuery(db, collection, query);
+          readFirst();
+          const { rows, next } = await runQuery(db, region, collection, query);
           for (const row of rows) note(collection, row.id, row.version);
           return toPage<T>(rows, next);
         },
       });
-      if (writes.length === 0) return result;
+      // A read-only transaction still checks its reads, so it sees one moment.
+      if (seen.size === 0 && writes.length === 0) return result;
       const guards = [...seen.values()].map((s) => db.prepare(GUARD).bind(s.collection, s.id, s.version));
       try {
         await db.batch([...guards, ...writes]);
@@ -227,12 +263,17 @@ async function hmacKey(secret: string, usage: "sign" | "verify") {
   return crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [usage]);
 }
 
+function assertSecret(secret: unknown): void {
+  if (typeof secret !== "string" || new TextEncoder().encode(secret).length < 32) throw new Error("the URL secret must be a string of at least 32 bytes");
+}
+
 const signedText = (key: string, method: string, expires: string) => new TextEncoder().encode(`${method}\n${key}\n${expires}`);
 
 export interface R2Options extends AdapterOptions {
+  region: Region;
   /** Where your Worker serves signed blob URLs. Call `verifySignedBlobUrl` there. */
   urlBase: string;
-  /** At least 16 characters. There is no default. */
+  /** At least 32 bytes. There is no default. Use one secret per bucket. */
   urlSecret: string;
 }
 
@@ -241,13 +282,14 @@ export interface R2Options extends AdapterOptions {
  * `signedUrl` makes a URL that your Worker verifies and then serves from the bucket.
  */
 export function createR2Blobs(bucket: R2Like, options: R2Options): Blobs {
-  if (options.urlSecret.length < 16) throw new Error("urlSecret must be at least 16 characters");
+  const region = parseRegion(options.region);
+  assertSecret(options.urlSecret);
   const now = options.now ?? Date.now;
   const need = (key: string) => {
     if (key === "") throw new Error("blob key must not be empty");
   };
   return {
-    region: options.region ?? "eu",
+    region,
     async put(key, data, opts) {
       need(key);
       await bucket.put(key, data, opts?.contentType ? { httpMetadata: { contentType: opts.contentType } } : undefined);
@@ -282,6 +324,8 @@ export async function verifySignedBlobUrl(
   url: string,
   options: { secret: string; now?: () => number },
 ): Promise<{ key: string; method: "GET" | "PUT" } | null> {
+  // A missing secret is a setup error. Throw, so it is never a quiet "invalid URL".
+  assertSecret(options.secret);
   try {
     const params = new URL(url).searchParams;
     const key = params.get("key");
@@ -289,7 +333,7 @@ export async function verifySignedBlobUrl(
     const expires = params.get("expires");
     const sig = params.get("sig");
     if (!key || !expires || !sig || (method !== "GET" && method !== "PUT")) return null;
-    if (!/^[0-9a-f]{64}$/.test(sig) || !(Number(expires) > (options.now ?? Date.now)())) return null;
+    if (!/^[0-9a-f]{64}$/.test(sig) || !/^\d{1,16}$/.test(expires) || !(Number(expires) > (options.now ?? Date.now)())) return null;
     const bytes = Uint8Array.from(sig.match(/../g) as string[], (pair) => Number.parseInt(pair, 16));
     const valid = await crypto.subtle.verify("HMAC", await hmacKey(options.secret, "verify"), bytes, signedText(key, method, expires));
     return valid ? { key, method } : null;
