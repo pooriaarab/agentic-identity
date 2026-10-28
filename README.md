@@ -54,13 +54,20 @@ the principal kind and the whole chain, and hold no email address.
 
 ## Ports
 
-App code talks to ports, not to a vendor. Two ports exist now: `Store` and
-`Blobs`. `Auth`, `Realtime`, `Mail`, and `Queue` come next.
+App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
+`Auth`, `Realtime`, `Mail`, and `Queue`. Each has a memory adapter and a
+contract suite.
 
 - `Store` keeps JSON docs in named collections. It has `get`, `put`, `delete`,
   `query`, and `transaction`. A query takes equality filters, one `orderBy`, a
   `limit`, and a `cursor`. There are no joins, so a Firestore adapter fits.
 - `Blobs` keeps bytes by key. It has `put`, `get`, `delete`, and `signedUrl`.
+- `Auth` reads the credential on a `Request` and returns a principal context, or
+  `null`. `Realtime` issues and verifies room tokens. `createHmacRealtime` signs
+  with HMAC-SHA256 and takes a list of keys: the first signs, all verify, so you
+  can rotate. `Mail` sends one message and refuses a bad address or a header
+  injection. `Queue` sends a JSON body to a topic, with a delay. A handler that
+  throws gets the message again, up to 3 attempts, and then the message is parked.
 - Every adapter takes a `region` option (`"eu"`, `"us"`, or `"unknown"`) and
   exposes it. The default is `"unknown"`. The region is a claim that you make:
   an adapter cannot always see where its data lives. Call

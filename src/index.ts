@@ -1,4 +1,5 @@
 export { VERSION } from "./version.js";
 export * from "./core/principals.js";
 export * from "./ports.js";
-export { createMemoryBlobs, createMemoryStore } from "./adapters/memory.js";
+export { createHmacRealtime } from "./adapters/hmac.js";
+export { createMemoryAuth, createMemoryBlobs, createMemoryMail, createMemoryQueue, createMemoryStore } from "./adapters/memory.js";

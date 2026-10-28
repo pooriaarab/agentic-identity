@@ -1,17 +1,26 @@
 // In-memory adapters for tests and local development. Data is lost on exit.
+import type { PrincipalContext } from "../core/principals.js";
 import {
   DEFAULT_LIMIT,
+  QUEUE_MAX_ATTEMPTS,
   assertCollection,
   assertField,
   assertId,
+  assertMailMessage,
+  assertTopic,
   parseRegion,
   type AdapterOptions,
+  type Auth,
   type BlobObject,
   type Blobs,
   type Doc,
   type Json,
+  type Mail,
+  type MailMessage,
   type Page,
   type Query,
+  type Queue,
+  type QueueHandler,
   type Store,
   type StoreOps,
 } from "../ports.js";
@@ -172,5 +181,87 @@ export function createMemoryBlobs(options: AdapterOptions = {}): Blobs {
       }
       return `memory://blobs/${encodeURIComponent(key)}?method=${method}&expires=${now() + expiresInSeconds * 1000}`;
     },
+  };
+}
+
+/** Credentials live in memory. Use the store-backed adapter for real sign-in. */
+export function createMemoryAuth(options: AdapterOptions = {}) {
+  const now = options.now ?? Date.now;
+  const grants = new Map<string, { context: PrincipalContext; expiresAt?: number }>();
+  const auth: Auth = {
+    async authenticate(request) {
+      const match = /^Bearer ([A-Za-z0-9_-]{1,512})$/.exec(request.headers.get("authorization") ?? "");
+      const found = match ? grants.get(match[1]!) : undefined;
+      return found && (found.expiresAt === undefined || found.expiresAt > now()) ? copy(found.context) : null;
+    },
+  };
+  return {
+    auth,
+    async issue(context: PrincipalContext, opts: { expiresAt?: number } = {}) {
+      const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+      grants.set(token, { context: copy(context), ...(opts.expiresAt === undefined ? {} : { expiresAt: opts.expiresAt }) });
+      return token;
+    },
+    async revoke(credential: string) {
+      grants.delete(credential);
+    },
+  };
+}
+
+export function createMemoryMail(options: AdapterOptions = {}): Mail & { outbox(): MailMessage[] } {
+  const sent: MailMessage[] = [];
+  return {
+    region: options.region === undefined ? "unknown" : parseRegion(options.region),
+    async send(message) {
+      assertMailMessage(message);
+      sent.push(copy(message));
+      return { id: crypto.randomUUID() };
+    },
+    outbox: () => copy(sent),
+  };
+}
+
+interface Pending {
+  topic: string;
+  body: Json;
+  due: number;
+  seq: number;
+  attempt: number;
+}
+
+/** Messages wait in memory until `run()` delivers them. Nothing delivers by itself. */
+export function createMemoryQueue(options: AdapterOptions = {}): Queue & { run(): Promise<void>; dead(topic: string): Json[] } {
+  const now = options.now ?? Date.now;
+  const handlers = new Map<string, QueueHandler>();
+  const parked = new Map<string, Json[]>();
+  let pending: Pending[] = [];
+  let seq = 0;
+  return {
+    region: options.region === undefined ? "unknown" : parseRegion(options.region),
+    async send(topic, body, opts = {}) {
+      assertTopic(topic);
+      const delay = opts.delaySeconds ?? 0;
+      if (!Number.isInteger(delay) || delay < 0 || delay > 86_400) throw new RangeError("delaySeconds must be an integer from 0 to 86400");
+      pending.push({ topic, body: copy(body), due: now() + delay * 1000, seq: seq++, attempt: 1 });
+    },
+    consume(topic, handler) {
+      assertTopic(topic);
+      if (handlers.has(topic)) throw new Error(`topic "${topic}" already has a handler`);
+      handlers.set(topic, handler);
+    },
+    async run() {
+      for (;;) {
+        const due = pending.filter((m) => m.due <= now() && handlers.has(m.topic)).sort((a, b) => a.due - b.due || a.seq - b.seq)[0];
+        if (!due) return;
+        pending = pending.filter((m) => m !== due);
+        try {
+          await handlers.get(due.topic)!(copy(due.body), { attempt: due.attempt });
+        } catch {
+          if (due.attempt >= QUEUE_MAX_ATTEMPTS) parked.set(due.topic, [...(parked.get(due.topic) ?? []), due.body]);
+          else pending.push({ ...due, attempt: due.attempt + 1 });
+        }
+      }
+    },
+    dead: (topic) => copy(parked.get(topic) ?? []),
   };
 }
