@@ -2,7 +2,8 @@
 //   runStoreContract((options) => new MyStore(options));
 // The suites use vitest, an optional peer dependency.
 import { describe, expect, it } from "vitest";
-import type { AdapterOptions, Blobs, Doc, Json, Page, Query, Region, Store, StoreOps } from "./ports.js";
+import type { PrincipalContext } from "./core/principals.js";
+import type { AdapterOptions, Auth, Blobs, Doc, Json, Mail, MailMessage, Page, Query, Queue, Realtime, Region, RoomKey, Store, StoreOps } from "./ports.js";
 
 type Make<T, O = AdapterOptions> = (options: O) => T | Promise<T>;
 
@@ -322,6 +323,261 @@ export function runBlobsContract(make: Make<Blobs>): void {
       for (const expiresInSeconds of [0, -5, 604801, 1.5]) {
         await expect(b.signedUrl("a", { method: "GET", expiresInSeconds })).rejects.toThrow();
       }
+    });
+  });
+}
+
+export interface AuthHarness {
+  auth: Auth;
+  /** Returns a credential for `context`. It stops working at `expiresAt` (epoch ms). */
+  issue(context: PrincipalContext, options?: { expiresAt?: number }): Promise<string>;
+  revoke(credential: string): Promise<void>;
+}
+
+const CONTEXT: PrincipalContext = {
+  principalId: "agent-2",
+  kind: "agent_of_agent",
+  chain: [
+    { id: "human-1", kind: "human" },
+    { id: "agent-1", kind: "agent_of_human" },
+    { id: "agent-2", kind: "agent_of_agent" },
+  ],
+  scopes: ["docs:read"],
+};
+
+export function runAuthContract(make: (options: AdapterOptions) => AuthHarness | Promise<AuthHarness>): void {
+  describe("Auth contract", () => {
+    const bearer = (token: string) => new Request("https://x.test/", { headers: { authorization: `Bearer ${token}` } });
+
+    it("returns the context for a good credential, as a copy", async () => {
+      const h = await make({});
+      const token = await h.issue(CONTEXT);
+      const got = (await h.auth.authenticate(bearer(token)))!;
+      expect(got).toEqual(CONTEXT);
+      expect(token.length).toBeGreaterThanOrEqual(32);
+      got.scopes.push("*:admin");
+      expect(await h.auth.authenticate(bearer(token))).toEqual(CONTEXT);
+    });
+
+    it("returns null, and does not throw, for a missing, wrong, or garbage credential", async () => {
+      const h = await make({});
+      const token = await h.issue(CONTEXT);
+      const headers: (string | undefined)[] = [undefined, "", "Bearer", "Bearer ", "Bearer nope", `Basic ${token}`, `Bearer ${token}x`, `Bearer ${token.slice(1)}`, "Bearer " + "a".repeat(100_000)];
+      for (const value of headers) {
+        const request = new Request("https://x.test/", value === undefined ? {} : { headers: { authorization: value } });
+        expect(await h.auth.authenticate(request)).toBeNull();
+      }
+    });
+
+    it("stops accepting a revoked credential and leaves the others alone", async () => {
+      const h = await make({});
+      const [gone, kept] = [await h.issue(CONTEXT), await h.issue(CONTEXT)];
+      await h.revoke(gone);
+      expect(await h.auth.authenticate(bearer(gone))).toBeNull();
+      expect(await h.auth.authenticate(bearer(kept))).not.toBeNull();
+    });
+
+    it("stops accepting a credential at its expiry time", async () => {
+      let t = 1_000;
+      const h = await make({ now: () => t });
+      const token = await h.issue(CONTEXT, { expiresAt: 2_000 });
+      t = 1_999;
+      expect(await h.auth.authenticate(bearer(token))).not.toBeNull();
+      t = 2_000;
+      expect(await h.auth.authenticate(bearer(token))).toBeNull();
+    });
+  });
+}
+
+export function runRealtimeContract(make: (options: AdapterOptions & { keys: RoomKey[] }) => Realtime | Promise<Realtime>): void {
+  describe("Realtime contract", () => {
+    const [k1, k2] = [{ id: "k1", secret: "first-secret-0123456789" }, { id: "k2", secret: "second-secret-0123456789" }];
+    const grant = { room: "doc:1", principalId: "human-1", access: "write" as const, ttlSeconds: 60 };
+    const swap = (token: string, index: number, text: string) => token.split(".").map((p, i) => (i === index ? text : p)).join(".");
+    const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+
+    it("round-trips a grant and reports the region", async () => {
+      const r = await make({ keys: [k1], now: () => 5_000 });
+      expect(await r.verifyRoomToken(await r.issueRoomToken(grant), "doc:1")).toEqual({
+        room: "doc:1",
+        principalId: "human-1",
+        access: "write",
+        expiresAt: 65_000,
+      });
+      expect(r.region).toBe("unknown");
+    });
+
+    it("rejects another room, a changed payload, a changed signature, and a changed key id", async () => {
+      const r = await make({ keys: [k1, k2] });
+      const token = await r.issueRoomToken(grant);
+      const payload = token.split(".")[1]!;
+      const upgraded = b64({ ...JSON.parse(Buffer.from(payload, "base64url").toString()), access: "write", room: "doc:2" });
+      expect(await r.verifyRoomToken(token, "doc:2")).toBeNull();
+      expect(await r.verifyRoomToken(swap(token, 1, upgraded), "doc:2")).toBeNull();
+      expect(await r.verifyRoomToken(swap(token, 2, "A".repeat(43)), "doc:1")).toBeNull();
+      expect(await r.verifyRoomToken(swap(token, 0, "k2"), "doc:1")).toBeNull();
+    });
+
+    it("rejects a token at its exact expiry time", async () => {
+      let t = 0;
+      const r = await make({ keys: [k1], now: () => t });
+      const token = await r.issueRoomToken(grant);
+      t = 59_999;
+      expect(await r.verifyRoomToken(token, "doc:1")).not.toBeNull();
+      t = 60_000;
+      expect(await r.verifyRoomToken(token, "doc:1")).toBeNull();
+    });
+
+    it("returns null for text that is not a token, and does not throw", async () => {
+      const r = await make({ keys: [k1] });
+      const good = await r.issueRoomToken(grant);
+      for (const text of ["", "a", "a.b", "a.b.c.d", "k1..", "k1.%%%.%%%", "k1.e30.e30", good + ".x", "k1." + "a".repeat(100_000) + ".x"]) {
+        expect(await r.verifyRoomToken(text, "doc:1")).toBeNull();
+      }
+    });
+
+    it("signs with the first key and still accepts the older keys, until they are removed", async () => {
+      const old = await make({ keys: [k1] });
+      const oldToken = await old.issueRoomToken(grant);
+      const rotated = await make({ keys: [k2, k1] });
+      const newToken = await rotated.issueRoomToken(grant);
+      expect(newToken.startsWith("k2.")).toBe(true);
+      expect(await rotated.verifyRoomToken(oldToken, "doc:1")).not.toBeNull();
+      expect(await rotated.verifyRoomToken(newToken, "doc:1")).not.toBeNull();
+      expect(await (await make({ keys: [k2] })).verifyRoomToken(oldToken, "doc:1")).toBeNull();
+      expect(await old.verifyRoomToken(newToken, "doc:1")).toBeNull();
+      const same = await make({ keys: [{ id: "k1", secret: "another-secret-0123456789" }] });
+      expect(await same.verifyRoomToken(oldToken, "doc:1")).toBeNull();
+    });
+
+    it("refuses bad keys and bad lifetimes", async () => {
+      await expect(Promise.resolve().then(() => make({ keys: [] }))).rejects.toThrow();
+      await expect(Promise.resolve().then(() => make({ keys: [{ id: "k1", secret: "short" }] }))).rejects.toThrow();
+      await expect(Promise.resolve().then(() => make({ keys: [{ id: "a.b", secret: k1.secret }] }))).rejects.toThrow();
+      await expect(Promise.resolve().then(() => make({ keys: [k1, { ...k2, id: "k1" }] }))).rejects.toThrow();
+      const r = await make({ keys: [k1] });
+      for (const ttlSeconds of [0, -1, 1.5, 86_401]) await expect(r.issueRoomToken({ ...grant, ttlSeconds })).rejects.toThrow();
+      await expect(r.issueRoomToken({ ...grant, access: "admin" as "write" })).rejects.toThrow();
+      await expect(r.issueRoomToken({ ...grant, room: "" })).rejects.toThrow();
+    });
+  });
+}
+
+export interface MailHarness {
+  mail: Mail;
+  /** Every message the adapter accepted, oldest first. */
+  delivered(): MailMessage[] | Promise<MailMessage[]>;
+}
+
+export function runMailContract(make: (options: AdapterOptions) => MailHarness | Promise<MailHarness>): void {
+  describe("Mail contract", () => {
+    const message: MailMessage = { to: "ana@example.test", subject: "Invite", text: "Open the link." };
+
+    it("delivers a message and gives each send its own id", async () => {
+      const h = await make({});
+      const [a, b] = [await h.mail.send(message), await h.mail.send({ ...message, html: "<p>Open</p>" })];
+      expect(a.id).not.toBe(b.id);
+      expect(await h.delivered()).toEqual([message, { ...message, html: "<p>Open</p>" }]);
+      expect(h.mail.region).toBe("unknown");
+    });
+
+    it("refuses a bad address, a header injection, and an empty or huge body, and sends nothing", async () => {
+      const h = await make({});
+      const bad: Partial<MailMessage>[] = [
+        { to: "" }, { to: "no-at-sign" }, { to: "a@b" }, { to: "a b@example.test" }, { to: "a@example.test,b@example.test" },
+        { to: "a@example.test\r\nBcc: x@example.test" }, { to: "<a@example.test>" },
+        { subject: "" }, { subject: "Hi\r\nBcc: x@example.test" }, { subject: "x".repeat(999) },
+        { text: "" }, { text: "x".repeat(200_001) },
+      ];
+      for (const patch of bad) await expect(h.mail.send({ ...message, ...patch })).rejects.toThrow();
+      expect(await h.delivered()).toEqual([]);
+    });
+  });
+}
+
+export interface QueueHarness {
+  queue: Queue;
+  /** Delivers every message that is due now, retries included, then returns. */
+  run(): Promise<void>;
+  /** Bodies that failed every attempt on `topic`. */
+  dead(topic: string): Json[] | Promise<Json[]>;
+}
+
+export function runQueueContract(make: (options: AdapterOptions) => QueueHarness | Promise<QueueHarness>): void {
+  describe("Queue contract", () => {
+    it("delivers in send order, keeps topics apart, and gives the handler a copy", async () => {
+      const h = await make({});
+      const got: Json[] = [];
+      const other: Json[] = [];
+      h.queue.consume("a", async (body) => void got.push(body));
+      h.queue.consume("b", async (body) => void other.push(body));
+      const body = { n: 1 };
+      await h.queue.send("a", body);
+      body.n = 99;
+      await h.queue.send("b", "x");
+      await h.queue.send("a", 2);
+      await h.run();
+      expect(got).toEqual([{ n: 1 }, 2]);
+      expect(other).toEqual(["x"]);
+    });
+
+    it("holds a message until a handler exists and until its delay has passed", async () => {
+      let t = 0;
+      const h = await make({ now: () => t });
+      const got: Json[] = [];
+      await h.queue.send("a", "early");
+      await h.queue.send("a", "late", { delaySeconds: 10 });
+      await h.run();
+      h.queue.consume("a", async (body) => void got.push(body));
+      await h.run();
+      expect(got).toEqual(["early"]);
+      t = 9_999;
+      await h.run();
+      expect(got).toEqual(["early"]);
+      t = 10_000;
+      await h.run();
+      expect(got).toEqual(["early", "late"]);
+    });
+
+    it("retries a failing handler with a growing attempt number, then parks the message", async () => {
+      const h = await make({});
+      const attempts: number[] = [];
+      h.queue.consume("a", async (_body, meta) => {
+        attempts.push(meta.attempt);
+        throw new Error("boom");
+      });
+      await h.queue.send("a", { id: 1 });
+      await h.run();
+      expect(attempts).toEqual([1, 2, 3]);
+      expect(await h.dead("a")).toEqual([{ id: 1 }]);
+      await h.run();
+      expect(attempts).toEqual([1, 2, 3]);
+    });
+
+    it("stops retrying once a handler succeeds", async () => {
+      const h = await make({});
+      const attempts: number[] = [];
+      h.queue.consume("a", async (_body, meta) => {
+        attempts.push(meta.attempt);
+        if (meta.attempt < 2) throw new Error("once");
+      });
+      await h.queue.send("a", 1);
+      await h.run();
+      expect(attempts).toEqual([1, 2]);
+      expect(await h.dead("a")).toEqual([]);
+    });
+
+    it("refuses a second handler, a bad topic, a bad delay, and a body that is not JSON", async () => {
+      const h = await make({});
+      h.queue.consume("a", async () => {});
+      expect(() => h.queue.consume("a", async () => {})).toThrow();
+      expect(() => h.queue.consume("Bad Topic", async () => {})).toThrow();
+      await expect(h.queue.send("Bad Topic", 1)).rejects.toThrow();
+      for (const delaySeconds of [-1, 1.5, 86_401]) await expect(h.queue.send("a", 1, { delaySeconds })).rejects.toThrow();
+      const loop: Doc = {};
+      loop.self = loop;
+      await expect(h.queue.send("a", loop)).rejects.toThrow();
+      expect(h.queue.region).toBe("unknown");
     });
   });
 }
