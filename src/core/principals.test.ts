@@ -12,6 +12,12 @@
 //  9. Missing parent record.
 // 10. A principal kind with the wrong parent kind.
 // 11. Audit entries keep the principal kind and the whole chain, and no email.
+// Stored data can break the declared types (a JSON store returns what was written):
+// 12. revokedAt or expiresAt that is a string, NaN, Infinity, an object, a boolean: fail closed.
+// 13. A kind outside the five names (a typo, "__proto__"): invalid_chain, no throw.
+// 14. Scopes that are missing or not a list: invalid_chain, no throw.
+// 15. A root stored with parentId null is a root, not an unknown parent.
+// 16. A lookup that returns a record under another id: unknown_principal.
 import { describe, expect, test } from "vitest";
 import {
   MAX_CHAIN_DEPTH,
@@ -185,6 +191,52 @@ describe("resolveChain", () => {
   ] as [string, Principal][])("rejects %s", async (_name, bad) => {
     const result = await resolveChain("p", table(human, agent1, bad), { now: NOW });
     expect(result).toMatchObject({ ok: false, reason: "invalid_chain", at: "p" });
+  });
+
+  test.each([
+    ["an ISO string", "2026-10-01T00:00:00Z"],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["a numeric string", "1"],
+    ["an object", {}],
+    ["a boolean", true],
+  ])("fails closed when revokedAt is %s", async (_name, value) => {
+    const bad = { ...agent1, revokedAt: value } as unknown as Principal;
+    expect(await resolveChain("a2", table(human, bad, agent2), { now: NOW })).toEqual({ ok: false, reason: "invalid_chain", at: "a1" });
+  });
+
+  test.each([
+    ["an ISO string", "2099-10-01T00:00:00Z"],
+    ["NaN", Number.NaN],
+    ["-Infinity", Number.NEGATIVE_INFINITY],
+    ["an array", []],
+  ])("fails closed when expiresAt is %s", async (_name, value) => {
+    const bad = { ...human, expiresAt: value } as unknown as Principal;
+    expect(await resolveChain("a1", table(bad, agent1), { now: NOW })).toEqual({ ok: false, reason: "invalid_chain", at: "h1" });
+  });
+
+  test("treats a null revokedAt or expiresAt as not set", async () => {
+    const nulls = { ...agent1, revokedAt: null, expiresAt: null } as unknown as Principal;
+    expect((await resolveChain("a1", table(human, nulls), { now: NOW })).ok).toBe(true);
+  });
+
+  test.each([
+    ["a typo kind", { id: "p", kind: "robot", parentId: "h1", scopes: [] }],
+    ["a prototype key as kind", { id: "p", kind: "__proto__", parentId: "h1", scopes: [] }],
+    ["missing scopes", { id: "p", kind: "agent_of_human", parentId: "h1" }],
+    ["scopes that are a string", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: "docs:read" }],
+  ] as unknown as [string, Principal][])("returns invalid_chain, and does not throw, for %s", async (_name, bad) => {
+    expect(await resolveChain("p", table(human, bad), { now: NOW })).toMatchObject({ ok: false, reason: "invalid_chain", at: "p" });
+  });
+
+  test("a root stored with a null parentId is a root", async () => {
+    const root = { ...human, parentId: null } as unknown as Principal;
+    expect((await resolveChain("h1", table(root), { now: NOW })).ok).toBe(true);
+  });
+
+  test("a record returned under another id is unknown", async () => {
+    const result = await resolveChain("a1", (id) => (id === "a1" ? { ...agent1, id: "other" } : human), { now: NOW });
+    expect(result).toEqual({ ok: false, reason: "unknown_principal", at: "a1" });
   });
 
   test("does not change the stored principals", async () => {
