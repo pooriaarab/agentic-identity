@@ -111,25 +111,29 @@ export async function resolveChain(
   const maxDepth = options.maxDepth ?? MAX_CHAIN_DEPTH;
   const walk: Principal[] = [];
   const seen = new Set<string>();
-  for (let id: string | undefined = leafId; id !== undefined; id = walk[walk.length - 1]?.parentId) {
+  for (let id: string | null | undefined = leafId; id != null; id = walk[walk.length - 1]?.parentId) {
     if (seen.has(id)) return fail("cycle", id);
     if (walk.length >= maxDepth) return fail("depth_exceeded", id);
     seen.add(id);
     const found = await lookup(id);
-    if (!found) return fail("unknown_principal", id);
+    if (!found || found.id !== id) return fail("unknown_principal", id);
     walk.push(found);
   }
   const chain = walk.reverse();
 
+  // The records come from a JSON store, so check every field the rights depend on.
+  const timeOk = (t: unknown) => t === undefined || t === null || (typeof t === "number" && Number.isFinite(t));
   for (const [i, p] of chain.entries()) {
+    const shapeOk =
+      Object.hasOwn(PARENT_KINDS, p.kind) && Array.isArray(p.scopes) && p.scopes.every((scope) => SCOPE_PATTERN.test(scope)) && timeOk(p.revokedAt) && timeOk(p.expiresAt);
     const allowed = PARENT_KINDS[p.kind];
     const parent = chain[i - 1];
-    const parentOk = allowed.length === 0 ? parent === undefined : parent !== undefined && allowed.includes(parent.kind);
-    if (!parentOk || !p.scopes.every((scope) => SCOPE_PATTERN.test(scope))) return fail("invalid_chain", p.id);
+    const parentOk = shapeOk && (allowed.length === 0 ? parent === undefined : parent !== undefined && allowed.includes(parent.kind));
+    if (!parentOk) return fail("invalid_chain", p.id);
   }
   for (const p of chain) {
-    if (p.revokedAt !== undefined && p.revokedAt <= options.now) return fail("revoked", p.id);
-    if (p.expiresAt !== undefined && p.expiresAt <= options.now) return fail("expired", p.id);
+    if (p.revokedAt != null && p.revokedAt <= options.now) return fail("revoked", p.id);
+    if (p.expiresAt != null && p.expiresAt <= options.now) return fail("expired", p.id);
   }
 
   const scopes = chain.slice(1).reduce((rights, p) => intersectScopes(rights, p.scopes), chain[0]!.scopes);
