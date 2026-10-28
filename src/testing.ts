@@ -182,12 +182,6 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(await two.get("counters", "c")).toEqual({ n: 20 });
     });
 
-    it("keeps stores without a shared name apart", async () => {
-      const [one, two] = [await make({}), await make({})];
-      await one.put("docs", "a", { x: 1 });
-      expect(await two.get("docs", "a")).toBeNull();
-    });
-
     it("runs a transaction again when another store changed a doc it read", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
@@ -200,6 +194,18 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       });
       expect(runs).toBe(2);
       expect(await one.get("docs", "b")).toEqual({ x: 11 });
+    });
+
+    it("runs a read-only transaction again when another store changed a doc it read", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("docs", "a", { x: 1 });
+      const seen: number[] = [];
+      await one.transaction(async (tx) => {
+        seen.push((await tx.get<{ x: number }>("docs", "a"))!.x);
+        if (seen.length === 1) await two.put("docs", "a", { x: 2 });
+      });
+      expect(seen).toEqual([1, 2]);
     });
 
     // A doc that was deleted and made again must not look unchanged.

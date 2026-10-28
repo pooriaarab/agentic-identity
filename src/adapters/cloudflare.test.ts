@@ -6,13 +6,19 @@
 //  2. An expired URL fails, including at the exact expiry time.
 //  3. A URL signed with another secret fails.
 //  4. A URL with missing parts, or text that is not a URL, returns null and does not throw.
-//  5. A short secret is refused when the adapter is built. There is no default secret.
+//  5. A missing, empty, or short secret (under 32 bytes) is refused when the adapter is built
+//     and when a URL is verified. There is no default secret. Bytes count, not characters.
+//  6. A signed expiry that is not plain digits is refused, so one URL decodes one way.
+// The store has its own list:
+//  7. A doc deleted and made again must not look unchanged to a stale transaction.
+//  8. A region is required. A database that reports another region than the one declared is refused.
+//  9. A long text sort value must not break the cursor.
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runBlobsContract, runStoreContract } from "../testing.js";
-import { D1_SCHEMA, createD1Store, createR2Blobs, verifySignedBlobUrl, type D1Like, type R2Like } from "./cloudflare.js";
+import { D1_SCHEMA, createD1Store, createR2Blobs, verifySignedBlobUrl, type D1Like, type D1Statement, type R2Like } from "./cloudflare.js";
 
-const SECRET = "0123456789abcdef-secret";
+const SECRET = "0123456789abcdef0123456789abcdef-secret";
 const URL_BASE = "https://files.example.test/blob";
 
 let mf: Miniflare;
@@ -35,12 +41,12 @@ afterAll(() => mf.dispose());
 
 runStoreContract(async (options) => {
   await db.prepare("DELETE FROM store_docs").run();
-  return createD1Store(db, options);
+  return createD1Store(db, { region: "unknown", ...options });
 });
 
 it("loses no update when two store instances share one database", async () => {
   await db.prepare("DELETE FROM store_docs").run();
-  const [one, two] = [createD1Store(db), createD1Store(db)];
+  const [one, two] = [createD1Store(db, { region: "eu" }), createD1Store(db, { region: "eu" })];
   await one.put("counters", "c", { n: 0 });
   const bump = (store: typeof one) =>
     store.transaction(async (tx) => {
@@ -58,13 +64,13 @@ runBlobsContract((options) => {
     get: (key) => bucket.get(prefix + key),
     delete: (key) => bucket.delete(prefix + key),
   };
-  return createR2Blobs(scoped, { ...options, urlBase: URL_BASE, urlSecret: SECRET });
+  return createR2Blobs(scoped, { region: "unknown", ...options, urlBase: URL_BASE, urlSecret: SECRET });
 });
 
 describe("signed blob URLs", () => {
   const now = () => 1_000_000;
   const sign = (method: "GET" | "PUT" = "GET") =>
-    createR2Blobs({} as R2Like, { now, urlBase: URL_BASE, urlSecret: SECRET }).signedUrl("a b/é.txt", { method, expiresInSeconds: 60 });
+    createR2Blobs({} as R2Like, { region: "eu", now, urlBase: URL_BASE, urlSecret: SECRET }).signedUrl("a b/é.txt", { method, expiresInSeconds: 60 });
   const verify = (url: string, at = now(), secret = SECRET) => verifySignedBlobUrl(url, { secret, now: () => at });
   const change = (url: string, name: string, value: string) => {
     const copy = new URL(url);
@@ -93,14 +99,75 @@ describe("signed blob URLs", () => {
 
   it("rejects another secret, missing parts, and text that is not a URL", async () => {
     const url = await sign();
-    expect(await verify(url, now(), "another-secret-0123456789")).toBeNull();
+    expect(await verify(url, now(), "another-secret-0123456789-0123456789")).toBeNull();
     const bare = new URL(url);
     bare.searchParams.delete("sig");
     expect(await verify(bare.toString())).toBeNull();
     expect(await verify("not a url")).toBeNull();
   });
 
-  it("refuses a short secret", () => {
-    expect(() => createR2Blobs({} as R2Like, { urlBase: URL_BASE, urlSecret: "short" })).toThrow();
+  it("refuses a missing, empty, or short secret to sign and to verify, and counts bytes", async () => {
+    const build = (urlSecret: unknown) => () => createR2Blobs({} as R2Like, { region: "eu", urlBase: URL_BASE, urlSecret: urlSecret as string });
+    for (const secret of [undefined, null, "", "short", "x".repeat(31), 12345]) expect(build(secret)).toThrow();
+    for (const secret of [undefined, null, "", "short", "x".repeat(31), 12345]) {
+      await expect(verifySignedBlobUrl(await sign(), { secret: secret as string, now })).rejects.toThrow();
+    }
+    expect(build("x".repeat(32))).not.toThrow();
+    expect(build("é".repeat(16))).not.toThrow();
+    expect(build("é".repeat(15))).toThrow();
+  });
+
+  it("refuses an expiry that is not plain digits", async () => {
+    const url = await sign();
+    expect(await verify(change(url, "expires", ` ${new URL(url).searchParams.get("expires")}`))).toBeNull();
+    expect(await verify(change(url, "expires", `${new URL(url).searchParams.get("expires")}e0`))).toBeNull();
+  });
+});
+
+describe("the D1 store", () => {
+  it("gives a doc a new version on every write, including after a delete", async () => {
+    await db.prepare("DELETE FROM store_docs").run();
+    const [one, two] = [createD1Store(db, { region: "eu" }), createD1Store(db, { region: "eu" })];
+    await one.put("members", "x", { role: "viewer" });
+    const versions = new Set<number>();
+    for (let i = 0; i < 20; i++) {
+      await two.delete("members", "x");
+      await two.put("members", "x", { role: "viewer" });
+      versions.add((await db.prepare("SELECT version FROM store_docs WHERE id = 'x'").first<{ version: number }>())!.version);
+    }
+    expect(versions.size).toBe(20);
+  });
+
+  it("requires a region and refuses a name that is not a region", () => {
+    expect(() => createD1Store(db, {} as { region: "eu" })).toThrow();
+    expect(() => createD1Store(db, { region: "mars" as "eu" })).toThrow();
+    expect(() => createR2Blobs({} as R2Like, { urlBase: URL_BASE, urlSecret: SECRET } as never)).toThrow();
+  });
+
+  const serving = (served: string | undefined): D1Like => {
+    const wrap = (statement: D1Statement): D1Statement => ({
+      bind: (...values) => wrap(statement.bind(...values)),
+      first: () => statement.first(),
+      run: () => statement.run(),
+      all: async () => ({ ...(await statement.all()), meta: { served_by_region: served } }),
+    });
+    return { prepare: (sql) => wrap(db.prepare(sql)), batch: (statements) => db.batch(statements) };
+  };
+
+  it("refuses a database that serves a query outside the declared region", async () => {
+    await expect(createD1Store(serving("WNAM"), { region: "eu" }).query("docs")).rejects.toThrow();
+    await expect(createD1Store(serving("WEUR"), { region: "us" }).query("docs")).rejects.toThrow();
+    expect((await createD1Store(serving("EEUR"), { region: "eu" }).query("docs")).items).toEqual([]);
+    expect((await createD1Store(serving(undefined), { region: "eu" }).query("docs")).items).toEqual([]);
+  });
+
+  it("pages by a text value too long to spread into call arguments", async () => {
+    await db.prepare("DELETE FROM store_docs").run();
+    const store = createD1Store(db, { region: "eu" });
+    await store.put("long", "a", { t: "a".repeat(300_000) });
+    await store.put("long", "b", { t: "b".repeat(300_000) });
+    const first = await store.query("long", { orderBy: { field: "t" }, limit: 1 });
+    const second = await store.query("long", { orderBy: { field: "t" }, limit: 1, cursor: first.nextCursor });
+    expect([first.items[0]!.id, second.items[0]!.id]).toEqual(["a", "b"]);
   });
 });
