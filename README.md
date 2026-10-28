@@ -81,6 +81,42 @@ import { runStoreContract } from "agentic-identity/testing";
 runStoreContract((options) => new MyStore(options));
 ```
 
+## Cloudflare adapters
+
+`agentic-identity/cloudflare` has a D1 `Store` and an R2 `Blobs`. Both pass the
+contract suites against a real D1 database and R2 bucket under miniflare.
+
+Create the resources in the EU. The adapter cannot move them later. The
+`region` option is required. It states where the resources live, and it is a
+claim that you make. D1 also reports the region that served each query, and the
+store throws when that region disagrees with your claim. R2 reports nothing, so
+its claim is not checked.
+
+```sh
+wrangler d1 create my-db --location weur
+wrangler r2 bucket create my-bucket --jurisdiction eu
+```
+
+```ts
+import { D1_SCHEMA, createD1Store, createR2Blobs, verifySignedBlobUrl } from "agentic-identity/cloudflare";
+
+await env.DB.prepare(D1_SCHEMA).run(); // once, or put it in a migration
+const store = createD1Store(env.DB, { region: "eu" });
+const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.example.org/blob", urlSecret: env.URL_SECRET });
+```
+
+- D1 keeps every doc in one table keyed by collection and id. Filters and
+  ordering read the JSON body. Add an expression index per filtered field on a
+  large collection (see `D1_SCHEMA`).
+- D1 has no interactive transactions. A transaction checks the version of each
+  doc it read and writes in one atomic batch. It runs again when a doc changed.
+  A query inside a transaction guards the docs it returned, not new matches.
+- R2 bindings cannot make presigned URLs. `signedUrl` makes an HMAC URL for your
+  Worker. Call `verifySignedBlobUrl(url, { secret })` there, then serve the key
+  from the bucket. The secret has no default and needs 32 bytes or more. Signing
+  and `verifySignedBlobUrl` both throw when it is missing or short. Use one
+  secret per bucket.
+
 ## Develop
 
 ```sh

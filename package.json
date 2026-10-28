@@ -43,6 +43,10 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/adapters/cloudflare.d.ts",
+      "import": "./dist/adapters/cloudflare.js"
     }
   },
   "scripts": {
@@ -62,6 +66,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "miniflare": "^4.20260730.0",
     "tsup": "^8.0.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
