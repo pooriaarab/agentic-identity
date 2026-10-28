@@ -1,0 +1,64 @@
+{
+  "name": "agentic-identity",
+  "version": "0.0.0",
+  "description": "People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.",
+  "keywords": [
+    "identity",
+    "agents",
+    "delegation",
+    "permissions",
+    "sharing",
+    "invites",
+    "oauth",
+    "api-keys",
+    "audit-log",
+    "mcp",
+    "cloudflare"
+  ],
+  "license": "MIT",
+  "author": "Pooria Arab",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pooriaarab/agentic-identity.git"
+  },
+  "type": "module",
+  "private": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "mcpName": "io.github.pooriaarab/agentic-identity",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "agentic-identity": "./dist/cli.js",
+    "agentic-identity-mcp": "./dist/mcp-bin.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

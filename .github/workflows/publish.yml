@@ -1,0 +1,41 @@
+name: publish
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm run build --if-present
+      - run: npm test --if-present
+      - name: Publish if version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          npm view "$NAME@$VER" version >/dev/null 2>&1 \
+            && echo "already published, skipping" \
+            || npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to ants.land
+        run: |
+          echo "//npm.ants.land/:_authToken=$ANTS_TOKEN" >> "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VER" version --registry https://npm.ants.land >/dev/null 2>&1; then
+            echo "$NAME@$VER on ants.land; skipping."
+          else
+            npm publish --access public --registry https://npm.ants.land
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.ANTS_TOKEN }}
+          ANTS_TOKEN: ${{ secrets.ANTS_TOKEN }}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentic-identity": {
+      "command": "npx",
+      "args": ["-y", "agentic-identity", "mcp"]
+    }
+  }
+}
