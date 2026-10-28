@@ -72,7 +72,10 @@ export async function deletePerson(store: Store, personId: string): Promise<void
   if (typeof user?.email === "string") await remove("invites", await all(store, "invites", { email: user.email }));
   await remove("audit", await many(store, "audit", "principalId", ids));
   await remove("credentials", await many(store, "credentials", "principalId", ids));
-  await Promise.all(principals.filter((p) => typeof p.data.handle === "string").map((p) => store.delete("handles", p.data.handle as string)));
+  // A freed handle can be made again, so an invite to it must go, or its next owner would accept it.
+  const handles = principals.flatMap((p) => (typeof p.data.handle === "string" ? [p.data.handle] : []));
+  await remove("invites", await many(store, "invites", "handle", handles));
+  await Promise.all(handles.map((handle) => store.delete("handles", handle)));
   await Promise.all(principals.map((p) => store.delete("principals", p.id)));
   await store.delete("users", personId);
 }

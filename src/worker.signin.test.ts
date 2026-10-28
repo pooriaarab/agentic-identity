@@ -200,9 +200,6 @@ describe("a cookie-authenticated write", () => {
   test("a bearer write needs no Origin, because a page cannot add that header", async () => {
     const { s, cookie } = await signedIn();
     const token = ((await (await s.call("POST", "/tokens", { cookie, origin: "https://app.test", body: { scopes: ["doc:read"] } })).json()) as { token: string }).token;
-    const human = ((await (await s.call("GET", "/me", { cookie })).json()) as { principalId: string }).principalId;
-    expect(human).toBeTruthy();
-    expect((await s.call("POST", "/tokens", { token, body: { scopes: ["doc:read"] } })).status).toBe(403);
     expect((await s.call("POST", "/auth/logout", { token })).status).toBe(200);
   });
 

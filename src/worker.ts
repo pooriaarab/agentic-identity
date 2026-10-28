@@ -17,17 +17,26 @@ export interface WorkerConfig {
   /** Turns on `POST /test/token`, which makes a new person with narrow rights. For tests only. */
   unsafeTestMint: boolean;
   /** Requests per window. A principal counts at the root of its chain. */
-  rateLimits?: Partial<Record<"principal" | "ip" | "login", RateRule>>;
+  rateLimits?: Partial<Record<"principal" | "ip" | "login" | "loginAll", RateRule>>;
 }
 
 const DEFAULT_LIMITS = {
   principal: { limit: 60, windowMs: 60_000 },
   ip: { limit: 120, windowMs: 60_000 },
   login: { limit: 20, windowMs: 60_000 },
+  /** Sign-in starts for everyone in one flow lifetime. It caps the pending rows. */
+  loginAll: { limit: 600, windowMs: 600_000 },
 };
 
 const FLOW_TTL_MS = 600_000;
 const cookieFlags = { httpOnly: true, secure: true, sameSite: "Lax" } as const;
+
+/** A path on this origin, or `/`. Anything a browser could read as another site gives `/`. */
+function safeReturnTo(to: string, origin: string): string {
+  if (!to.startsWith("/") || to.startsWith("//") || /[\u0000-\u0020\u007f-\u009f\u2028\u2029\\]/.test(to)) return "/";
+  const url = new URL(to, origin);
+  return url.origin === origin ? url.pathname + url.search + url.hash : "/";
+}
 
 class HttpError extends Error {
   constructor(readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503, message: string, readonly retryAfterSeconds?: number) {
@@ -66,13 +75,20 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const ip = c.req.header("cf-connecting-ip") ?? "unknown";
     const path = c.req.path;
     if (isWrite(c) || path.includes("/auth/") || path.endsWith("/access")) await throttle(`ip:${ip}`, limits.ip);
-    if (path.endsWith("/auth/login")) await throttle(`login:${ip}`, limits.login);
+    if (path.endsWith("/auth/login")) {
+      await throttle(`login:${ip}`, limits.login);
+      await throttle("login:all", limits.loginAll);
+    }
     await next();
   });
 
   const authed = (handler: (c: Context, ctx: PrincipalContext) => Promise<Response>) => async (c: Context) => {
     const ctx = await auth.authenticate(c.req.raw);
     if (!ctx) return fail(401, "unauthorized");
+    // A page on another site can make the browser send the session cookie. It cannot set Origin
+    // to ours, and it cannot add an Authorization header.
+    const viaCookie = !/^Bearer [A-Za-z0-9_-]{1,512}$/.test(c.req.header("authorization") ?? "");
+    if (isWrite(c) && viaCookie && (!config.signIn || c.req.header("origin") !== new URL(config.signIn.publicUrl).origin)) return fail(403, "bad origin");
     if (isWrite(c)) await throttle(`principal:${ctx.chain[0]!.id}`, limits.principal);
     return handler(c, ctx);
   };
@@ -95,9 +111,12 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   app.get("/auth/login", async (c) => {
     if (!config.signIn) return fail(404, "sign-in is not configured");
-    const to = c.req.query("returnTo") ?? "/";
+    const returnTo = safeReturnTo(c.req.query("returnTo") ?? "/", new URL(config.signIn.publicUrl).origin);
+    // Rows nobody finished are removed here, oldest first. The global budget caps how many exist.
+    const stale = await store.query("auth_flows", { orderBy: { field: "expiresAt" }, limit: 25 });
+    await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("auth_flows", f.id)));
     const login = await beginLogin(config.signIn.provider, redirectUri, deps.fetch).catch(() => fail(502, "the sign-in provider is not reachable"));
-    await store.put("auth_flows", login.state, { nonce: login.nonce, verifier: login.verifier, returnTo: /^\/(?![/\\])/.test(to) ? to : "/", expiresAt: now() + FLOW_TTL_MS });
+    await store.put("auth_flows", login.state, { nonce: login.nonce, verifier: login.verifier, returnTo, expiresAt: now() + FLOW_TTL_MS });
     setCookie(c, "oidc_flow", login.state, { ...cookieFlags, path: "/api/v1/auth", maxAge: FLOW_TTL_MS / 1000 });
     return c.redirect(login.url, 302);
   });
@@ -112,7 +131,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
       await tx.delete("auth_flows", state);
       return found;
     });
-    if (!flow || (flow.expiresAt as number) <= now()) return fail(400, "bad sign-in state");
+    if (!flow || typeof flow.expiresAt !== "number" || !Number.isFinite(flow.expiresAt) || flow.expiresAt <= now()) return fail(400, "bad sign-in state");
     const { provider } = config.signIn;
     const who = await finishLogin(provider, { redirectUri, code, nonce: flow.nonce as string, verifier: flow.verifier as string, now: now() }, deps.fetch).catch(() => fail(401, "sign-in failed"));
     const id = `u_${(await sha256Hex(`${provider.issuer}|${who.subject}`)).slice(0, 24)}`;
