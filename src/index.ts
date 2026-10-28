@@ -41,7 +41,7 @@ import { VERSION } from "./version.js";
 export const DEFAULT_BRAND: BrandConfig = defineBrand({
   name: "Agentic pack",
   command: "agentic-identity",
-  description: "Canonical scaffold for a CLI plus library plus MCP server pack.",
-  keywords: ["cli", "mcp", "scaffold", "starter", "typescript"],
+  description: "People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.",
+  keywords: ["identity","agents","delegation","permissions","sharing","invites","oauth","api-keys","audit-log","mcp","cloudflare"],
   version: VERSION,
 });
