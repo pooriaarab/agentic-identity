@@ -6,7 +6,8 @@ const pkg = JSON.parse(
 ) as { version: string };
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/testing.ts"],
+  external: ["vitest"],
   format: ["esm"],
   dts: true,
   clean: true,

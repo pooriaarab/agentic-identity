@@ -39,6 +39,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "scripts": {
@@ -47,6 +51,14 @@
     "test": "vitest run",
     "clean": "rm -rf dist",
     "ci:local": "npm run build && npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "vitest": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

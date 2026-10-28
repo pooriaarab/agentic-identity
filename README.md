@@ -52,6 +52,29 @@ when the chain has a cycle or is deeper than `MAX_CHAIN_DEPTH` (5), when a
 parent is missing, or when a kind has the wrong parent kind. Audit entries keep
 the principal kind and the whole chain, and hold no email address.
 
+## Ports
+
+App code talks to ports, not to a vendor. Two ports exist now: `Store` and
+`Blobs`. `Auth`, `Realtime`, `Mail`, and `Queue` come next.
+
+- `Store` keeps JSON docs in named collections. It has `get`, `put`, `delete`,
+  `query`, and `transaction`. A query takes equality filters, one `orderBy`, a
+  `limit`, and a `cursor`. There are no joins, so a Firestore adapter fits.
+- `Blobs` keeps bytes by key. It has `put`, `get`, `delete`, and `signedUrl`.
+- Every adapter takes a `region` option and exposes it. The default is `"eu"`.
+  Call `assertRegion("eu", store, blobs)` at start-up to fail when an adapter
+  keeps data elsewhere.
+
+`createMemoryStore` and `createMemoryBlobs` are for tests and local work. They
+lose data on exit. To write an adapter, run the contract suites against it. They
+use `vitest`, an optional peer dependency.
+
+```ts
+import { runStoreContract } from "agentic-identity/testing";
+
+runStoreContract((options) => new MyStore(options));
+```
+
 ## Develop
 
 ```sh
