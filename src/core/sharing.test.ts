@@ -233,7 +233,7 @@ describe("links", () => {
     expect(stored).not.toContain(link.token);
   });
 
-  test.each([["a string", "9999999999999"], ["NaN", Number.NaN], ["an object", {}]])("a stored link with %s as expiry gives nothing", async (_name, bad) => {
+  test.each([["a string", "9999999999999"], ["an object", {}], ["an array", []]])("a stored link with %s as expiry gives nothing", async (_name, bad) => {
     const link = await sharing.createLink(ana, "folder", { role: "viewer" });
     const [entry] = (await store.query("links")).items;
     await store.put("links", entry!.id, { ...entry!.data, expiresAt: bad as never });

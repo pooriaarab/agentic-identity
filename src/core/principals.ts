@@ -155,16 +155,17 @@ export interface AuditEntry {
   resourceId?: string;
   outcome: "allowed" | "denied";
   principalId: string;
-  /** Kept on every entry so agent actions are labeled. */
-  principalKind: PrincipalKind;
+  /** Kept on every entry so agent actions are labeled. `anonymous` is a share-link visitor. */
+  principalKind: PrincipalKind | "anonymous";
   chain: ChainStep[];
   machineMade: boolean;
 }
 
 export function auditEntry(
-  context: PrincipalContext,
+  context: PrincipalContext | null,
   event: { id: string; at: number; action: string; resourceId?: string; outcome: "allowed" | "denied" },
 ): AuditEntry {
+  if (context === null) return { ...event, principalId: "anonymous", principalKind: "anonymous", chain: [], machineMade: false };
   return {
     ...event,
     principalId: context.principalId,
