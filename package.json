@@ -41,10 +41,6 @@
       "import": "./dist/index.js"
     }
   },
-  "bin": {
-    "agentic-identity": "./dist/cli.js",
-    "agentic-identity-mcp": "./dist/mcp-bin.js"
-  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",

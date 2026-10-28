@@ -2,14 +2,9 @@
 
 People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
 
-Keywords: identity,agents,delegation,permissions,sharing,invites,oauth,api-keys,audit-log,mcp,cloudflare.
-
-- SDK: import { summarizeText, dispatchText } from "agentic-identity".
-- CLI: agentic-identity summary --text "...".
-- MCP: run agentic-identity mcp, then call summarize_text.
+Status: in development. The package exports VERSION only.
 
 ## Docs
 
 - README: https://github.com/pooriaarab/agentic-identity
-- Core contract: https://github.com/pooriaarab/agentic-identity/blob/main/docs/agentic-core.md
 - License: MIT
