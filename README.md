@@ -84,6 +84,20 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
   a machine label, and holds no email address. Grants, invites, and links do not
   write audit entries yet.
 
+## Worker API
+
+`agentic-identity/worker` is a Hono Worker under `/api/v1`, with data in D1. Create
+the database with `--location weur`, and set `REGION` to say so. Send a key as
+`Authorization: Bearer <key>`.
+
+- `POST /agents`, `/tokens`, and `/delegations` make an agent key, a personal
+  token, and a grant. A key is shown once, and the store keeps only its hash.
+  Scopes can only narrow, and a grant can expire.
+- `DELETE /principals/:id` revokes it, and every key below it stops at once.
+- `/resources`, `/grants`, `/invites`, `/links`, `/access`, and `/audit` expose sharing.
+- `POST /test/token` signs anyone in. It answers 404 unless `ALLOW_TEST_TOKEN_MINT=1`.
+- Sign-in with OpenID Connect is not in yet.
+
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
