@@ -55,6 +55,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
   }
 
   async function decide(ctx: PrincipalContext | null, action: Action, id: string, linkToken?: string): Promise<Decision> {
+    if (!Object.hasOwn(NEEDS, action)) return { allowed: false };
     const found = await pathOf(id);
     if (!found || (ctx && !hasScope(ctx.scopes, `${found.type}:${action}`))) return { allowed: false };
     let best = -1;
@@ -63,7 +64,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       best = Math.max(best, rank((await store.get("grants", `${folder}:${subject}`))?.role));
     }
     if (linkToken !== undefined) best = Math.max(best, rank(await linkRole(linkToken, found.path, ctx !== null)));
-    return best >= rank(NEEDS[action]) ? { allowed: true, role: ROLES[best] as Role } : { allowed: false, ...(best >= 0 ? { role: ROLES[best] as Role } : {}) };
+    return best >= 0 && best >= rank(NEEDS[action]) ? { allowed: true, role: ROLES[best] as Role } : { allowed: false, ...(best >= 0 ? { role: ROLES[best] as Role } : {}) };
   }
 
   const requireAdmin = async (ctx: PrincipalContext, id: string) => {
@@ -71,6 +72,16 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
   };
   const assertRole = (role: unknown, allowed: readonly Role[] = ROLES) => {
     if (!allowed.includes(role as Role)) throw new Error(`invalid role "${String(role)}"`);
+  };
+  // A time that JSON cannot hold (NaN, Infinity) would be stored as null, and null means never expires.
+  const safeTime = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  const futureTime = (value: unknown): number => {
+    if (!safeTime(value) || (value as number) <= now()) throw new Error("expiresAt must be a whole time in the future");
+    return value as number;
+  };
+  const lifetime = (ms: unknown): number => {
+    if (!safeTime(ms) || !safeTime(now() + (ms as number))) throw new Error("expiresInMs must be a whole number of milliseconds above 0");
+    return now() + (ms as number);
   };
   const putGrant = (tx: Pick<Store, "put">, resourceId: string, subjectId: string, role: Role) =>
     tx.put("grants", `${resourceId}:${subjectId}`, { resourceId, subjectId, role });
@@ -110,12 +121,13 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       assertRole(input.role, linkRoles);
       if ((input.email === undefined) === (input.handle === undefined)) throw new Error("give an email or a handle");
       if (input.email !== undefined && !/^[^\s@]+@[^\s@]+$/.test(input.email)) throw new Error("invalid email");
+      const expiresAt = input.expiresInMs === undefined ? undefined : lifetime(input.expiresInMs);
       await requireAdmin(ctx, resourceId);
       const id = crypto.randomUUID();
       await store.put("invites", id, {
         id, resourceId, role: input.role, createdBy: ctx.principalId,
         ...(input.email === undefined ? { handle: input.handle as string } : { email: input.email.toLowerCase() }),
-        ...(input.expiresInMs === undefined ? {} : { expiresAt: now() + input.expiresInMs }),
+        ...(expiresAt === undefined ? {} : { expiresAt }),
       });
       return { id };
     },
@@ -138,11 +150,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     /** The token is returned once. Only its hash is stored. */
     async createLink(ctx: PrincipalContext, resourceId: string, input: { role: Role; expiresAt?: number; signedInOnly?: boolean }) {
       assertRole(input.role, linkRoles);
+      const expiresAt = input.expiresAt === undefined ? undefined : futureTime(input.expiresAt);
       await requireAdmin(ctx, resourceId);
       const [id, token] = [crypto.randomUUID(), randomToken()];
       await store.put("links", id, {
         id, resourceId, role: input.role, tokenHash: await sha256(token), signedInOnly: input.signedInOnly === true,
-        ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+        ...(expiresAt === undefined ? {} : { expiresAt }),
       });
       return { id, token };
     },
@@ -158,7 +171,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     async can(ctx: PrincipalContext | null, action: Action, resourceId: string, opts: { linkToken?: string } = {}): Promise<Decision> {
       const decision = await decide(ctx, action, resourceId, opts.linkToken);
       const id = crypto.randomUUID();
-      const entry = auditEntry(ctx, { id, at: now(), action, resourceId, outcome: decision.allowed ? "allowed" : "denied" });
+      const entry = auditEntry(ctx, { id, at: now(), action: Object.hasOwn(NEEDS, action) ? action : "invalid", resourceId, outcome: decision.allowed ? "allowed" : "denied" });
       await store.put("audit", id, entry as unknown as Doc);
       return decision;
     },
