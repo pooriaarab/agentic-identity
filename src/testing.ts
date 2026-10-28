@@ -3,7 +3,7 @@
 // The suites use vitest, an optional peer dependency.
 import { describe, expect, it } from "vitest";
 import type { PrincipalContext } from "./core/principals.js";
-import type { AdapterOptions, Auth, Blobs, Doc, Json, Mail, MailMessage, Page, Query, Queue, Realtime, Region, RoomKey, Store, StoreOps } from "./ports.js";
+import { StoreConflictError, type AdapterOptions, type Auth, type Blobs, type Doc, type Json, type Mail, type MailMessage, type Page, type Query, type Queue, type Realtime, type Region, type RoomKey, type Store, type StoreOps } from "./ports.js";
 
 type Make<T, O = AdapterOptions> = (options: O) => T | Promise<T>;
 
@@ -250,6 +250,55 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(await s.get("docs", "new")).toBeNull();
     });
 
+    // A doc id is how an app keeps a name unique, so two stores must not both claim it.
+    it("lets only one of two stores claim the same doc id at the same time", async () => {
+      for (let round = 0; round < 10; round++) {
+        const shared = crypto.randomUUID();
+        const [one, two] = [await make({ shared }), await make({ shared })];
+        const claim = (store: Store, by: string) =>
+          store.transaction(async (tx) => {
+            if (await tx.get("names", "folder-1:report")) return false;
+            await tx.put("names", "folder-1:report", { by });
+            await tx.put("nodes", by, { name: "report" });
+            return true;
+          });
+        const won = await Promise.all([claim(one, "a"), claim(two, "b"), claim(one, "c"), claim(two, "d")]);
+        expect(won.filter(Boolean)).toHaveLength(1);
+        expect((await one.query("nodes")).items).toHaveLength(1);
+      }
+    });
+
+    // The read-modify-write of one doc, with the work done between the read and the write.
+    it("keeps a read-modify-write of one doc whole when another store edits it in between", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("decks", "d", { parts: [] });
+      const add = (store: Store, part: string) =>
+        store.transaction(async (tx) => {
+          const deck = (await tx.get<{ parts: string[] }>("decks", "d"))!;
+          await new Promise((r) => setTimeout(r, 5));
+          await tx.put("decks", "d", { parts: [...deck.parts, part] });
+        });
+      await Promise.all(["a", "b", "c", "d", "e", "f"].map((part, i) => add(i % 2 === 0 ? one : two, part)));
+      expect(((await one.get<{ parts: string[] }>("decks", "d"))!.parts).sort()).toEqual(["a", "b", "c", "d", "e", "f"]);
+    });
+
+    it("throws StoreConflictError when the data keeps changing, and writes nothing", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("counters", "k", { v: 0 });
+      let runs = 0;
+      await expect(
+        one.transaction(async (tx) => {
+          await tx.get("counters", "k");
+          await two.put("counters", "k", { v: ++runs });
+          await tx.put("counters", "out", { v: 1 });
+        }),
+      ).rejects.toBeInstanceOf(StoreConflictError);
+      expect(await one.get("counters", "out")).toBeNull();
+      expect(runs).toBeGreaterThan(1);
+    });
+
     it("allows reads before writes, and many writes after the reads", async () => {
       const s = await make({});
       await s.put("docs", "a", { x: 1 });
@@ -272,9 +321,105 @@ const bump = (store: Store) =>
     await tx.put("counters", "c", { n: doc.n + 1 });
   });
 
-export function runBlobsContract(make: Make<Blobs>): void {
+export function runBlobsContract(make: Make<Blobs, StoreOptions>): void {
   describe("Blobs contract", () => {
     regionTests(make);
+
+    it("gives every object a version on put, get, and head, and head holds no data", async () => {
+      const b = await make({});
+      const put = (await b.put("k", Uint8Array.of(1, 2, 3), { contentType: "text/plain" }))!;
+      expect(typeof put.version).toBe("string");
+      expect(put.version).not.toBe("");
+      expect((await b.get("k"))!.version).toBe(put.version);
+      const head = (await b.head("k"))!;
+      expect(head).toEqual({ size: 3, contentType: "text/plain", version: put.version });
+      expect(head).not.toHaveProperty("data");
+      expect(await b.head("missing")).toBeNull();
+      const next = (await b.put("k", Uint8Array.of(9)))!;
+      expect(next.version).not.toBe(put.version);
+    });
+
+    it("writes with ifNoneMatch only when the key is absent", async () => {
+      const b = await make({});
+      expect(await b.put("k", Uint8Array.of(1), { ifNoneMatch: "*", contentType: "text/plain" })).not.toBeNull();
+      expect(await b.put("k", Uint8Array.of(2), { ifNoneMatch: "*", contentType: "text/html" })).toBeNull();
+      const kept = (await b.get("k"))!;
+      expect([...kept.data, kept.contentType]).toEqual([1, "text/plain"]);
+      await b.delete("k");
+      expect(await b.put("k", Uint8Array.of(3), { ifNoneMatch: "*" })).not.toBeNull();
+    });
+
+    it("writes with ifMatch only when the version is the current one", async () => {
+      const b = await make({});
+      expect(await b.put("k", Uint8Array.of(1), { ifMatch: "anything" })).toBeNull();
+      expect(await b.get("k")).toBeNull();
+      const v1 = (await b.put("k", Uint8Array.of(1), { contentType: "text/plain" }))!.version;
+      const v2 = (await b.put("k", Uint8Array.of(2), { ifMatch: v1 }))!.version;
+      expect(v2).not.toBe(v1);
+      expect(await b.put("k", Uint8Array.of(3), { ifMatch: v1, contentType: "text/html" })).toBeNull();
+      const kept = (await b.get("k"))!;
+      expect([...kept.data, kept.version]).toEqual([2, v2]);
+      expect(kept.contentType).toBeUndefined();
+      await b.delete("k");
+      expect(await b.put("k", Uint8Array.of(4), { ifMatch: v2 })).toBeNull();
+      expect(await b.get("k")).toBeNull();
+    });
+
+    it("refuses a bad condition before it writes", async () => {
+      const b = await make({});
+      const bad: unknown[] = [{ ifMatch: "" }, { ifMatch: 1 }, { ifMatch: null }, { ifNoneMatch: "x" }, { ifNoneMatch: "" }, { ifMatch: "v", ifNoneMatch: "*" }];
+      for (const options of bad) await expect(b.put("k", Uint8Array.of(1), options as never)).rejects.toThrow();
+      expect(await b.get("k")).toBeNull();
+    });
+
+    // Two instances on one backend, as two Worker isolates on one bucket.
+    it("lets only one of two instances create a key at the same time", async () => {
+      for (let round = 0; round < 5; round++) {
+        const shared = crypto.randomUUID();
+        const [one, two] = [await make({ shared }), await make({ shared })];
+        const results = await Promise.all([one, two, one, two].map((b, i) => b.put("k", Uint8Array.of(i), { ifNoneMatch: "*" })));
+        expect(results.filter((r) => r !== null)).toHaveLength(1);
+      }
+    });
+
+    it("loses no update when two instances run a compare-and-swap loop on one key", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("counter", Uint8Array.of(0));
+      const bump = async (b: Blobs) => {
+        for (let tries = 0; tries < 100; tries++) {
+          const current = (await b.get("counter"))!;
+          if (await b.put("counter", Uint8Array.of(current.data[0]! + 1), { ifMatch: current.version })) return;
+        }
+        throw new Error("could not win a write in 100 tries");
+      };
+      await Promise.all(Array.from({ length: 12 }, (_, i) => bump(i % 2 === 0 ? one : two)));
+      expect((await one.get("counter"))!.data[0]).toBe(12);
+    });
+
+    it("signs the response headers into a download URL", async () => {
+      const b = await make({});
+      const get = (extra: object = {}) => b.signedUrl("a", { method: "GET", expiresInSeconds: 60, ...extra });
+      const urls = await Promise.all([
+        get(),
+        get({ responseContentDisposition: "attachment" }),
+        get({ responseContentDisposition: 'attachment; filename="a.csv"' }),
+        get({ responseContentType: "text/csv" }),
+        get({ responseContentType: "text/csv; charset=utf-8" }),
+        get({ responseContentDisposition: "attachment", responseContentType: "text/csv" }),
+      ]);
+      expect(new Set(urls).size).toBe(6);
+    });
+
+    it("refuses a response header that could split the response or is not a header value", async () => {
+      const b = await make({});
+      const sign = (extra: object) => b.signedUrl("a", { method: "GET", expiresInSeconds: 60, ...extra });
+      const disposition = ["", "attachment\r\nSet-Cookie: x=1", "attachment\n", "a\u0000b", "attachment; filename=é", "x".repeat(1025), 5];
+      const type = ["", "text", "text/csv\r\nX: y", "text/csv\u0000", "/csv", "text/", "x/".concat("y".repeat(300)), 5];
+      for (const responseContentDisposition of disposition) await expect(sign({ responseContentDisposition })).rejects.toThrow();
+      for (const responseContentType of type) await expect(sign({ responseContentType })).rejects.toThrow();
+      await expect(b.signedUrl("a", { method: "PUT", expiresInSeconds: 60, responseContentType: "text/csv" })).rejects.toThrow();
+    });
 
     it("returns null for a missing key, deletes a key, and accepts a delete of a missing one", async () => {
       const b = await make({});
