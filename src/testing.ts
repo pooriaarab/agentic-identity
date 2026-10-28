@@ -391,7 +391,7 @@ export function runAuthContract(make: (options: AdapterOptions) => AuthHarness |
 
 export function runRealtimeContract(make: (options: AdapterOptions & { keys: RoomKey[] }) => Realtime | Promise<Realtime>): void {
   describe("Realtime contract", () => {
-    const [k1, k2] = [{ id: "k1", secret: "first-secret-0123456789" }, { id: "k2", secret: "second-secret-0123456789" }];
+    const [k1, k2] = [{ id: "k1", secret: "first-secret-0123456789-0123456789" }, { id: "k2", secret: "second-secret-0123456789-0123456789" }];
     const grant = { room: "doc:1", principalId: "human-1", access: "write" as const, ttlSeconds: 60 };
     const swap = (token: string, index: number, text: string) => token.split(".").map((p, i) => (i === index ? text : p)).join(".");
     const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -446,8 +446,14 @@ export function runRealtimeContract(make: (options: AdapterOptions & { keys: Roo
       expect(await rotated.verifyRoomToken(newToken, "doc:1")).not.toBeNull();
       expect(await (await make({ keys: [k2] })).verifyRoomToken(oldToken, "doc:1")).toBeNull();
       expect(await old.verifyRoomToken(newToken, "doc:1")).toBeNull();
-      const same = await make({ keys: [{ id: "k1", secret: "another-secret-0123456789" }] });
+      const same = await make({ keys: [{ id: "k1", secret: "another-secret-0123456789-0123456789" }] });
       expect(await same.verifyRoomToken(oldToken, "doc:1")).toBeNull();
+    });
+
+    it("refuses a room key secret under 32 bytes, counting bytes and not characters", async () => {
+      const refuse = (secret: unknown) => expect(Promise.resolve().then(() => make({ keys: [{ id: "k1", secret: secret as string }] }))).rejects.toThrow();
+      for (const secret of ["", "a".repeat(16), "a".repeat(31), "é".repeat(15), undefined, null, 32, new Uint8Array(32)]) await refuse(secret);
+      for (const secret of ["a".repeat(32), "é".repeat(16), "🔑".repeat(8)]) expect(await make({ keys: [{ id: "k1", secret }] })).toBeDefined();
     });
 
     it("refuses bad keys and bad lifetimes", async () => {
