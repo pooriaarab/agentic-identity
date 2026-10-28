@@ -5,14 +5,23 @@ import { ACTIONS, hasScope, parseScope, type Principal, type PrincipalContext, t
 import { createSharing, type Role } from "./core/sharing.js";
 import { createStoreAuth, issueCredential, randomToken } from "./credentials.js";
 import { parseRegion, type Store } from "./ports.js";
+import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
-  /** Turns on `POST /test/token`, which signs anyone in. For tests only. */
-  allowTestTokenMint: boolean;
+  /** Turns on `POST /test/token`, which makes a new person with narrow rights. For tests only. */
+  unsafeTestMint: boolean;
+  /** Requests per window. A principal counts at the root of its chain. */
+  rateLimits?: Partial<Record<"principal" | "ip" | "login", RateRule>>;
 }
 
+const DEFAULT_LIMITS = {
+  principal: { limit: 60, windowMs: 60_000 },
+  ip: { limit: 120, windowMs: 60_000 },
+  login: { limit: 20, windowMs: 60_000 },
+};
+
 class HttpError extends Error {
-  constructor(readonly status: 400 | 401 | 403 | 404 | 409, message: string) {
+  constructor(readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503, message: string, readonly retryAfterSeconds?: number) {
     super(message);
   }
 }
@@ -20,20 +29,40 @@ const fail = (status: HttpError["status"], message: string): never => {
   throw new HttpError(status, message);
 };
 
-export function createApp(deps: { store: Store; config: WorkerConfig; now?: () => number }) {
+export function createApp(deps: { store: Store; config: WorkerConfig; now?: () => number; limiter?: RateLimiter }) {
   const { store, config } = deps;
   const now = deps.now ?? Date.now;
   const auth = createStoreAuth(store, { now });
   const app = new Hono().basePath("/api/v1");
+  const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
+  const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
 
   app.onError((error, c) => {
-    if (error instanceof HttpError) return c.json({ error: error.message }, error.status);
+    if (error instanceof HttpError) return c.json({ error: error.message }, error.status, error.retryAfterSeconds === undefined ? {} : { "retry-after": String(error.retryAfterSeconds) });
     return c.json({ error: error.message === "forbidden" ? "forbidden" : "bad request" }, error.message === "forbidden" ? 403 : 400);
+  });
+
+  // A call over its budget does nothing. A limiter that cannot count denies.
+  const throttle = async (key: string, rule: RateRule) => {
+    const result = await limiter.hit(key, rule).catch(() => fail(503, "try again later"));
+    if (!result.allowed) throw new HttpError(429, "too many requests", Math.ceil(result.retryAfterMs / 1000));
+  };
+  const isWrite = (c: Context) => c.req.method !== "GET" && c.req.method !== "HEAD";
+
+  // Writes, sign-in, and the anonymous access check each cost a row. Count them by IP.
+  app.use("*", async (c, next) => {
+    const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+    const path = c.req.path;
+    if (isWrite(c) || path.includes("/auth/") || path.endsWith("/access")) await throttle(`ip:${ip}`, limits.ip);
+    if (path.endsWith("/auth/login")) await throttle(`login:${ip}`, limits.login);
+    await next();
   });
 
   const authed = (handler: (c: Context, ctx: PrincipalContext) => Promise<Response>) => async (c: Context) => {
     const ctx = await auth.authenticate(c.req.raw);
-    return ctx ? handler(c, ctx) : fail(401, "unauthorized");
+    if (!ctx) return fail(401, "unauthorized");
+    if (isWrite(c)) await throttle(`principal:${ctx.chain[0]!.id}`, limits.principal);
+    return handler(c, ctx);
   };
   const body = async (c: Context) => (await c.req.json().catch(() => fail(400, "body must be JSON"))) as Record<string, unknown>;
   const scopesOf = (value: unknown): Scope[] => {
@@ -54,14 +83,23 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   app.get("/me", authed(async (c, ctx) => c.json({ principalId: ctx.principalId, kind: ctx.kind, chain: ctx.chain, scopes: ctx.scopes })));
 
+  // A new person with narrow rights. It never touches a principal or a user that exists,
+  // and it never marks an email as verified.
   app.post("/test/token", async (c) => {
-    if (!config.allowTestTokenMint) return fail(404, "not found");
-    const userId = String((await body(c)).userId ?? "");
+    if (!config.unsafeTestMint) return fail(404, "not found");
+    const input = await body(c);
+    const userId = String(input.userId ?? "");
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId)) return fail(400, "bad userId");
-    await store.put("principals", userId, { id: userId, kind: "human", scopes: ["*:admin"] });
-    const email = (await body(c)).email;
-    if (typeof email === "string") await store.put("users", userId, { id: userId, email: email.toLowerCase(), emailVerified: true });
-    return c.json({ token: await issueCredential(store, { principalId: userId, kind: "session", expiresAt: now() + 3_600_000 }) });
+    const scopes = input.scopes === undefined ? ["doc:admin"] : scopesOf(input.scopes);
+    if (scopes.length === 0 || scopes.includes("*:admin")) return fail(400, "bad scopes");
+    const email = typeof input.email === "string" ? input.email.toLowerCase() : undefined;
+    const token = await store.transaction(async (tx) => {
+      if ((await tx.get("principals", userId)) || (await tx.get("users", userId))) return fail(409, "that id exists");
+      await tx.put("principals", userId, { id: userId, kind: "human", scopes });
+      if (email !== undefined) await tx.put("users", userId, { id: userId, email, emailVerified: false });
+      return issueCredential(tx, { principalId: userId, kind: "session", expiresAt: now() + 3_600_000 });
+    });
+    return c.json({ token });
   });
 
   // An agent with its own identity. Only a person makes one. The key is shown once.
@@ -71,6 +109,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const handle = String(input.handle ?? "");
     if (!/^[a-z][a-z0-9_-]{1,31}$/.test(handle)) return fail(400, "bad handle");
     const scopes = scopesOf(input.scopes);
+    if (!scopes.every((scope) => hasScope(ctx.scopes, scope))) return fail(403, "scopes exceed your own");
     const agent = await store.transaction(async (tx) => {
       if (await tx.get("handles", handle)) return fail(409, "handle taken");
       const made = { id: `p_${randomToken(12)}`, kind: "agent", scopes, handle, ownerId: ctx.principalId };
@@ -179,16 +218,40 @@ interface Env {
   DB: D1Like;
   /** `eu`, `us`, or `unknown`. A claim about where the database lives. */
   REGION: string;
-  ALLOW_TEST_TOKEN_MINT?: string;
+  PUBLIC_URL?: string;
+  IDENTITY_UNSAFE_TEST_MINT?: string;
+}
+
+/** The test mint signs people in with no check. A config that names a region or an https URL is a real one. */
+export function unsafeMintEnvError(env: Pick<Env, "REGION" | "PUBLIC_URL" | "IDENTITY_UNSAFE_TEST_MINT">): string | null {
+  if (env.IDENTITY_UNSAFE_TEST_MINT !== "1") return null;
+  const refuse = (why: string) => `IDENTITY_UNSAFE_TEST_MINT=1 is for tests only and ${why}`;
+  if (env.REGION !== "unknown") return refuse("needs REGION=unknown");
+  try {
+    if (env.PUBLIC_URL && new URL(env.PUBLIC_URL).protocol === "https:") return refuse("cannot run with an https PUBLIC_URL");
+  } catch {
+    return refuse("needs a valid PUBLIC_URL, or none");
+  }
+  return null;
 }
 
 let schema: Promise<unknown> | undefined;
+let warned = false;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    schema ??= env.DB.prepare(D1_SCHEMA).run();
+    const unsafe = unsafeMintEnvError(env);
+    if (unsafe) throw new Error(unsafe);
+    if (env.IDENTITY_UNSAFE_TEST_MINT === "1" && !warned) {
+      warned = true;
+      console.warn("IDENTITY_UNSAFE_TEST_MINT=1: POST /test/token signs in a new person with no check. Use it for tests only.");
+    }
+    schema ??= env.DB.prepare(D1_SCHEMA).run().catch((error) => {
+      schema = undefined;
+      throw error;
+    });
     await schema;
-    const config = { allowTestTokenMint: env.ALLOW_TEST_TOKEN_MINT === "1" };
+    const config = { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1" };
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config }).fetch(request);
   },
 };

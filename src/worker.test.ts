@@ -15,9 +15,9 @@ import { runAuthContract } from "./testing.js";
 import { createApp } from "./worker.js";
 let t = 1_000_000_000;
 
-async function setup(extra: { allowTestTokenMint?: boolean } = {}) {
+async function setup(extra: { unsafeTestMint?: boolean } = {}) {
   const store = createMemoryStore();
-  const app = createApp({ store, now: () => t, config: { allowTestTokenMint: false, ...extra } });
+  const app = createApp({ store, now: () => t, config: { unsafeTestMint: false, ...extra } });
   const call = (method: string, path: string, opts: { token?: string; body?: unknown } = {}) =>
     app.request(`/api/v1${path}`, {
       method,
@@ -31,7 +31,7 @@ async function setup(extra: { allowTestTokenMint?: boolean } = {}) {
 describe("test mint", () => {
   test("is off unless the flag is on", async () => {
     expect((await (await setup()).call("POST", "/test/token", { body: { userId: "x" } })).status).toBe(404);
-    const on = await setup({ allowTestTokenMint: true });
+    const on = await setup({ unsafeTestMint: true });
     expect((await on.call("POST", "/test/token", { body: { userId: "x" } })).status).toBe(200);
   });
 });
@@ -40,7 +40,7 @@ describe("keys and delegation", () => {
   const post = (s: Awaited<ReturnType<typeof setup>>, token: string, path: string, body: unknown) => s.call("POST", path, { token, body });
   const json = async (res: Response) => (await res.json()) as Record<string, string>;
   async function world() {
-    const s = await setup({ allowTestTokenMint: true });
+    const s = await setup({ unsafeTestMint: true });
     return { s, ana: await s.mint("ana"), bo: await s.mint("bo") };
   }
 
@@ -109,7 +109,7 @@ describe("sharing over HTTP", () => {
   };
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
   async function world() {
-    const s = await setup({ allowTestTokenMint: true });
+    const s = await setup({ unsafeTestMint: true });
     const [ana, bo] = [await s.mint("ana"), await s.mint("bo")];
     await s.call("POST", "/resources", { token: ana, body: { id: "plan", type: "doc" } });
     return { s, ana, bo };
@@ -146,13 +146,14 @@ describe("sharing over HTTP", () => {
 
   test("an invite reaches only the matching handle or verified email", async () => {
     const { s, ana, bo } = await world();
-    const agent = await json(await s.call("POST", "/agents", { token: bo, body: { handle: "scribe", scopes: ["*:read"] } }));
+    const agent = await json(await s.call("POST", "/agents", { token: bo, body: { handle: "scribe", scopes: ["doc:read"] } }));
     const byHandle = await json(await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", handle: "scribe" } }));
     expect((await s.call("POST", `/invites/${byHandle.id}/accept`, { token: bo })).status).toBe(403);
     expect((await s.call("POST", `/invites/${byHandle.id}/accept`, { token: agent.apiKey! })).status).toBe(200);
     expect((await access(s, "plan", "read", bearer(agent.apiKey!))).allowed).toBe(true);
     const byEmail = await json(await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", email: "cy@example.test" } }));
-    const cy = ((await (await s.call("POST", "/test/token", { body: { userId: "cy", email: "CY@example.test" } })).json()) as { token: string }).token;
+    const cy = await s.mint("cy");
+    await s.store.put("users", "cy", { id: "cy", email: "cy@example.test", emailVerified: true });
     expect((await s.call("POST", `/invites/${byEmail.id}/accept`, { token: bo })).status).toBe(403);
     expect((await s.call("POST", `/invites/${byEmail.id}/accept`, { token: cy })).status).toBe(200);
   });

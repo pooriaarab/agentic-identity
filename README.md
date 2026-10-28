@@ -9,9 +9,12 @@ People, agents, and the access they share: delegation, invites, links, and an au
 
 > Status: 0.1.0 preview. This release has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
-> with in-memory adapters for most, Cloudflare D1 and R2 adapters, and the contract suites.
-> OIDC sign-in, the SDK, the CLI, the MCP server, and the HTTP API are not in
-> this release.
+> with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
+> and the HTTP API (a Cloudflare Worker). OIDC sign-in, the SDK, the CLI, and the MCP
+> server are not in this release.
+>
+> Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
+> `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
 
 ## Install
 
@@ -28,14 +31,14 @@ npm install agentic-identity
 - Share links with a role, an optional expiry, and a signed-in-only option.
 - An audit trail of access checks that shows who acted, and for whom. Each entry keeps the principal kind.
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
+- API keys and personal access tokens for agents, served by the HTTP API (see Worker API).
 - A region claim on every adapter except `Auth`. `assertRegion` fails at start-up when a claim is missing or wrong.
 
 ## Not in 0.1.0
 
 - Sign in with any OpenID Connect provider (Keycloak, EU Login, Google).
-- API keys and personal access tokens for agents.
 - Per-user data export and hard delete.
-- The SDK, the CLI (`npx agentic-identity`), the MCP server, and the HTTP API (a Cloudflare Worker).
+- The SDK, the CLI (`npx agentic-identity`), and the MCP server.
 
 ## Principals and scopes
 
@@ -95,7 +98,8 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   Scopes can only narrow, and a grant can expire.
 - `DELETE /principals/:id` revokes it, and every key below it stops at once.
 - `/resources`, `/grants`, `/invites`, `/links`, `/access`, and `/audit` expose sharing.
-- `POST /test/token` signs anyone in. It answers 404 unless `ALLOW_TEST_TOKEN_MINT=1`.
+- `POST /test/token` makes a new person with narrow rights (`doc:admin` unless the body lists other scopes, never `*:admin`). It never changes a person that exists and never marks an email as verified. It answers 404 unless `IDENTITY_UNSAFE_TEST_MINT=1`, and the Worker refuses to run with that flag when `REGION` is not `unknown` or `PUBLIC_URL` is https.
+- A write, a sign-in start, and the anonymous `/access` check each have a budget per IP (read from `CF-Connecting-IP`). A write also has a budget per principal, counted at the root of its chain. Over budget is a 429 with `Retry-After`, and the call does nothing. Defaults: 60 writes per principal, 120 calls per IP, and 20 sign-in starts per IP, each per minute. The counter rows hold a hash of the key, never an IP. A limiter that cannot count answers 503.
 - Sign-in with OpenID Connect is not in yet.
 
 ## Ports
