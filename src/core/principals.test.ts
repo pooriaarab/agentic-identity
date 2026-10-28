@@ -181,6 +181,7 @@ describe("resolveChain", () => {
     ["an agent_of_human under an agent", { id: "p", kind: "agent_of_human", parentId: "a1", scopes: [] }],
     ["a user_token under an agent", { id: "p", kind: "user_token", parentId: "a1", scopes: [] }],
     ["an agent_of_agent under a human", { id: "p", kind: "agent_of_agent", parentId: "h1", scopes: [] }],
+    ["a malformed stored scope", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: ["docs:delete"] }],
   ] as [string, Principal][])("rejects %s", async (_name, bad) => {
     const result = await resolveChain("p", table(human, agent1, bad), { now: NOW });
     expect(result).toMatchObject({ ok: false, reason: "invalid_chain", at: "p" });

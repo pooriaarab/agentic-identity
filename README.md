@@ -30,6 +30,28 @@ People, agents, and the access they share: sign-in, delegation, invites, links, 
 - **MCP server**: `npx agentic-identity mcp`, for Claude Code and other MCP clients.
 - **HTTP API**: a Cloudflare Worker you deploy to your own account.
 
+## Principals and scopes
+
+Every request has one principal and the chain it acts for. A scope is
+`<resource>:<action>`, such as `docs:read` or `*:admin`. The actions run from
+weak to strong: `read`, `comment`, `write`, `admin`. A stronger action covers a
+weaker one. `*` works only as a resource, never as an action.
+
+```ts
+import { resolveChain, hasScope, auditEntry } from "agentic-identity";
+
+const result = await resolveChain("agent-2", (id) => principals.get(id), { now: Date.now() });
+if (result.ok && hasScope(result.scopes, "docs:write")) {
+  const entry = auditEntry(result, { id, at: Date.now(), action: "docs:write", outcome: "allowed" });
+}
+```
+
+`resolveChain` walks from the acting principal to its root. Each step can only
+narrow the rights. It returns no rights when a principal is revoked or expired,
+when the chain has a cycle or is deeper than `MAX_CHAIN_DEPTH` (5), when a
+parent is missing, or when a kind has the wrong parent kind. Audit entries keep
+the principal kind and the whole chain, and hold no email address.
+
 ## Develop
 
 ```sh
