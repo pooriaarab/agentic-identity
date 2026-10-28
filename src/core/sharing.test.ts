@@ -12,6 +12,9 @@
 //     tampered link fails, signed-in-only refuses the anonymous, and the token is never stored.
 //  8. Audit: allowed and denied entries keep the chain. The anonymous visitor is labeled.
 //     An entry holds no email address.
+//  9. An action that is not read, comment, write, or admin is denied for every caller, the
+//     anonymous visitor included, and never allowed by a missing role. A link or invite expiry
+//     that is not a finite time in the future is refused when it is made, and nothing is stored.
 import { beforeEach, describe, expect, test } from "vitest";
 import { createMemoryStore } from "../adapters/memory.js";
 import type { Store } from "../ports.js";
@@ -259,5 +262,48 @@ describe("audit", () => {
     await sharing.createInvite(ana, "folder", { role: "viewer", email: "bo@example.test" });
     expect(JSON.stringify((await store.query("audit")).items)).not.toContain("@");
     await expect(sharing.listAudit(bo, "folder")).rejects.toThrow();
+  });
+});
+
+describe("an unknown action", () => {
+  test.each(["delete", "constructor", "__proto__", "toString", "", "READ", undefined, null, 1, {}])("%s is denied for every caller", async (action) => {
+    const link = await sharing.createLink(ana, "folder", { role: "viewer" });
+    const callers = [null, ana, bo, agentOf("ana", ["*:admin"]), ownAgent("scribe")];
+    for (const ctx of callers) {
+      expect((await sharing.can(ctx, action as never, "folder")).allowed).toBe(false);
+      expect((await sharing.can(ctx, action as never, "folder", { linkToken: link.token })).allowed).toBe(false);
+    }
+  });
+
+  test("a known action still works for the same callers", async () => {
+    expect(await allowed(null, "read", "folder")).toBe(false);
+    expect(await allowed(ana, "admin", "folder")).toBe(true);
+  });
+});
+
+describe("an expiry that is not a finite time in the future", () => {
+  const stored = async (collection: string) => (await store.query(collection)).items.length;
+  const bad = [NaN, Infinity, -Infinity, -1, 0, null, "9999999999999", "tomorrow", {}, [], true];
+
+  test.each(bad.map((v) => [String(JSON.stringify(v) ?? v), v]))("a link with expiresAt %s is refused and not stored", async (_name, value) => {
+    await expect(sharing.createLink(ana, "folder", { role: "viewer", expiresAt: value as never })).rejects.toThrow();
+    expect(await stored("links")).toBe(0);
+  });
+
+  test("a link that expires now or in the past is refused, and one in the future works", async () => {
+    for (const expiresAt of [t - 1, t]) await expect(sharing.createLink(ana, "folder", { role: "viewer", expiresAt })).rejects.toThrow();
+    expect(await stored("links")).toBe(0);
+    const link = await sharing.createLink(ana, "folder", { role: "viewer", expiresAt: t + 1 });
+    expect(await allowed(null, "read", "folder", link.token)).toBe(true);
+  });
+
+  test.each([...bad, 1.5, 2 ** 53].map((v) => [String(JSON.stringify(v) ?? v), v]))("an invite with expiresInMs %s is refused and not stored", async (_name, value) => {
+    await expect(sharing.createInvite(ana, "folder", { role: "viewer", handle: "scribe", expiresInMs: value as never })).rejects.toThrow();
+    expect(await stored("invites")).toBe(0);
+  });
+
+  test("an invite with a whole positive time works", async () => {
+    await sharing.createInvite(ana, "folder", { role: "viewer", handle: "scribe", expiresInMs: 1 });
+    expect(await stored("invites")).toBe(1);
   });
 });
