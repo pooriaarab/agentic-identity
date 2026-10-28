@@ -77,6 +77,17 @@ describe("export and delete", () => {
     expect(text).not.toContain("dee@example.test");
   });
 
+  test("a delete removes the invites to the person's agent handles, so nobody inherits them", async () => {
+    const w = await world();
+    const invite = (await w.call("POST", "/resources/boss/invites", w.bo, { role: "editor", handle: "scribe" })).body;
+    expect((await w.call("DELETE", "/me", w.ana)).status).toBe(200);
+    expect(await w.dump()).not.toContain(invite.id);
+    const mallory = (await w.call("POST", "/test/token", undefined, { userId: "mallory" })).body.token as string;
+    const heir = (await w.call("POST", "/agents", mallory, { handle: "scribe", scopes: ["doc:admin"] })).body;
+    expect((await w.call("POST", `/invites/${invite.id}/accept`, heir.apiKey)).status).toBe(403);
+    expect((await w.call("GET", "/resources/boss/access?action=read", heir.apiKey)).body.allowed).toBe(false);
+  });
+
   test("a delete removes the person, their agents, and what only they own, and spares the rest", async () => {
     const w = await world();
     expect((await w.call("DELETE", "/me", w.ana)).status).toBe(200);

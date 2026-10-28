@@ -6,10 +6,16 @@
 //     nonce, no subject, or an algorithm that is not RS256. 3. An IdP that refuses the code
 //     (wrong PKCE verifier or secret). 4. A returnTo that leaves the site.
 //  5. A session cookie without HttpOnly, Secure, or SameSite=Lax. 6. Logout must end the session.
+//  7. A returnTo that a browser turns into another site: a tab or newline inside, a backslash, a
+//     scheme, `//`, a control character. After parsing, it must stay on this origin.
+//  8. A cookie-authenticated write with no Origin, another Origin, or `null` is refused. A
+//     bearer-authenticated write and a read need no Origin.
+//  9. Pending sign-in rows: expired ones are removed, a global budget caps how many start in one
+//     ten-minute window, and a stored flow with a bad expiry is refused.
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import { oidcProvider } from "./core/oidc.js";
-import { createApp } from "./worker.js";
+import { createApp, type WorkerConfig } from "./worker.js";
 
 const ISSUER = "https://idp.test/realms/eu";
 const provider = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret" });
@@ -51,14 +57,14 @@ async function idp() {
   return { fetchImpl, approve, otherKey: other.privateKey };
 }
 
-async function setup() {
+async function setup(extra: Partial<WorkerConfig> = {}) {
   const store = createMemoryStore();
   const server = await idp();
-  const app = createApp({ store, now: () => t, fetch: server.fetchImpl, config: { signIn: { provider, publicUrl: "https://app.test" }, unsafeTestMint: false } });
-  const call = (method: string, path: string, opts: { token?: string; cookie?: string; body?: unknown } = {}) =>
+  const app = createApp({ store, now: () => t, fetch: server.fetchImpl, config: { signIn: { provider, publicUrl: "https://app.test" }, unsafeTestMint: false, ...extra } });
+  const call = (method: string, path: string, opts: { token?: string; cookie?: string; origin?: string; body?: unknown } = {}) =>
     app.request(`/api/v1${path}`, {
       method,
-      headers: { ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}), ...(opts.cookie ? { cookie: opts.cookie } : {}), "content-type": "application/json" },
+      headers: { ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}), ...(opts.cookie ? { cookie: opts.cookie } : {}), ...(opts.origin ? { origin: opts.origin } : {}), "content-type": "application/json" },
       ...(opts.body === undefined ? {} : { body: JSON.stringify(opts.body) }),
     });
   const login = async (returnTo?: string) => {
@@ -95,11 +101,25 @@ describe("sign-in", () => {
     expect((await s.callback(state, await s.server.approve(params), flow)).headers.get("location")).toBe("/");
   });
 
+  test.each([["/\t/evil.test"], ["/\n/evil.test"], ["/\r/evil.test"], ["\t//evil.test"], [" //evil.test"], ["///evil.test"], ["/\\\\evil.test"], ["javascript:alert(1)"], ["http:evil.test"], ["/\u0000/x"], ["/\u0085//evil.test"], [""]])("a returnTo of %j goes to /", async (to) => {
+    const s = await setup();
+    const { params, state, flow } = await s.login(to);
+    const location = (await s.callback(state, await s.server.approve(params), flow)).headers.get("location")!;
+    expect(location).toBe("/");
+    expect(new URL(location, "https://app.test").origin).toBe("https://app.test");
+  });
+
+  test.each([["/docs?x=1#top"], ["/a/b%20c"], ["/"]])("a returnTo of %s is kept", async (to) => {
+    const s = await setup();
+    const { params, state, flow } = await s.login(to);
+    expect((await s.callback(state, await s.server.approve(params), flow)).headers.get("location")).toBe(to);
+  });
+
   test("logout ends the session", async () => {
     const s = await setup();
     const { params, state, flow } = await s.login();
     const cookie = (await s.callback(state, await s.server.approve(params), flow)).headers.get("set-cookie")!.split(";")[0]!;
-    expect((await s.call("POST", "/auth/logout", { cookie })).status).toBe(200);
+    expect((await s.call("POST", "/auth/logout", { cookie, origin: "https://app.test" })).status).toBe(200);
     expect((await s.call("GET", "/me", { cookie })).status).toBe(401);
   });
 
@@ -152,3 +172,78 @@ describe("sign-in", () => {
   });
 });
 
+
+describe("a cookie-authenticated write", () => {
+  const signedIn = async () => {
+    const s = await setup();
+    const { params, state, flow } = await s.login();
+    const cookie = (await s.callback(state, await s.server.approve(params), flow)).headers.get("set-cookie")!.split(";")[0]!;
+    return { s, cookie };
+  };
+
+  test.each([[undefined], ["https://evil.test"], ["https://app.test.evil.test"], ["http://app.test"], ["https://app.test:8443"], ["null"], [""]])("is refused with Origin %j, and does nothing", async (origin) => {
+    const { s, cookie } = await signedIn();
+    const body = { scopes: ["doc:read"] };
+    expect((await s.call("POST", "/tokens", { cookie, ...(origin ? { origin } : {}), body })).status).toBe(403);
+    expect((await s.call("POST", "/agents", { cookie, ...(origin ? { origin } : {}), body: { handle: "scribe", scopes: [] } })).status).toBe(403);
+    expect((await s.call("DELETE", "/me", { cookie, ...(origin ? { origin } : {}) })).status).toBe(403);
+    expect((await s.store.query("principals")).items).toHaveLength(1);
+    expect((await s.call("GET", "/me", { cookie })).status).toBe(200);
+  });
+
+  test("works from the Worker's own origin, and a read needs no Origin", async () => {
+    const { s, cookie } = await signedIn();
+    expect((await s.call("POST", "/tokens", { cookie, origin: "https://app.test", body: { scopes: ["doc:read"] } })).status).toBe(200);
+    expect((await s.call("GET", "/me/export", { cookie })).status).toBe(200);
+  });
+
+  test("a bearer write needs no Origin, because a page cannot add that header", async () => {
+    const { s, cookie } = await signedIn();
+    const token = ((await (await s.call("POST", "/tokens", { cookie, origin: "https://app.test", body: { scopes: ["doc:read"] } })).json()) as { token: string }).token;
+    const human = ((await (await s.call("GET", "/me", { cookie })).json()) as { principalId: string }).principalId;
+    expect(human).toBeTruthy();
+    expect((await s.call("POST", "/tokens", { token, body: { scopes: ["doc:read"] } })).status).toBe(403);
+    expect((await s.call("POST", "/auth/logout", { token })).status).toBe(200);
+  });
+
+  test("is refused when no public URL is set, because there is no origin to match", async () => {
+    const store = createMemoryStore();
+    const app = createApp({ store, now: () => t, config: { unsafeTestMint: true } });
+    const mint = (await (await app.request("/api/v1/test/token", { method: "POST", body: JSON.stringify({ userId: "ana" }) })).json()) as { token: string };
+    const cookie = `session=${mint.token}`;
+    const write = (origin?: string) => app.request("/api/v1/tokens", { method: "POST", headers: { cookie, ...(origin ? { origin } : {}) }, body: JSON.stringify({ scopes: ["doc:read"] }) });
+    expect((await write("https://app.test")).status).toBe(403);
+    expect((await write()).status).toBe(403);
+  });
+});
+
+describe("pending sign-in rows", () => {
+  const rows = async (s: Awaited<ReturnType<typeof setup>>) => (await s.store.query("auth_flows", { limit: 500 })).items.length;
+
+  test("expired rows are removed when a new sign-in starts", async () => {
+    const s = await setup();
+    for (let i = 0; i < 4; i++) await s.login();
+    expect(await rows(s)).toBe(4);
+    t += 600_001;
+    await s.login();
+    expect(await rows(s)).toBe(1);
+    t -= 600_001;
+  });
+
+  test("a global budget caps how many start in one window, and a refused start writes no row", async () => {
+    const s = await setup({ rateLimits: { loginAll: { limit: 3, windowMs: 600_000 } } });
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i++) codes.push((await s.call("GET", "/auth/login")).status);
+    expect(codes).toEqual([302, 302, 302, 429, 429]);
+    expect(await rows(s)).toBe(3);
+  });
+
+  test.each([["a string", "9999999999999"], ["null", null], ["NaN", Number.NaN], ["an object", {}]])("a stored flow with %s as expiry is refused", async (_name, bad) => {
+    const s = await setup();
+    const { params, state, flow } = await s.login();
+    const code = await s.server.approve(params);
+    const row = await s.store.get("auth_flows", state);
+    await s.store.put("auth_flows", state, { ...row!, expiresAt: bad as never });
+    expect((await s.callback(state, code, flow)).status).toBe(400);
+  });
+});
