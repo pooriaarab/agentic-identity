@@ -54,7 +54,7 @@ async function idp() {
 async function setup() {
   const store = createMemoryStore();
   const server = await idp();
-  const app = createApp({ store, now: () => t, fetch: server.fetchImpl, config: { signIn: { provider, publicUrl: "https://app.test" }, allowTestTokenMint: false } });
+  const app = createApp({ store, now: () => t, fetch: server.fetchImpl, config: { signIn: { provider, publicUrl: "https://app.test" }, unsafeTestMint: false } });
   const call = (method: string, path: string, opts: { token?: string; cookie?: string; body?: unknown } = {}) =>
     app.request(`/api/v1${path}`, {
       method,

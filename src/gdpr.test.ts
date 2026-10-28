@@ -18,7 +18,7 @@ const COLLECTIONS = ["principals", "users", "credentials", "handles", "resources
 
 async function world() {
   const store = createMemoryStore();
-  const app = createApp({ store, now: () => 1_000_000, config: { allowTestTokenMint: true } });
+  const app = createApp({ store, now: () => 1_000_000, config: { unsafeTestMint: true } });
   const call = async (method: string, path: string, token?: string, body?: unknown) => {
     const res = await app.request(`/api/v1${path}`, {
       method,
@@ -29,7 +29,7 @@ async function world() {
   };
   const mint = async (userId: string, email: string) => (await call("POST", "/test/token", undefined, { userId, email })).body.token as string;
   const [ana, bo] = [await mint("ana", "ana@example.test"), await mint("bo", "bo@example.test")];
-  const agent = (await call("POST", "/agents", ana, { handle: "scribe", scopes: ["*:admin"] })).body;
+  const agent = (await call("POST", "/agents", ana, { handle: "scribe", scopes: ["doc:admin"] })).body;
   const grant = (await call("POST", "/delegations", ana, { scopes: ["doc:read"] })).body;
   const pat = (await call("POST", "/tokens", ana, { scopes: ["doc:read"] })).body;
   await call("POST", "/resources", ana, { id: "mine", type: "doc" });
