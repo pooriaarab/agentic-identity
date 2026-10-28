@@ -38,6 +38,19 @@ runStoreContract(async (options) => {
   return createD1Store(db, options);
 });
 
+it("loses no update when two store instances share one database", async () => {
+  await db.prepare("DELETE FROM store_docs").run();
+  const [one, two] = [createD1Store(db), createD1Store(db)];
+  await one.put("counters", "c", { n: 0 });
+  const bump = (store: typeof one) =>
+    store.transaction(async (tx) => {
+      const doc = (await tx.get<{ n: number }>("counters", "c"))!;
+      await tx.put("counters", "c", { n: doc.n + 1 });
+    });
+  await Promise.all(Array.from({ length: 10 }, (_, i) => bump(i % 2 === 0 ? one : two)));
+  expect(await one.get("counters", "c")).toEqual({ n: 10 });
+});
+
 runBlobsContract((options) => {
   const prefix = `${crypto.randomUUID()}/`;
   const scoped: R2Like = {

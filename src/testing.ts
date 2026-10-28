@@ -2,7 +2,7 @@
 //   runStoreContract((options) => new MyStore(options));
 // The suites use vitest, an optional peer dependency.
 import { describe, expect, it } from "vitest";
-import type { AdapterOptions, Blobs, Doc, Page, Query, Region, Store, StoreOps } from "./ports.js";
+import type { AdapterOptions, Blobs, Doc, Json, Page, Query, Region, Store, StoreOps } from "./ports.js";
 
 type Make<T, O = AdapterOptions> = (options: O) => T | Promise<T>;
 
@@ -92,6 +92,18 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(ids(await s.query("rows", { where: { tag: null } }))).toEqual(["a", "c"]);
       expect(ids(await s.query("rows", { where: { team: "z" } }))).toEqual([]);
       expect(ids(await s.query("nothing"))).toEqual([]);
+    });
+
+    it("never matches across types: true is not 1, and \"1\" is not 1", async () => {
+      const s = await make({});
+      const values: [string, Json][] = [["num", 1], ["bool", true], ["text", "1"], ["zero", 0], ["no", false], ["nil", null]];
+      for (const [id, v] of values) await s.put("typed", id, { v });
+      expect(ids(await s.query("typed", { where: { v: 1 } }))).toEqual(["num"]);
+      expect(ids(await s.query("typed", { where: { v: true } }))).toEqual(["bool"]);
+      expect(ids(await s.query("typed", { where: { v: "1" } }))).toEqual(["text"]);
+      expect(ids(await s.query("typed", { where: { v: 0 } }))).toEqual(["zero"]);
+      expect(ids(await s.query("typed", { where: { v: false } }))).toEqual(["no"]);
+      expect(ids(await s.query("typed", { where: { v: null } }))).toEqual(["nil"]);
     });
 
     it("orders by one field, leaves out docs without it, and breaks ties by id", async () => {
