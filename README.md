@@ -188,6 +188,11 @@ const store = createD1Store(env.DB, { region: "eu" });
 const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.example.org/blob", urlSecret: env.URL_SECRET });
 ```
 
+- With `region: "eu"` or `"us"`, the D1 store confirms where D1 served each read (`get`, `query`,
+  and the reads in a transaction). It refuses a read when D1 reports no region, or a region
+  outside the claim (`eu`: WEUR, EEUR. `us`: WNAM, ENAM. Codes compare without case). Writes go
+  to the primary and report nothing, so they are not checked. Local D1 reports no region: use
+  `region: "unknown"` there.
 - D1 keeps every doc in one table keyed by collection and id. Filters and
   ordering read the JSON body. Add an expression index per filtered field on a
   large collection (see `D1_SCHEMA`).

@@ -90,13 +90,14 @@ function jsonPath(field: string): string {
   return `$.${field}`;
 }
 
-const SERVED_IN_EU = new Set(["WEUR", "EEUR"]);
-const SERVED_OUTSIDE_EU = new Set(["WNAM", "ENAM", "APAC", "OC"]);
+// The D1 codes of each declared region. Anything else is outside it, and so is a missing code.
+const SERVED_IN: Record<"eu" | "us", string[]> = { eu: ["WEUR", "EEUR"], us: ["WNAM", "ENAM"] };
 
-function assertServedIn(region: Region, served: string | undefined): void {
-  if (served === undefined) return;
-  if ((region === "eu" && SERVED_OUTSIDE_EU.has(served)) || (region === "us" && SERVED_IN_EU.has(served))) {
-    throw new Error(`the database served a query from ${served}, outside the declared region "${region}"`);
+function assertServedIn(region: Region, served: unknown): void {
+  if (region === "unknown") return;
+  if (served === undefined) throw new Error(`the database did not report where it served a query, so region "${region}" is not confirmed`);
+  if (typeof served !== "string" || !SERVED_IN[region].includes(served.toUpperCase())) {
+    throw new Error(`the database served a query from outside the declared region "${region}"`);
   }
 }
 
@@ -166,7 +167,9 @@ export function createD1Store(db: D1Like, options: AdapterOptions & { region: Re
   const readRow = async (collection: string, id: string) => {
     assertCollection(collection);
     assertId(id);
-    return db.prepare("SELECT body, version FROM store_docs WHERE collection = ? AND id = ?").bind(collection, id).first<Row>();
+    const { results, meta } = await db.prepare("SELECT body, version FROM store_docs WHERE collection = ? AND id = ? LIMIT 1").bind(collection, id).all<Row>();
+    assertServedIn(region, meta?.served_by_region);
+    return results[0] ?? null;
   };
   const upsert = (collection: string, id: string, doc: Doc) => {
     assertCollection(collection);
