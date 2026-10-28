@@ -6,6 +6,7 @@
 import { parseRegion, type AdapterOptions, type Realtime, RoomAccess, RoomGrant, RoomKey } from "../ports.js";
 
 const MAX_TOKEN_LENGTH = 2048;
+const MIN_SECRET_BYTES = 32;
 const encoder = new TextEncoder();
 const b64 = (bytes: ArrayBuffer | Uint8Array) => Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).toString("base64url");
 
@@ -14,7 +15,7 @@ export function createHmacRealtime(options: AdapterOptions & { keys: RoomKey[] }
   const ids = new Set<string>();
   for (const key of options.keys) {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(key.id) || ids.has(key.id)) throw new Error(`invalid or repeated room key id "${key.id}"`);
-    if (key.secret.length < 16) throw new Error("a room key secret needs 16 characters or more");
+    if (typeof key.secret !== "string" || encoder.encode(key.secret).length < MIN_SECRET_BYTES) throw new Error(`a room key secret needs ${MIN_SECRET_BYTES} bytes or more`);
     ids.add(key.id);
   }
   if (options.keys.length === 0) throw new Error("at least one room key is required");

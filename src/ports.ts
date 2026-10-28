@@ -125,7 +125,7 @@ export interface Auth {
 export interface RoomKey {
   /** Letters, digits, `_` and `-`. It appears in every token. */
   id: string;
-  /** 16 characters or more. */
+  /** 32 bytes or more. */
   secret: string;
 }
 
