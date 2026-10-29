@@ -1,6 +1,6 @@
 # agentic-identity agent guide
 
-People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
+People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
 ## Status
 

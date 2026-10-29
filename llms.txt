@@ -1,6 +1,6 @@
 # agentic-identity
 
-People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
+People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
 Status: 0.1.0 preview. Principals and delegation, sharing (roles, invites, links, audit), six ports (Store, Blobs, Auth, Realtime, Mail, Queue), memory and Cloudflare D1/R2 adapters, contract suites at agentic-identity/testing. No OIDC, SDK, CLI, MCP server, or HTTP API yet.
 

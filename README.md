@@ -5,7 +5,7 @@
 
 [Package](https://www.npmjs.com/package/agentic-identity) · [Source](https://github.com/pooriaarab/agentic-identity) · [Support](https://github.com/pooriaarab/agentic-identity/issues)
 
-People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
+People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
 > Status: 0.1.0 preview. This release has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
@@ -28,7 +28,7 @@ npm install agentic-identity
 - Share links with a role, an optional expiry, and a signed-in-only option.
 - An audit trail of access checks that shows who acted, and for whom. Each entry keeps the principal kind.
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
-- A region claim on every adapter. `assertRegion` fails at start-up when a claim is missing or wrong.
+- A region claim on every adapter except `Auth`. `assertRegion` fails at start-up when a claim is missing or wrong.
 
 ## Not in 0.1.0
 
