@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { runStoreContract } from "../testing.js";
+import { runAuditContract, runStoreContract } from "../testing.js";
 import { StoreConflictError } from "../ports.js";
 import { createFirestoreStore } from "./firestore.js";
 import { createFakeFirestore } from "./firestore.fake.js";
@@ -19,6 +19,7 @@ function make(options: { shared?: string; region?: string } = {}) {
 }
 
 runStoreContract((options) => make(options));
+runAuditContract((options) => make(options));
 
 it("throws StoreConflictError after the last attempt when Firestore keeps aborting", async () => {
   const begun: unknown[] = [];

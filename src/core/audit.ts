@@ -11,6 +11,11 @@ export const CHANGE_ACTIONS = [
   "invite.accept",
   "link.create",
   "link.revoke",
+  "key.create",
+  "key.rotate",
+  "key.revoke",
+  "person.export",
+  "person.erase",
 ] as const;
 export type ChangeAction = (typeof CHANGE_ACTIONS)[number];
 

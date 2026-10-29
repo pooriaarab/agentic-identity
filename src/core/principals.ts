@@ -174,8 +174,8 @@ export interface AuditEntry {
   principalKind: PrincipalKind | "anonymous";
   chain: ChainStep[];
   machineMade: boolean;
-  /** The root of the chain: the person, or the agent with its own identity. */
-  rootId: string;
+  /** The root of the chain: the person, or the agent with its own identity. Entries from before 0.5.0 have none. */
+  rootId?: string;
   /** What a change touched. Entries of access checks have none. */
   targetKind?: string;
   targetId?: string;

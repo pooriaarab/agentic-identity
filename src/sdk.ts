@@ -87,6 +87,19 @@ function oneOf<T extends string>(value: unknown, list: readonly T[], name: strin
   return value as T;
 }
 
+export interface AuditPage {
+  entries: AuditEntry[];
+  nextCursor?: string;
+}
+
+function paging(input: { limit?: number; cursor?: string }): string {
+  const query = new URLSearchParams();
+  if (input.limit !== undefined) query.set("limit", String(input.limit));
+  if (input.cursor !== undefined) query.set("cursor", input.cursor);
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
+
 const retryAfter = (header: string | null) => (header !== null && /^\d{1,5}$/.test(header) && Number(header) <= 86_400 ? Number(header) : undefined);
 
 export function createClient(options: ClientOptions) {
@@ -135,6 +148,8 @@ export function createClient(options: ClientOptions) {
     createToken: (input: { scopes: Scope[]; expiresInMs?: number; label?: string }) => request<NewToken>("POST", "/tokens", drop(input)),
     delegate: (input: { scopes: Scope[]; expiresInMs?: number; label?: string }) => request<NewAgent>("POST", "/delegations", drop(input)),
     revokePrincipal: (id: string) => request<{ revoked: string }>("DELETE", `/principals/${part(id, "id")}`),
+    /** A new key for an agent. Its old keys stop. The new key is shown once. */
+    rotateKey: (id: string) => request<NewAgent>("POST", `/principals/${part(id, "id")}/keys`),
 
     createResource: (input: { type: string; id?: string; parentId?: string }) => request<Resource>("POST", "/resources", drop(input)),
     /** The subject is a person (`human`) or an agent with its own identity (`agent`). The same id of the other kind holds no role. */
@@ -164,13 +179,9 @@ export function createClient(options: ClientOptions) {
       return request<Decision>("GET", path, undefined, input.linkToken === undefined ? {} : { "x-link-token": input.linkToken });
     },
     /** The log of one resource, newest first. Needs an owner. Pass `nextCursor` as `cursor` to read the next page. */
-    audit: (resourceId: string, input: { limit?: number; cursor?: string } = {}) => {
-      const query = new URLSearchParams();
-      if (input.limit !== undefined) query.set("limit", String(input.limit));
-      if (input.cursor !== undefined) query.set("cursor", input.cursor);
-      const text = query.toString();
-      return request<{ entries: AuditEntry[]; nextCursor?: string }>("GET", `/resources/${part(resourceId, "resourceId")}/audit${text ? `?${text}` : ""}`);
-    },
+    audit: (resourceId: string, input: { limit?: number; cursor?: string } = {}) => request<AuditPage>("GET", `/resources/${part(resourceId, "resourceId")}/audit${paging(input)}`),
+    /** What the person did, and what the agents and tokens that act for them did, newest first. An agent with its own identity is not included. Needs the person. */
+    myAudit: (input: { limit?: number; cursor?: string } = {}) => request<AuditPage>("GET", `/me/audit${paging(input)}`),
   };
 }
 
