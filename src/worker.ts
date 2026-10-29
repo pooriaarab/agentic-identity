@@ -2,7 +2,7 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
-import { beginLogin, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
+import { DEFAULT_CALLBACK_PATH, beginLogin, callbackUri, checkCallbackPath, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
 import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
@@ -69,7 +69,14 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const app = new Hono().basePath("/api/v1");
   const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
   const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
-  const redirectUri = `${config.signIn?.publicUrl}/api/v1/auth/callback`;
+  const given = config.signIn?.provider.callbackPath;
+  const customPath = given === DEFAULT_CALLBACK_PATH ? undefined : given;
+  if (customPath !== undefined) checkCallbackPath(customPath);
+  if (customPath !== undefined && (customPath === "/api/v1" || customPath.startsWith("/api/v1/"))) throw new Error("callbackPath must be outside /api/v1");
+  // The flow cookie must reach the callback, so it uses the callback path when that is custom.
+  const flowCookiePath = customPath === undefined ? "/api/v1/auth" : customPath;
+  // Built on use, so a bad PUBLIC_URL fails the sign-in routes only.
+  const redirectUri = () => callbackUri(config.signIn!.provider, config.signIn!.publicUrl);
 
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status, error.retryAfterSeconds === undefined ? {} : { "retry-after": String(error.retryAfterSeconds) });
@@ -140,9 +147,9 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     // Rows nobody finished are removed here, oldest first. The global budget caps how many exist.
     const stale = await store.query("auth_flows", { orderBy: { field: "expiresAt" }, limit: 25 });
     await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("auth_flows", f.id)));
-    const login = await beginLogin(config.signIn.provider, redirectUri, deps.fetch).catch(() => fail(502, "the sign-in provider is not reachable"));
+    const login = await beginLogin(config.signIn.provider, redirectUri(), deps.fetch).catch(() => fail(502, "the sign-in provider is not reachable"));
     await store.put("auth_flows", login.state, { nonce: login.nonce, verifier: login.verifier, returnTo, expiresAt: now() + FLOW_TTL_MS });
-    setCookie(c, "oidc_flow", login.state, { ...cookieFlags, path: "/api/v1/auth", maxAge: FLOW_TTL_MS / 1000 });
+    setCookie(c, "oidc_flow", login.state, { ...cookieFlags, path: flowCookiePath, maxAge: FLOW_TTL_MS / 1000 });
     return c.redirect(login.url, 302);
   });
 
@@ -158,13 +165,13 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     });
     if (!flow || typeof flow.expiresAt !== "number" || !Number.isFinite(flow.expiresAt) || flow.expiresAt <= now()) return fail(400, "bad sign-in state");
     const { provider } = config.signIn;
-    const who = await finishLogin(provider, { redirectUri, code, nonce: flow.nonce as string, verifier: flow.verifier as string, now: now() }, deps.fetch).catch(() => fail(401, "sign-in failed"));
+    const who = await finishLogin(provider, { redirectUri: redirectUri(), code, nonce: flow.nonce as string, verifier: flow.verifier as string, now: now() }, deps.fetch).catch(() => fail(401, "sign-in failed"));
     const id = `u_${(await sha256Hex(`${provider.issuer}|${who.subject}`)).slice(0, 24)}`;
     if (!(await store.get("principals", id))) await store.put("principals", id, { id, kind: "human", scopes: ["*:admin"] });
     await store.put("users", id, { id, issuer: provider.issuer, subject: who.subject, emailVerified: who.emailVerified, ...(who.email ? { email: who.email } : {}) });
     const ttl = config.sessionTtlMs ?? 28_800_000;
     setCookie(c, "session", await issueCredential(store, { principalId: id, kind: "session", expiresAt: now() + ttl }), { ...cookieFlags, path: "/", maxAge: ttl / 1000 });
-    deleteCookie(c, "oidc_flow", { path: "/api/v1/auth" });
+    deleteCookie(c, "oidc_flow", { path: flowCookiePath });
     return c.redirect(flow.returnTo as string, 302);
   });
 
@@ -378,7 +385,16 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return c.json(await sharing.listPersonAudit(ctx, { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
   }));
 
-  return app;
+  if (customPath === undefined) return app;
+  // The provider sends the person to the custom path. It answers as the standard callback, with the same checks and budgets.
+  const root = new Hono();
+  root.get(customPath, (c) => {
+    const url = new URL(c.req.url);
+    url.pathname = "/api/v1/auth/callback";
+    return app.fetch(new Request(url, c.req.raw));
+  });
+  root.route("/", app);
+  return root;
 }
 
 interface Env {
@@ -390,6 +406,7 @@ interface Env {
   OIDC_ISSUER?: string;
   OIDC_CLIENT_ID?: string;
   OIDC_CLIENT_SECRET?: string;
+  OIDC_CALLBACK_PATH?: string;
 }
 
 /** The test mint signs people in with no check. A config that names a region or an https URL is a real one. */
@@ -408,6 +425,13 @@ export function unsafeMintEnvError(env: Pick<Env, "REGION" | "PUBLIC_URL" | "IDE
 let schema: Promise<unknown> | undefined;
 let warned = false;
 
+/** The Worker config from the env. A bad OIDC setting throws, so the Worker does not start. */
+export function workerConfig(env: Pick<Env, "IDENTITY_UNSAFE_TEST_MINT" | "OIDC_ISSUER" | "OIDC_CLIENT_ID" | "OIDC_CLIENT_SECRET" | "OIDC_CALLBACK_PATH" | "PUBLIC_URL">): WorkerConfig {
+  if (env.OIDC_CALLBACK_PATH !== undefined && !(env.OIDC_ISSUER && env.PUBLIC_URL)) throw new Error("OIDC_CALLBACK_PATH needs OIDC_ISSUER and PUBLIC_URL");
+  const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "", ...(env.OIDC_CALLBACK_PATH !== undefined ? { callbackPath: env.OIDC_CALLBACK_PATH } : {}) }) : undefined;
+  return { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1", ...(provider && env.PUBLIC_URL ? { signIn: { provider, publicUrl: env.PUBLIC_URL } } : {}) };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const unsafe = unsafeMintEnvError(env);
@@ -421,8 +445,7 @@ export default {
       throw error;
     });
     await schema;
-    const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "" }) : undefined;
-    const config = { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1", ...(provider && env.PUBLIC_URL ? { signIn: { provider, publicUrl: env.PUBLIC_URL } } : {}) };
+    const config = workerConfig(env);
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config }).fetch(request);
   },
 };

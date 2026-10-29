@@ -306,12 +306,12 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
 - `GET /auth/login` and `/auth/callback` sign a person in with OpenID Connect
   (code flow with PKCE, and state and nonce checks). Set `OIDC_ISSUER`,
   `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `PUBLIC_URL`. Keycloak, EU Login, and
-  Google all work: `issuer` is the only setting that differs. The session cookie is
+  Google all work: `issuer` is the only setting that differs. The redirect URI is `PUBLIC_URL` plus `/api/v1/auth/callback`. Set `OIDC_CALLBACK_PATH` to use another path outside `/api/v1`. The Worker then answers there as well. The session cookie is
   `HttpOnly`, `Secure`, and `SameSite=Lax`. An id token must be RS256.
-- The sign-in code is also a library. Import it from `agentic-identity`. `oidcProvider({ issuer, clientId, clientSecret, scopes? })`
+- The sign-in code is also a library. Import it from `agentic-identity`. `oidcProvider({ issuer, clientId, clientSecret, scopes?, callbackPath? })`
   checks the settings and returns a provider config (an https issuer, or http on `localhost` or `127.0.0.1`).
-  `googleProvider(clientId, clientSecret)` is the same call with the Google issuer
-  (`https://accounts.google.com`). `beginLogin(provider, redirectUri)` returns `{ url, state, nonce,
+  `googleProvider(clientId, clientSecret, { callbackPath? })` is the same call with the Google issuer
+  (`https://accounts.google.com`). `callbackPath` is an absolute path of letters, digits, and `-` `_` `.` `~` segments, not `/`. The Worker uses it in the authorize redirect and the token exchange, and `callbackUri(provider, origin)` builds the same URI for your own code. `beginLogin(provider, redirectUri)` returns `{ url, state, nonce,
   verifier }`. `finishLogin(provider, { redirectUri, code, nonce, verifier, now })` returns
   `{ subject, emailVerified, email? }`, and throws `OidcError` for a refused code, a bad id token, a
   bad discovery document, or a provider that cannot be reached. `beginLogin` throws it for the last two. The message of an `OidcError` holds no token and no claim.

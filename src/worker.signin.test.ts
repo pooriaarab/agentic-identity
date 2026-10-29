@@ -15,7 +15,7 @@
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import { oidcProvider } from "./core/oidc.js";
-import { createApp, type WorkerConfig } from "./worker.js";
+import { createApp, workerConfig, type WorkerConfig } from "./worker.js";
 
 const ISSUER = "https://idp.test/realms/eu";
 const provider = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret" });
@@ -28,6 +28,7 @@ async function idp() {
   const keys = async () => crypto.subtle.generateKey({ ...rsa, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ["sign", "verify"]);
   const [good, other] = [await keys(), await keys()];
   const jwk = { ...(await crypto.subtle.exportKey("jwk", good.publicKey)), kid: "k1", alg: "RS256" };
+  const tokenRedirects: (string | null)[] = [];
   const codes = new Map<string, { id_token: string; challenge: string }>();
   const sign = async (claims: object, key = good.privateKey, header: object = { alg: "RS256", kid: "k1" }) => {
     const body = `${b64(header)}.${b64(claims)}`;
@@ -41,6 +42,7 @@ async function idp() {
     if (url === `${ISSUER}/jwks`) return Response.json({ keys: [jwk] });
     if (url === `${ISSUER}/token`) {
       const form = new URLSearchParams(String(init?.body));
+      tokenRedirects.push(form.get("redirect_uri"));
       const found = codes.get(form.get("code") ?? "");
       const ok = found && form.get("client_secret") === "secret" && (await s256(form.get("code_verifier") ?? "")) === found.challenge;
       return ok ? Response.json({ id_token: found.id_token }) : Response.json({ error: "invalid_grant" }, { status: 400 });
@@ -54,7 +56,7 @@ async function idp() {
     codes.set(code, { id_token: await sign({ ...base, ...claims }, how.key ?? good.privateKey, how.header), challenge: login.get("code_challenge") ?? "" });
     return code;
   };
-  return { fetchImpl, approve, otherKey: other.privateKey };
+  return { fetchImpl, tokenRedirects, approve, otherKey: other.privateKey };
 }
 
 async function setup(extra: Partial<WorkerConfig> = {}) {
@@ -73,8 +75,19 @@ async function setup(extra: Partial<WorkerConfig> = {}) {
     return { params, state: params.get("state")!, flow: res.headers.get("set-cookie")!.split(";")[0]!, res };
   };
   const callback = (state: string, code: string, cookie?: string) => call("GET", `/auth/callback?state=${state}&code=${code}`, cookie ? { cookie } : {});
-  return { store, server, call, login, callback };
+  return { app, store, server, call, login, callback };
 }
+
+describe("worker env", () => {
+  const env = { OIDC_ISSUER: ISSUER, OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret", PUBLIC_URL: "https://app.test" };
+  test("OIDC_CALLBACK_PATH reaches the provider, and an empty or bad value stops the Worker", () => {
+    expect(workerConfig({ ...env, OIDC_CALLBACK_PATH: "/auth/done" }).signIn?.provider.callbackPath).toBe("/auth/done");
+    expect(workerConfig(env).signIn?.provider.callbackPath).toBeUndefined();
+    expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "" })).toThrow("callbackPath");
+    expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "/*" })).toThrow("callbackPath");
+    expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "/auth/done", PUBLIC_URL: undefined })).toThrow("needs OIDC_ISSUER and PUBLIC_URL");
+  });
+});
 
 describe("sign-in", () => {
   test("a good login sets a session cookie with its flags, and the cookie works", async () => {
@@ -93,6 +106,38 @@ describe("sign-in", () => {
     expect(cookie).toMatch(/SameSite=Lax/);
     const me = (await (await s.call("GET", "/me", { cookie: cookie.split(";")[0]! })).json()) as { kind: string };
     expect(me.kind).toBe("human");
+  });
+
+  test("a callbackPath on the provider is the redirect_uri in the authorize redirect and the token exchange", async () => {
+    const custom = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/auth/done" });
+    const s = await setup({ signIn: { provider: custom, publicUrl: "https://app.test" } });
+    const { params, state, flow } = await s.login();
+    expect(params.get("redirect_uri")).toBe("https://app.test/auth/done");
+    // Follow the redirect_uri itself, with the cookie the Worker set. The path must match that cookie.
+    expect(flow).toMatch(/^oidc_flow=/);
+    const done = await s.app.request(`${new URL(params.get("redirect_uri")!).pathname}?state=${state}&code=${await s.server.approve(params)}`, { headers: { cookie: flow } });
+    expect(done.status).toBe(302);
+    expect(done.headers.get("set-cookie")).toMatch(/session=/);
+    expect(s.server.tokenRedirects).toEqual(["https://app.test/auth/done"]);
+  });
+
+  test("the flow cookie covers a custom callback path, and a path inside /api/v1 is refused", async () => {
+    const custom = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/auth/done" });
+    const s = await setup({ signIn: { provider: custom, publicUrl: "https://app.test" } });
+    expect((await s.login()).res.headers.get("set-cookie")).toMatch(/Path=\/auth\/done(;|$)/);
+    const asDefault = { ...custom, callbackPath: "/api/v1/auth/callback" };
+    expect(() => createApp({ store: createMemoryStore(), config: { signIn: { provider: asDefault, publicUrl: "https://app.test" }, unsafeTestMint: false } })).not.toThrow();
+    const byHand = { ...custom, callbackPath: "*" };
+    expect(() => createApp({ store: createMemoryStore(), config: { signIn: { provider: byHand, publicUrl: "https://app.test" }, unsafeTestMint: false } })).toThrow("callbackPath");
+    const inside = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/api/v1/me" });
+    expect(() => createApp({ store: createMemoryStore(), config: { signIn: { provider: inside, publicUrl: "https://app.test" }, unsafeTestMint: false } })).toThrow("outside /api/v1");
+  });
+
+  test("with no callbackPath the token exchange uses the default redirect_uri", async () => {
+    const s = await setup();
+    const { params, state, flow } = await s.login();
+    await s.callback(state, await s.server.approve(params), flow);
+    expect(s.server.tokenRedirects).toEqual(["https://app.test/api/v1/auth/callback"]);
   });
 
   test.each([["//evil.test"], ["https://evil.test/x"], ["/\\evil.test"]])("a returnTo of %s goes to /", async (to) => {
