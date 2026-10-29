@@ -38,6 +38,9 @@ test("a provider that is down or sends a bad discovery document gives an OidcErr
     () => Response.json(discovery(provider), { status: 500 }),
     () => Response.json({ ...discovery(provider), issuer: "https://evil.test" }),
     () => Promise.reject(new TypeError("fetch failed")),
+    () => Response.json({ ...discovery(provider), authorization_endpoint: "not a url" }),
+    () => Response.json({ ...discovery(provider), token_endpoint: 5 }),
+    () => Response.json({ ...discovery(provider), jwks_uri: ["https://a.test/jwks"] }),
   ];
   for (const answer of answers) {
     const fetchImpl = (async () => answer()) as unknown as typeof fetch;

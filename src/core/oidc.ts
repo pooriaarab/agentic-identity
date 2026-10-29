@@ -43,7 +43,9 @@ async function discover(provider: OidcProviderConfig, fetchImpl: Fetch) {
   // A provider that is down or answers with a page that is not JSON fails like a bad document.
   const res = await fetchImpl(`${provider.issuer}/.well-known/openid-configuration`).catch(() => undefined);
   const doc = (await res?.json().catch(() => undefined)) as Record<string, string> | null | undefined;
-  if (!res?.ok || typeof doc !== "object" || doc === null || doc.issuer !== provider.issuer || !doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) throw new OidcError("bad discovery document");
+  // Each endpoint must be a URL: a number or a bad string would fail later with a raw error.
+  const isUrl = (v: unknown) => typeof v === "string" && URL.canParse(v);
+  if (!res?.ok || typeof doc !== "object" || doc === null || doc.issuer !== provider.issuer || !isUrl(doc.authorization_endpoint) || !isUrl(doc.token_endpoint) || !isUrl(doc.jwks_uri)) throw new OidcError("bad discovery document");
   return doc as { authorization_endpoint: string; token_endpoint: string; jwks_uri: string };
 }
 
