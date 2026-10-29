@@ -1,6 +1,8 @@
 // One table of commands. The CLI reads it, and the MCP server will read it too, so both do the same things.
 // A command acts as one principal on one Store, and returns plain JSON. It never returns a secret
 // it did not just make, and it never returns an email address.
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { ACTIONS, hasScope, isScope, resolveChain, type Action, type Principal, type PrincipalContext } from "./core/principals.js";
 import { ROLES, SUBJECT_KINDS, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import type { Store } from "./ports.js";
@@ -231,3 +233,21 @@ export const COMMANDS: Command[] = [
     run: async (app, args) => createSharing(app.store, { now: app.now }).listAudit(await app.actor(), str(args, "resource"), paging(args)),
   },
 ];
+
+/** Fails with a `UsageError` when a required argument is missing or a value is not one of its choices. */
+export function checkArgs(command: Command, values: Args): void {
+  for (const a of command.args) if (a.required && values[a.name] === undefined) throw new UsageError(`missing ${a.positional ? `<${a.name}>` : `--${a.name}`}`);
+  for (const a of command.args) if (a.choices && values[a.name] !== undefined && !a.choices.includes(String(values[a.name]))) throw new UsageError(`${a.name} must be one of: ${a.choices.join(", ")}`);
+}
+
+/** Where the store file is: the flag, then `AGENTIC_IDENTITY_STORE`, then `AGENTIC_IDENTITY_HOME`, then the home folder. */
+export function storePath(env: Record<string, string | undefined>, flag?: string): string {
+  return flag ?? env.AGENTIC_IDENTITY_STORE ?? join(env.AGENTIC_IDENTITY_HOME ?? join(homedir(), ".agentic-identity"), "store.json");
+}
+
+/** The text of an error for a person or an agent. A message that repeats an id is cut, because an id can be an address. */
+export function describeError(error: unknown): string {
+  const code = (error as { code?: string } | null)?.code;
+  if (code?.startsWith("ERR_PARSE_ARGS")) return "bad option or value. Run with --help.";
+  return error instanceof Error ? error.message.replace(/^invalid id ".*"$/s, "invalid id") : String(error);
+}

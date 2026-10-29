@@ -11,5 +11,5 @@ Release 0.5.0 is a preview. It has principals and delegation chains, the sharing
 model (roles, invites, links, audit), six ports, memory and Cloudflare (D1, R2)
 adapters, and contract suites. It has the HTTP API (`agentic-identity/worker`),
 OIDC sign-in, and the typed SDK (`agentic-identity/sdk`). It has a CLI
-(`agentic-identity`) on a local JSON file. It has no MCP server yet. Read
-`README.md` for the current status before you use it.
+(`agentic-identity`) and an MCP server (`agentic-identity-mcp`) on a local
+JSON file. Read `README.md` for the current status before you use it.

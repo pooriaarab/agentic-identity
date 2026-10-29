@@ -1,10 +1,8 @@
 // The `agentic-identity` command line. It works on a local JSON file and shares the command table
 // with the MCP server (it will read it too). Output is JSON on stdout. Errors go to stderr as `error: <message>`.
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { createFileStore } from "./adapters/file.js";
-import { COMMANDS, UsageError, openApp, type Args, type Command } from "./commands.js";
+import { COMMANDS, UsageError, checkArgs, describeError, openApp, storePath, type Args, type Command } from "./commands.js";
 import { VERSION } from "./version.js";
 
 export interface Io {
@@ -28,7 +26,7 @@ function commandHelp(c: Command): string {
 }
 
 function mainHelp(): string {
-  return ["Usage: agentic-identity <command> [options]", "", "People, agents, and the access they share. Works on a local file store.", "", "Commands:", ...COMMANDS.map((c) => `  ${(words(c) + flagOf(c)).padEnd(46)}${c.summary}`), "", GLOBAL_OPTIONS].join("\n");
+  return ["Usage: agentic-identity <command> [options]", "", "People, agents, and the access they share. Works on a local file store.", "", "Commands:", ...COMMANDS.map((c) => `  ${(words(c) + flagOf(c)).padEnd(46)}${c.summary}`), `  ${"mcp".padEnd(46)}Serve the commands as MCP tools over stdio (same as agentic-identity-mcp).`, "", GLOBAL_OPTIONS].join("\n");
 }
 
 /** Options that take a value. A value is not a command word, and not a flag. */
@@ -119,17 +117,14 @@ export async function runCli(args: string[], env: Record<string, string | undefi
     const { values, globals } = parseCommand(command, rest, extra);
     for (const key of ["store", "as"] as const) if (globals[key] !== undefined && held.has(globals[key]!)) globals[key] = held.get(globals[key]!);
     for (const [name, value] of Object.entries(values)) if (typeof value === "string" && held.has(value)) values[name] = held.get(value);
-    for (const a of command.args) if (a.required && values[a.name] === undefined) throw new UsageError(`missing ${a.positional ? `<${a.name}>` : `--${a.name}`}`);
-    for (const a of command.args) if (a.choices && values[a.name] !== undefined && !a.choices.includes(String(values[a.name]))) throw new UsageError(`${a.name} must be one of: ${a.choices.join(", ")}`);
-    const path = globals.store ?? env.AGENTIC_IDENTITY_STORE ?? join(env.AGENTIC_IDENTITY_HOME ?? join(homedir(), ".agentic-identity"), "store.json");
+    checkArgs(command, values);
+    const path = storePath(env, globals.store);
     const as = globals.as ?? env.AGENTIC_IDENTITY_AS;
     const app = await openApp(createFileStore({ path }), as === undefined ? {} : { as });
     io.out(JSON.stringify(await command.run(app, values), null, 2));
     return 0;
   } catch (error) {
-    const code = (error as { code?: string }).code;
-    // A parse error repeats the text of the flag, and a mistyped flag can be an address.
-    io.err(`error: ${code?.startsWith("ERR_PARSE_ARGS") ? "bad option or value. Run with --help." : error instanceof Error ? error.message.replace(/^invalid id ".*"$/s, "invalid id") : String(error)}`);
+    io.err(`error: ${describeError(error)}`);
     return error instanceof UsageError || (error instanceof RangeError && error.message.startsWith("limit must")) || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
   }
 }

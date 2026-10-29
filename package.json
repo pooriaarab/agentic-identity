@@ -98,6 +98,7 @@
     "hono": "^4.13.14"
   },
   "bin": {
-    "agentic-identity": "./dist/cli-bin.js"
+    "agentic-identity": "./dist/cli-bin.js",
+    "agentic-identity-mcp": "./dist/mcp-bin.js"
   }
 }
