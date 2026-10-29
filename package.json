@@ -60,6 +60,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "prepack": "npm run build",
     "clean": "rm -rf dist",
     "ci:local": "npm run build && npm run typecheck && npm test"
   },
