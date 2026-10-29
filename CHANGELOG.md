@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-10-29
 
 ### Added
 
+- `revokeInvite` in the sharing core, `DELETE /invites/:id`, and `revokeInvite(inviteId)` in the SDK revoke an invite that is not yet accepted. `GET /resources/:id/invites` and `listInvites(resourceId, { limit, cursor })` list the invites of a resource without an email address. An owner only. An accept refuses a revoked invite.
+- The CLI and the MCP server have `resources delete`, `principals revoke`, `keys rotate`, `account export`, `account erase`, and `invites revoke`. The Worker, the CLI, and the MCP server share one rights check for revoke and rotate. `--version` works on the CLI and on both MCP bins.
+- `googleProvider`, `oidcProvider`, `beginLogin`, `finishLogin`, and `OidcError` are documented as a sign-in library. A bad discovery document, a bad endpoint, or a provider that cannot be reached throws `OidcError`.
 - `acceptPendingInvites(ctx, identity)`, `POST /me/invites/accept`, and `acceptMyInvites()` in the SDK accept the live invites for the caller's verified email or own handle, one page of 50 per call with a `nextCursor`, because an invitee never sees an invite id. A delegated agent and an unverified email get none.
 - `POST /test/token` marks the email as verified when the body sets `emailVerified: true` with an `email`. It stays behind the unsafe test flag.
 
