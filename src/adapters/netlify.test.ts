@@ -1,20 +1,54 @@
-// The contract suites run on a fake of the Netlify Blobs client (`netlify.fake.ts`). The local
-// `BlobsServer` of `@netlify/blobs` cannot run them: it checks a condition and then writes in two
-// steps, it builds an ETag from the file mtime, and it sends no ETag on a read. The real client and
-// that server run in `netlify.real.test.ts`, for what the server does right. `npm test` runs that
-// file too, and the CI job `netlify-real-client` runs it alone.
-import { describe, expect, it } from "vitest";
+// The contract suites run on a fake of the Netlify Blobs client (`netlify.fake.ts`). With
+// NETLIFY_REAL_SERVER=1 they run on the real `@netlify/blobs` client and its local `BlobsServer`
+// instead, with `netlify.localservice.ts` between them: the server checks a condition and then
+// writes in two steps, builds an ETag from the file mtime, and sends no ETag on a read, and the
+// wrapper gives those three the way the Netlify service has them. The CI job `netlify-real-client`
+// runs this file that way, and `netlify.real.test.ts` too.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getStore } from "@netlify/blobs";
+import { BlobsServer } from "@netlify/blobs/server";
+import { afterAll, describe, expect, it } from "vitest";
 import { StoreConflictError } from "../ports.js";
 import { runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
 import { NetlifyCommitUncertainError, createNetlifyBlobs, createNetlifyStore, verifySignedBlobUrl, type NetlifyStoreLike } from "./netlify.js";
 import { createFakeNetlifyStore } from "./netlify.fake.js";
+import { createLocalServiceFetch } from "./netlify.localservice.js";
 
 type StoreOptions = Partial<Parameters<typeof createNetlifyStore>[1]>;
 const strongStore = (fake: NetlifyStoreLike, options: StoreOptions = {}) => createNetlifyStore(fake, { consistency: "strong", ...options });
 const SECRET = "s".repeat(32);
 const URL_BASE = "https://files.example/blob";
+
+// With NETLIFY_REAL_SERVER=1 every store is a real client on the local `BlobsServer`, and a new
+// store name gives an empty store. The CI job `netlify-real-client` sets REQUIRE_NETLIFY_REAL_SERVER.
+const useReal = process.env.NETLIFY_REAL_SERVER === "1";
+const realDirectory = useReal ? mkdtempSync(join(tmpdir(), "netlify-contract-")) : "";
+const realServer = useReal ? new BlobsServer({ directory: realDirectory, token: "t" }) : undefined;
+const realUrl = realServer ? `http://localhost:${(await realServer.start()).port}` : "";
+afterAll(async () => {
+  await realServer?.stop();
+  if (useReal) rmSync(realDirectory, { recursive: true, force: true });
+});
+it.runIf(process.env.REQUIRE_NETLIFY_REAL_SERVER === "1")("runs on the real server when CI asks for it", () => {
+  expect(useReal).toBe(true);
+});
+const newBackend = (opts: { retryAfterLanding?: boolean; contentEtags?: boolean } = {}): NetlifyStoreLike => {
+  if (!useReal) return createFakeNetlifyStore(opts);
+  const client = getStore({ name: crypto.randomUUID(), siteID: "site", token: "t", apiURL: realUrl, edgeURL: realUrl, uncachedEdgeURL: realUrl, consistency: "strong", fetch: createLocalServiceFetch(opts) });
+  // A plain object, so a test can spread it and replace one method.
+  return {
+    get: (key, o) => client.get(key, o as never),
+    getWithMetadata: (key, o) => client.getWithMetadata(key, o as never) as never,
+    getMetadata: (key, o) => client.getMetadata(key, o),
+    set: (key, data, o) => client.set(key, data, o as never),
+    delete: (key) => client.delete(key),
+    list: (o) => client.list(o),
+  };
+};
 const fakes = new Map<string, NetlifyStoreLike>();
-const fakeFor = (shared: string) => fakes.get(shared) ?? fakes.set(shared, createFakeNetlifyStore()).get(shared)!;
+const fakeFor = (shared: string) => fakes.get(shared) ?? fakes.set(shared, newBackend()).get(shared)!;
 const shareds = (options: { shared?: string; region?: string }) => options.shared ?? crypto.randomUUID();
 
 const makeStore = (options: { shared?: string; region?: string }) => strongStore(fakeFor(shareds(options)), options as never);
@@ -24,12 +58,12 @@ const makeBlobs = (options: { shared?: string; region?: string }) =>
 // The real client retries a request that failed, and a retry of a write that had landed gets a 412.
 const makeRetryStore = (options: { shared?: string; region?: string }) => {
   const shared = options.shared ?? crypto.randomUUID();
-  if (!fakes.has(shared)) fakes.set(shared, createFakeNetlifyStore({ retryAfterLanding: true }));
+  if (!fakes.has(shared)) fakes.set(shared, newBackend({ retryAfterLanding: true }));
   return strongStore(fakes.get(shared)!, options as never);
 };
 const makeRetryBlobs = (options: { shared?: string; region?: string }) => {
   const shared = options.shared ?? crypto.randomUUID();
-  if (!fakes.has(shared)) fakes.set(shared, createFakeNetlifyStore({ retryAfterLanding: true }));
+  if (!fakes.has(shared)) fakes.set(shared, newBackend({ retryAfterLanding: true }));
   return createNetlifyBlobs(fakes.get(shared)!, { region: "unknown", ...options, urlBase: URL_BASE, urlSecret: SECRET } as never);
 };
 
@@ -74,7 +108,7 @@ describe("Netlify store lock and journal", () => {
   };
 
   it("finishes the journal at once after a write that fails once, and the transaction commits", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     await twoDocs(strongStore(breakable(fake, true).store, { waitMs: 500 }));
     const reader = strongStore(fake);
     expect([await reader.get("docs", "a"), await reader.get("docs", "b")]).toEqual([{ n: 1 }, { n: 2 }]);
@@ -82,7 +116,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("finishes the writes of a holder that stopped after it wrote the journal", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     const { store, broken } = breakable(fake);
     const failure = await twoDocs(strongStore(store, { waitMs: 500 })).catch((e: unknown) => e);
     // The caller learns that the outcome is unknown, and that no retry is safe to assume.
@@ -100,7 +134,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("stops a holder whose lease a rival took while it applied, so it cannot write over the rival", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
     const rival = strongStore(fake, options);
@@ -122,7 +156,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("refuses the journal of a holder whose lease ran out while it waited to write it, so it cannot undo a rival", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
     const rival = strongStore(fake, options);
@@ -146,7 +180,7 @@ describe("Netlify store lock and journal", () => {
   // A doc write that the client delays past the lease, and a rival who commits meanwhile.
   for (const kind of ["put", "delete"] as const) {
     it(`refuses a late doc ${kind} that would land over a rival's commit`, async () => {
-      const fake = createFakeNetlifyStore();
+      const fake = newBackend();
       let clock = 0;
       const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
       const rival = strongStore(fake, options);
@@ -176,7 +210,7 @@ describe("Netlify store lock and journal", () => {
   }
 
   it("refuses a late write even when equal bytes give an equal ETag", async () => {
-    const fake = createFakeNetlifyStore({ contentEtags: true });
+    const fake = newBackend({ contentEtags: true });
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
     const rival = strongStore(fake, options);
@@ -203,7 +237,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("hides a deleted doc from get and query, and lets a later put bring it back", async () => {
-    const store = strongStore(createFakeNetlifyStore());
+    const store = strongStore(newBackend());
     await store.put("docs", "a", { n: 1 });
     await store.delete("docs", "a");
     expect(await store.get("docs", "a")).toBeNull();
@@ -213,7 +247,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("reports an unknown outcome when the journal write itself fails", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     const lossy: NetlifyStoreLike = {
       ...fake,
       set: async (key, data, options) => (key === "lock" && String(data).includes('"writes"') ? Promise.reject(new Error("dropped")) : fake.set(key, data, options)),
@@ -222,7 +256,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("fails a read-only transaction whose lease a rival took while it read", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
     const store = strongStore(fake, options);
@@ -237,7 +271,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("keeps a lock it cannot parse, or one with a bad journal, as held", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     await fake.set("lock", JSON.stringify({ owner: null, expiresAt: 0, writes: [{ collection: "Bad Name", id: "a", doc: null }] }));
     await expect(strongStore(fake, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
   });
@@ -248,14 +282,14 @@ describe("Netlify store lock and journal", () => {
       { collection: "docs", id: ["a"], doc: { n: 1 }, w: "x" },
       { collection: ["docs"], id: "a", doc: { n: 1 }, w: "x" },
     ]) {
-      const fake = createFakeNetlifyStore();
+      const fake = newBackend();
       await fake.set("lock", JSON.stringify({ owner: null, expiresAt: 0, writes: [w] }));
       await expect(strongStore(fake, { waitMs: 100 }).put("docs", "b", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
     }
   });
 
   it("refuses a doc stored under another key", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     const store = strongStore(fake);
     await store.put("docs", "a", { n: 1 });
     await store.put("docs", "b", { n: 2 });
@@ -266,29 +300,29 @@ describe("Netlify store lock and journal", () => {
 
   it("refuses a Netlify store that is not strongly consistent, and a missing consistency option", () => {
     for (const consistency of ["eventual", "other"]) {
-      expect(() => strongStore({ ...createFakeNetlifyStore(), client: { consistency } } as never)).toThrow("strong");
+      expect(() => strongStore({ ...newBackend(), client: { consistency } } as never)).toThrow("strong");
     }
-    expect(() => strongStore({ ...createFakeNetlifyStore(), client: { consistency: "strong" } } as never)).not.toThrow();
+    expect(() => strongStore({ ...newBackend(), client: { consistency: "strong" } } as never)).not.toThrow();
     for (const options of [undefined, {}, { consistency: "eventual" }]) {
-      expect(() => createNetlifyStore(createFakeNetlifyStore(), options as never)).toThrow("strong");
+      expect(() => createNetlifyStore(newBackend(), options as never)).toThrow("strong");
     }
   });
 
   it("gives up on a write made inside a transaction, and does not hang", async () => {
-    const store = strongStore(createFakeNetlifyStore(), { waitMs: 100 });
+    const store = strongStore(newBackend(), { waitMs: 100 });
     await expect(store.transaction(() => store.put("docs", "a", { n: 1 }))).rejects.toBeInstanceOf(StoreConflictError);
     await store.put("docs", "b", { n: 1 });
   });
 
   it("treats an empty ETag from a lock write as an error, never as a condition", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     const emptyEtag: NetlifyStoreLike = { ...fake, set: async (key, data, options) => ({ ...(await fake.set(key, data, options)), etag: "" }) };
     await expect(strongStore(emptyEtag, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toThrow("no ETag");
     await expect(createNetlifyBlobs(emptyEtag, { region: "eu", urlBase: URL_BASE, urlSecret: SECRET }).put("k", Uint8Array.of(1))).rejects.toThrow("no ETag");
   });
 
   it("keeps ids under the Netlify key limit, and refuses an id with a lone surrogate", async () => {
-    const store = strongStore(createFakeNetlifyStore());
+    const store = strongStore(newBackend());
     const long = ["日".repeat(256), "😀".repeat(128), "é".repeat(256)];
     for (const [i, id] of long.entries()) await store.put("docs", id, { i });
     expect((await store.query("docs", {})).items.map((item) => [item.id, item.data.i]).sort()).toEqual(long.map((id, i) => [id, i]).sort());
@@ -300,7 +334,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("takes the lock from a holder whose lease ran out, and keeps it from one whose lease runs", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     let clock = 1_000;
     await fake.set("lock", JSON.stringify({ owner: "gone", expiresAt: 1_500 }));
     const store = strongStore(fake, { now: () => clock, leaseMs: 100, waitMs: 200 });
@@ -313,7 +347,7 @@ describe("Netlify store lock and journal", () => {
 
   it("treats a lock it cannot read as held", async () => {
     for (const body of ["not json", JSON.stringify({ owner: "x", expiresAt: "soon" }), JSON.stringify({ owner: 5, expiresAt: 0 }), JSON.stringify({ expiresAt: 0 })]) {
-      const fake = createFakeNetlifyStore();
+      const fake = newBackend();
       await fake.set("lock", body);
       const store = strongStore(fake, { waitMs: 100 });
       await expect(store.put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
@@ -322,7 +356,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("writes nothing when another holder took the lease while fn ran", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     let clock = 0;
     const store = strongStore(fake, { now: () => clock, leaseMs: 100, waitMs: 100 });
     const rival = strongStore(fake, { now: () => clock, leaseMs: 100, waitMs: 100 });
@@ -338,7 +372,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("frees the lock when fn throws, and writes nothing", async () => {
-    const store = strongStore(createFakeNetlifyStore(), { waitMs: 200 });
+    const store = strongStore(newBackend(), { waitMs: 200 });
     await expect(
       store.transaction(async (tx) => {
         await tx.put("docs", "a", { n: 1 });
@@ -351,7 +385,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("keeps ids with colons, dots, and non-ASCII characters apart", async () => {
-    const store = strongStore(createFakeNetlifyStore());
+    const store = strongStore(newBackend());
     const ids = ["a:b", "a", "é-ü", "a.b", "日本語", "x".repeat(256)];
     for (const [i, id] of ids.entries()) await store.put("docs", id, { i });
     expect((await store.query("docs", {})).items.map((item) => item.id).sort()).toEqual([...ids].sort());
@@ -359,7 +393,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("loses no update when four adapter objects share one store", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     const stores = Array.from({ length: 4 }, () => strongStore(fake));
     await stores[0]!.put("counters", "c", { n: 0 });
     await Promise.all(Array.from({ length: 16 }, (_, i) => bump(stores[i % 4]!)));
@@ -367,7 +401,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("refuses bad options", () => {
-    for (const options of [{ leaseMs: 0 }, { waitMs: 1.5 }]) expect(() => strongStore(createFakeNetlifyStore(), options)).toThrow(RangeError);
+    for (const options of [{ leaseMs: 0 }, { waitMs: 1.5 }]) expect(() => strongStore(newBackend(), options)).toThrow(RangeError);
   });
 });
 
@@ -377,12 +411,12 @@ describe("Netlify blobs", () => {
     const url = await blobs.signedUrl("a/b", { method: "PUT", expiresInSeconds: 60 });
     expect(await verifySignedBlobUrl(url, { secret: SECRET })).toEqual({ key: "a/b", method: "PUT" });
     for (const urlSecret of [undefined, "", "short"]) {
-      expect(() => createNetlifyBlobs(createFakeNetlifyStore(), { region: "eu", urlBase: URL_BASE, urlSecret: urlSecret as never })).toThrow();
+      expect(() => createNetlifyBlobs(newBackend(), { region: "eu", urlBase: URL_BASE, urlSecret: urlSecret as never })).toThrow();
     }
   });
 
   it("keeps long keys apart and refuses bad metadata", async () => {
-    const fake = createFakeNetlifyStore();
+    const fake = newBackend();
     const blobs = createNetlifyBlobs(fake, { region: "eu", urlBase: URL_BASE, urlSecret: SECRET });
     await blobs.put("k".repeat(5000), Uint8Array.of(1));
     await blobs.put("k".repeat(5001), Uint8Array.of(2));
