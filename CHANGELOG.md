@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0 - 2026-10-29
+
+### Added
+
+- `tokens create` and `delegations create` in the CLI, and `identity_tokens_create` and `identity_delegations_create` in the MCP server. They run the same checks as the Worker: only a person makes a token, a token cannot delegate, and a delegation cannot exceed the actor's scopes. The secret shows once, and the store keeps only its hash.
+
+### Internal
+
+- The Netlify contract suites (`Store`, audit, `Blobs`, lock and journal) run on the real `@netlify/blobs` client and its local server in CI. A test `fetch` wrapper makes the local server check a condition and write in one step, as the Netlify service does.
+- Publish runs on one ref wait for each other. A running publish is not cancelled.
+
 ## 0.7.0 - 2026-10-29
 
 ### Added
