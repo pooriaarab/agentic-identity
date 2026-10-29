@@ -16,9 +16,9 @@
 // 12. A package given the deps it was registered with gets those same deps.
 // 13. What JSON would change or drop fails the export: a sparse array, an extra key on an array, a hidden
 //     `toJSON`, a symbol key, a getter. The zip holds what the check saw (a getter runs once).
+// 14. The subject kind reaches every package unchanged, for export and erase. Nesting past 64 levels fails.
 // 15. A package id like "constructor" has no inherited entry in `counts`. A count of -0 is 0. A subject read through a
 //     getter reaches packages as the values the check saw. A method that changes after register is not used.
-// 14. The subject kind reaches every package unchanged, for export and erase. Nesting past 64 levels fails.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +40,8 @@ describe("register", () => {
     const r = createAccountRegistry();
     for (const id of ["", "Tasks", "a/b", "manifest.json", "../x"]) expect(() => r.register(pkg(id), {})).toThrow("invalid package id");
     expect(() => r.register({ id: "x" } as never, {})).toThrow("needs exportAccount and eraseAccount");
+    expect(() => r.register({ id: "x", exportAccount: async () => ({}) } as never, {})).toThrow("needs exportAccount and eraseAccount");
+    expect(() => r.register({ id: "x", eraseAccount: async () => ({}) } as never, {})).toThrow("needs exportAccount and eraseAccount");
     r.register(pkg("tasks"), {});
     expect(() => r.register(pkg("tasks"), {})).toThrow("duplicate package id");
     expect(r.ids()).toEqual(["tasks"]);
@@ -95,7 +97,8 @@ describe("export", () => {
     let reads = 0;
     const getter = { get v() { return ++reads === 1 ? 1 : undefined; } };
     class Swap extends Array { toJSON() { return "swapped"; } }
-    const sneaky: unknown[] = [Swap.from([1]), new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
+    const holeAndKey = Object.assign(Object.assign(new Array(2), { 0: 1 }), { x: 1 });
+    const sneaky: unknown[] = [holeAndKey, Swap.from([1]), new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
     for (const record of sneaky) {
       await expect(createAccountRegistry().register(pkg("tasks", { rows: [record] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
     }
@@ -159,8 +162,8 @@ describe("export", () => {
     const tricky = { get id() { return ++reads === 1 ? "ana" : "bob"; }, get kind() { return reads === 1 ? "human" : "agent"; } };
     const seen: AccountSubject[] = [];
     const spy: AccountPackage = { id: "a", exportAccount: async (s) => (seen.push({ ...s }), {}), eraseAccount: async () => ({}) };
-    await createAccountRegistry().register(spy, {}).export(tricky as never, { now }).catch(() => {});
-    for (const s of seen) expect(s).toEqual({ id: "ana", kind: "human" });
+    await createAccountRegistry().register(spy, {}).export(tricky as never, { now });
+    expect(seen).toEqual([{ id: "ana", kind: "human" }]);
   });
 
   test("a method that changes after register is not used", async () => {
@@ -192,14 +195,14 @@ describe("erase", () => {
 
   test("bad counts fail that package and the rest still run", async () => {
     const store = createMemoryStore();
-    for (const counts of [new Map([["rows", 3]]), { rows: -1 }, { rows: 1.5 }, { rows: NaN }, { rows: "2" }, { Rows: 1 }, null, [] , 3]) {
+    for (const counts of [new Map([["rows", 3]]), { rows: -1 }, { rows: 1.5 }, { rows: 2 ** 53 }, { rows: NaN }, { rows: "2" }, { Rows: 1 }, null, [] , 3]) {
       const r = createAccountRegistry().register(pkg("tasks", {}, counts), {}).register(pkg("tables", {}, { rows: 1 }), {});
       const report = await r.erase(ana, store, { actor: null, now });
       expect(report.ok).toBe(false);
       expect(report.results.map((x) => [x.appId, x.ok])).toEqual([["tasks", false], ["tables", true]]);
       expect(report.counts).toEqual({ tables: { rows: 1 } });
     }
-    expect((await entries(store)).filter((e) => e.outcome === "denied")).toHaveLength(9);
+    expect((await entries(store)).filter((e) => e.outcome === "denied")).toHaveLength(10);
   });
 
   test("a throwing eraser is reported and has no counts", async () => {

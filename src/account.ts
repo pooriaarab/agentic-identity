@@ -416,7 +416,7 @@ export interface AccountRegistry {
    * `<package id>/<collection>.json`. One failing package aborts the export, as in `exportAccount`.
    */
   export(subject: AccountSubject, options?: AccountOptions): Promise<{ zip: Uint8Array; manifest: AccountManifest }>;
-  /** Runs every package's `eraseAccount`, audits each, and adds what each one removed. Same rules as `eraseAccount`. */
+  /** Runs every package's `eraseAccount`, audits each, and adds what each one removed. Same rules as `eraseAccount`. The audit and the actor check see the subject id only, not the kind: keep ids unique across kinds. */
   erase(subject: AccountSubject, store: Pick<Store, "put" | "get">, options?: AccountOptions): Promise<PackageEraseReport>;
 }
 
