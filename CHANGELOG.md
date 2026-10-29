@@ -8,9 +8,9 @@
 - `listAudit` lists the newest entry first. It returned up to 500 entries, oldest first.
 - `listAudit(ctx, resourceId, { limit, cursor })` pages the log. `limit` is a whole number from 1 to 200 (default 50). `nextCursor` is set only when more entries exist. Pass it as `cursor` to read the next page. A bad `limit` or `cursor` throws.
 - The SDK `audit(resourceId)` now returns the newest 50 entries, not up to 500 oldest first. Pass `limit` and `cursor` in `audit(resourceId, { limit, cursor })` to change the page size and read on.
-- The `GET /api/v1/resources/:id/audit` route takes the same `limit` and `cursor` query values. A bad `limit` or `cursor` returns 400.
+- The `GET /api/v1/resources/:id/audit` route now returns the newest 50 entries, not up to 500 oldest first, and the response has `nextCursor`. It takes `limit` and `cursor` query values. A bad `limit` or `cursor` returns 400.
 
-### Added
+### Docs
 
 - The README shows the test token response in the quick start.
 
