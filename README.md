@@ -543,6 +543,86 @@ const blobs = createFirestoreBlobs({ ...connection, urlBase: "https://files.exam
   you claim. For the emulator, pass `baseUrl: "http://" + process.env.FIRESTORE_EMULATOR_HOST`
   and leave `token` out.
 
+## Run on Netlify
+
+`agentic-identity/netlify` has a `Store` and a `Blobs` on Netlify Blobs. It uses a small
+structural type for the Netlify `Store`, so pass the result of `getStore(...)` from
+`@netlify/blobs`. Install that package yourself. This package does not depend on it.
+
+```ts
+import { getStore } from "@netlify/blobs";
+import { createNetlifyBlobs, createNetlifyStore } from "agentic-identity/netlify";
+
+const store = createNetlifyStore(getStore({ name: "identity-docs", consistency: "strong" }), { region: "eu", consistency: "strong" });
+const blobs = createNetlifyBlobs(getStore("identity-files"), { region: "eu", urlBase, urlSecret });
+```
+
+Both pass the contract suites. CI runs them on an in-memory fake of the Netlify Blobs
+client (`src/adapters/netlify.fake.ts`), not on a live site. The fake follows the service:
+a conditional write checks and writes in one step, and every write makes a new ETag. A test
+runs one script on the fake and on the real client against the official local server
+(`BlobsServer`), and compares the answers. The local server cannot run the contract suites:
+it checks a condition and then writes in two steps, it builds an ETag from the file time, and
+it sends no ETag on a read. Run the suites on a live Netlify site before you rely on
+this adapter in production. No test proves one thing: that the live service returns, on a
+read, the same ETag string that it accepts in `If-Match` (a weak ETag would break every
+conditional write). The `Blobs` version and the lock both depend on it.
+
+- Give the `Store` and the `Blobs` each their own Netlify store. The adapter owns every key in it.
+- Every read call asks for `consistency: "strong"`. The default of Netlify Blobs is eventual.
+  `list` has no such option, so make the `Store`'s Netlify store with `consistency: "strong"`,
+  as above. A stale list can miss a doc that was just made, so `tx.query` could miss it.
+  `createNetlifyStore` needs the option `consistency: "strong"` as your word that the store is
+  strong, and it also throws for a store that says it is not.
+- `Blobs` maps to Netlify directly. A conditional `set` (`onlyIfNew`, `onlyIfMatch`) is atomic,
+  and the ETag is the version. The size and content type sit in the metadata. A key is hashed,
+  so any key works. `signedUrl` makes an HMAC URL for your function, as the R2 adapter does.
+  Call `verifySignedBlobUrl(url, { secret })` there. The secret needs 32 bytes or more.
+- Netlify Blobs has no write that spans two keys, so the `Store` builds a transaction from a
+  lease lock on one key (`leaseMs`, default 30 s) and a journal that sits in the same key. A
+  transaction takes the lock, runs, then makes one conditional write that checks the lease and
+  stores the journal. It applies the writes, and clears the journal. Before each doc write it
+  renews the lease with a check that the lock is still its own, so a holder that stalled past
+  its lease stops. A doc key is the hash of the id, so any valid id fits the key limit of
+  Netlify (600 bytes). An id must be well-formed Unicode.
+- The real client retries a request that failed. When a write landed and its retry gets a 412,
+  the client reports `modified: false`. The adapter checks for that: a lock that names the
+  holder is the holder's own, and a blob with the write id of the caller is the caller's own.
+  The contract suites also run on a fake that does this on every conditional write.
+- A holder that stops halfway leaves its journal in the lock key. The next transaction on any
+  adapter object applies it first. If a write fails, the holder tries to finish the journal at
+  once. When that works, the transaction has committed and its caller gets the result. When it
+  does not, the caller gets `NetlifyCommitUncertainError`, and the transaction may still land
+  when the next transaction runs. The same error means the lease was lost after the journal was
+  sent, or that a journal write ran past the lease and may have landed. Do not retry such a
+  transaction as if nothing was written. `StoreConflictError` means that nothing was written: the
+  lock was lost before the journal could land. Outside a
+  transaction, a `get` or `query` can see part of a transaction while it applies, and until the
+  next transaction applies a journal that a crash left. A read-only transaction checks the lease
+  once, when `fn` ends.
+- A transaction throws `StoreConflictError` when it cannot get its turn and the lock in `waitMs`
+  in all (default 35 s, a little over the lease, so it outwaits a crashed holder). A lock that is
+  not readable, or that holds a bad journal, counts as held. To recover, find out why, then
+  delete the `lock` key by hand. A write made inside a transaction on the same adapter object
+  waits for its own transaction, so it throws after `waitMs`. Use `tx`.
+- All writes take the same lock, so they run one at a time. A write costs about five requests
+  and three more per doc. Each renew sends the journal again, so keep a transaction to a few
+  docs. A hot app needs a different `Store`. The lease compares the clocks of the instances, so
+  keep them within a few seconds of each other.
+- A doc write is conditional on the ETag that the holder read just before it renewed the lease.
+  The client retries a request for a long time, and has no timeout. A write that is delayed past
+  the lease then fails, because the rival that took over changed the ETag, and the holder gets
+  `NetlifyCommitUncertainError`. Each stored body holds a random write id, so two writes never
+  give equal bytes, and the fence does not depend on how the service makes an ETag. Netlify has
+  no conditional delete, so a delete writes a tombstone (a doc that holds `null`). Tombstones stay, so a `query` still reads them.
+- A `Blobs` put that the client retried can report a refusal for a write that landed, if a rival
+  overwrites the blob before the adapter checks. The adapter sees its own write id only while
+  the blob is still the one it wrote.
+- A `query` reads every doc of the collection, then filters in memory. Use it for small
+  collections.
+- `region` is a claim. Netlify Blobs does not let you pick a region per store. Check where
+  your site's functions and blobs run.
+
 ## Develop
 
 ```sh
