@@ -66,6 +66,6 @@ test("callbackPath works on oidcProvider and googleProvider, and the default sta
   expect(callbackUri(googleProvider("id", "secret", { callbackPath: "/auth/done" }), "https://app.test/")).toBe("https://app.test/auth/done");
 });
 
-test.each([[""], ["cb"], ["//evil.test/cb"], ["/cb?x=1"], ["/cb#x"], ["/a/../cb"], ["/a b"], ["/a\\b"], ["https://evil.test/cb"]])("a callbackPath of %j is refused", (path) => {
+test.each([[""], ["cb"], ["//evil.test/cb"], ["/cb?x=1"], ["/cb#x"], ["/a/../cb"], ["/a b"], ["/a\\b"], ["https://evil.test/cb"], ["/"], ["/*"], ["/:x"], ["/{a}"], ["/a(b)"], ["/%2e%2e/x"], ["/a/./b"]])("a callbackPath of %j is refused", (path) => {
   expect(() => googleProvider("id", "secret", { callbackPath: path })).toThrow("callbackPath");
 });
