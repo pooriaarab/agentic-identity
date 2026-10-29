@@ -124,6 +124,8 @@ Every command has `--help`. `agentic-identity --version` prints the version. The
 | `whoami` | Shows the acting principal, its chain, and its scopes. |
 | `principals list` | Lists the principals in the file. |
 | `agents create <handle> --scopes a,b` | Makes an agent with its own identity. Only a person can. |
+| `tokens create --scopes a,b [--expires-in-ms] [--label]` | Makes a personal access token that acts as the person with fewer scopes. The token shows once. Only a person can. |
+| `delegations create --scopes a,b [--expires-in-ms] [--label]` | Gives an agent a narrower copy of the actor's rights. A person or an agent can. A token cannot. The key shows once. |
 | `resources create <type> [--id] [--parent]` | Makes a resource. The actor owns it. |
 | `resources delete <resource>` | Erases a resource with its grants, invites, links, and audit entries. Needs an owner. A resource with children is refused. |
 | `principals revoke <id>` | Revokes an agent, a delegation, or a token, and all below it. Needs its owner or a principal above it. |
@@ -164,7 +166,7 @@ works on the same store file as the CLI, with the same options (`--store`,
 ```
 
 - There is one tool for each CLI command: `identity_whoami`, `identity_principals_list`,
-  `identity_agents_create`, `identity_principals_revoke`, `identity_keys_rotate`,
+  `identity_agents_create`, `identity_tokens_create`, `identity_delegations_create`, `identity_principals_revoke`, `identity_keys_rotate`,
   `identity_resources_create`, `identity_resources_delete`, `identity_account_export`,
   `identity_account_erase`, `identity_grants_set`,
   `identity_grants_revoke`, `identity_grants_list`, `identity_invites_create`,

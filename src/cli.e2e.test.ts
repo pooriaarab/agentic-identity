@@ -164,4 +164,20 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     expect(r.stderr).toContain("not an agentic-identity store file");
     expect(r.stderr + r.stdout).not.toMatch(/ex\.io|example\.com/);
   });
+
+  test("tokens create and delegations create make a secret that shows once", () => {
+    const token = run("tokens", "create", "--scopes", "doc:read", "--label", "ci", "--expires-in-ms", "60000");
+    expect(token.code).toBe(0);
+    expect(token.json()).toMatchObject({ id: expect.stringMatching(/^p_/), token: expect.stringMatching(/^aid_/) });
+    const delegation = run("delegations", "create", "--scopes", "doc:read");
+    expect(delegation.json()).toMatchObject({ apiKey: expect.stringMatching(/^aid_/) });
+    expect(run("--as", token.json().id, "delegations", "create", "--scopes", "doc:read").err).toContain("a token cannot delegate");
+    expect(run("--as", token.json().id, "tokens", "create", "--scopes", "doc:read").code).toBe(1);
+    expect(run("--as", delegation.json().id, "delegations", "create", "--scopes", "doc:write").err).toContain("scopes exceed your own");
+    expect(run("tokens", "create").code).toBe(2);
+    expect(run("tokens", "create", "--scopes", "bad").code).toBe(2);
+    expect(run("tokens", "create", "--scopes", "doc:read", "--expires-in-ms", "0").code).toBe(2);
+    // The secret is not in the file, and the audit log of the person does not hold it.
+    expect(readFileSync(store, "utf8")).not.toContain(token.json().token);
+  });
 });
