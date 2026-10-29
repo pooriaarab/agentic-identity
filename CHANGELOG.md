@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Breaking
+
+- A grant now names its subject by kind and id. A person and an agent with the same id no longer share a role. `grant(ctx, resourceId, { kind, id }, role)` and `revokeGrant(ctx, resourceId, { kind, id })` take a `Subject`. `kind` is `human` or `agent`, and there is no default.
+- The SDK `grant(resourceId, { kind, id }, role)` and `revokeGrant(resourceId, { kind, id })` take a subject too. `POST /resources/:id/grants` needs `subjectKind`. The revoke route is now `DELETE /resources/:id/grants/:kind/:subjectId`.
+- Grants are stored with the key `<resource>:<kind>:<id>` and a `subjectKind` field. A grant stored by an earlier version is not honored until you run `migrateGrants(store)`. It gives each grant the kind of the principal with its id, and lists in `unresolved` the grants it cannot place. Run it once per database before you serve requests.
+- An erase of a person removes the grants of that person and their agents, and no longer touches a grant of the other kind with the same id.
+
 ### Fixed
 
 - A `prepack` script now builds `dist/` before `npm pack` and `npm publish`.
