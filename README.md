@@ -117,7 +117,7 @@ npx agentic-identity links create plan viewer --expires-in-ms 3600000
 npx agentic-identity audit plan
 ```
 
-Every command has `--help`. The commands are:
+Every command has `--help`. `agentic-identity --version` prints the version. The commands are:
 
 | Command | What it does |
 |---|---|
@@ -151,7 +151,7 @@ Every command has `--help`. The commands are:
 `agentic-identity-mcp` (also `agentic-identity mcp`) serves the CLI commands as
 MCP tools over stdio. It speaks JSON-RPC 2.0, one JSON message per line. It
 works on the same store file as the CLI, with the same options (`--store`,
-`--as`) and the same environment variables.
+`--as`) and the same environment variables. `--help` and `--version` print and exit 0, and do not start the server.
 
 ```json
 { "mcpServers": { "identity": { "command": "npx", "args": ["agentic-identity-mcp", "--as", "<agent-id>"] } } }
