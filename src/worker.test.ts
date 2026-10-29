@@ -118,13 +118,13 @@ describe("sharing over HTTP", () => {
   test("an outsider is denied, a grant opens the door, and a narrow agent stays narrow", async () => {
     const { s, ana, bo } = await world();
     expect(await access(s, "plan", "read", bearer(bo))).toEqual({ status: 200, allowed: false });
-    await s.call("POST", "/resources/plan/grants", { token: ana, body: { subjectId: "bo", role: "editor" } });
+    await s.call("POST", "/resources/plan/grants", { token: ana, body: { subjectKind: "human", subjectId: "bo", role: "editor" } });
     expect((await access(s, "plan", "write", bearer(bo))).allowed).toBe(true);
     const small = await json(await s.call("POST", "/delegations", { token: bo, body: { scopes: ["doc:read"] } }));
     expect((await access(s, "plan", "write", bearer(small.apiKey!))).allowed).toBe(false);
     expect((await access(s, "plan", "read", bearer(small.apiKey!))).allowed).toBe(true);
-    expect((await s.call("POST", "/resources/plan/grants", { token: bo, body: { subjectId: "cy", role: "viewer" } })).status).toBe(403);
-    await s.call("DELETE", "/resources/plan/grants/bo", { token: ana });
+    expect((await s.call("POST", "/resources/plan/grants", { token: bo, body: { subjectKind: "human", subjectId: "cy", role: "viewer" } })).status).toBe(403);
+    await s.call("DELETE", "/resources/plan/grants/human/bo", { token: ana });
     expect((await access(s, "plan", "read", bearer(bo))).allowed).toBe(false);
   });
 

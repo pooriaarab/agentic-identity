@@ -35,10 +35,10 @@ async function world() {
   await call("POST", "/resources", ana, { id: "mine", type: "doc" });
   await call("POST", "/resources", ana, { id: "mine-child", type: "doc", parentId: "mine" });
   await call("POST", "/resources", ana, { id: "shared", type: "doc" });
-  await call("POST", "/resources/shared/grants", ana, { subjectId: "bo", role: "owner" });
+  await call("POST", "/resources/shared/grants", ana, { subjectKind: "human", subjectId: "bo", role: "owner" });
   await call("POST", "/resources", bo, { id: "boss", type: "doc" });
-  await call("POST", "/resources/boss/grants", bo, { subjectId: "ana", role: "viewer" });
-  await call("POST", "/resources/mine/grants", ana, { subjectId: "bo", role: "editor" });
+  await call("POST", "/resources/boss/grants", bo, { subjectKind: "human", subjectId: "ana", role: "viewer" });
+  await call("POST", "/resources/mine/grants", ana, { subjectKind: "human", subjectId: "bo", role: "editor" });
   await call("POST", "/resources", bo, { id: "bo-note", type: "doc", parentId: "mine" });
   await call("POST", "/resources/shared/invites", ana, { role: "viewer", email: "dee@example.test" });
   await call("POST", "/resources/boss/invites", bo, { role: "viewer", email: "ana@example.test" });

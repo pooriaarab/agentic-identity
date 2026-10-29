@@ -29,13 +29,27 @@ async function principalsOf(store: Store, personId: string): Promise<Docs> {
   return [...found].map(([id, data]) => ({ id, data }));
 }
 
+/**
+ * The grants these principals hold. A grant belongs to a person (`human`) or to an agent with its
+ * own identity (`agent`), never to the other kind with the same id. A grant stored before kinds
+ * existed has no kind. It goes too, so an erase leaves nothing behind.
+ */
+async function grantsOf(store: Store, personId: string, principals: Docs): Promise<Docs> {
+  const kinds = new Map(principals.map((p) => [p.id, p.id === personId ? "human" : p.data.kind]));
+  const found = await many(store, "grants", "subjectId", principals.map((p) => p.id));
+  return found.filter((g) => {
+    const kind = kinds.get(g.data.subjectId as string);
+    return g.data.subjectKind === undefined || g.data.subjectKind === kind;
+  });
+}
+
 /** The resources that only these people own. A resource that someone else owns stays, even inside a deleted folder. */
-async function soleOwned(store: Store, people: string[]): Promise<string[]> {
-  const mine = (await many(store, "grants", "subjectId", people)).filter((g) => g.data.role === "owner");
+async function soleOwned(store: Store, mine: Docs): Promise<string[]> {
+  const gone = new Set(mine.map((g) => g.id));
   const sole: string[] = [];
-  for (const g of mine) {
-    const owners = (await all(store, "grants", { resourceId: g.data.resourceId as string, role: "owner" })).map((o) => o.data.subjectId as string);
-    if (owners.every((o) => people.includes(o))) sole.push(g.data.resourceId as string);
+  for (const g of mine.filter((g) => g.data.role === "owner")) {
+    const owners = await all(store, "grants", { resourceId: g.data.resourceId as string, role: "owner" });
+    if (owners.every((o) => gone.has(o.id))) sole.push(g.data.resourceId as string);
   }
   return sole;
 }
@@ -43,7 +57,7 @@ async function soleOwned(store: Store, people: string[]): Promise<string[]> {
 export async function exportPerson(store: Store, personId: string) {
   const principals = await principalsOf(store, personId);
   const ids = principals.map((p) => p.id);
-  const grants = await many(store, "grants", "subjectId", ids);
+  const grants = await grantsOf(store, personId, principals);
   const resources = await Promise.all([...new Set(grants.map((g) => g.data.resourceId as string))].map((id) => store.get("resources", id)));
   const credentials = (await many(store, "credentials", "principalId", ids)).map(({ data }) => ({ principalId: data.principalId, kind: data.kind, label: data.label ?? null, expiresAt: data.expiresAt ?? null, revokedAt: data.revokedAt ?? null }));
   const invites = (await many(store, "invites", "createdBy", ids)).map(({ data }) => ({ id: data.id, resourceId: data.resourceId, role: data.role, acceptedAt: data.acceptedAt ?? null }));
@@ -64,10 +78,11 @@ export async function deletePerson(store: Store, personId: string): Promise<void
   const ids = principals.map((p) => p.id);
   const user = await store.get("users", personId);
   const remove = async (collection: string, docs: Docs) => void (await Promise.all(docs.map((d) => store.delete(collection, d.id))));
-  const owned = await soleOwned(store, ids);
+  const mine = await grantsOf(store, personId, principals);
+  const owned = await soleOwned(store, mine);
   for (const collection of ["grants", "links", "invites", "audit"]) await remove(collection, await many(store, collection, "resourceId", owned));
   await Promise.all(owned.map((id) => store.delete("resources", id)));
-  await remove("grants", await many(store, "grants", "subjectId", ids));
+  await remove("grants", mine);
   await remove("invites", await many(store, "invites", "createdBy", ids));
   if (typeof user?.email === "string") await remove("invites", await all(store, "invites", { email: user.email }));
   await remove("audit", await many(store, "audit", "principalId", ids));

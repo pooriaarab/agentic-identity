@@ -45,7 +45,7 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
       const [a, b] = barrier([s1, s2]).map((s) => createSharing(s));
       const plain = createSharing(s1);
       await plain.createResource(ana, { id: "doc", type: "doc" });
-      await plain.grant(ana, "doc", "bo", "owner");
+      await plain.grant(ana, "doc", { kind: "human", id: "bo" }, "owner");
       return { a: a!, b: b!, plain, store: s1 };
     };
     const owners = async (store: Store) => (await store.query("grants", { where: { resourceId: "doc", role: "owner" } })).items.length;
@@ -53,32 +53,32 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
 
     test("two owners remove each other at once: one wins", async () => {
       const { a, b, store } = await setup();
-      const results = await Promise.allSettled([a.revokeGrant(ana, "doc", "bo"), b.revokeGrant(bo, "doc", "ana")]);
+      const results = await Promise.allSettled([a.revokeGrant(ana, "doc", { kind: "human", id: "bo" }), b.revokeGrant(bo, "doc", { kind: "human", id: "ana" })]);
       expect(settled(results)).toEqual(["fulfilled", "rejected"]);
       expect(await owners(store)).toBe(1);
     });
 
     test("two owners demote each other at once: one wins", async () => {
       const { a, b, store } = await setup();
-      const results = await Promise.allSettled([a.grant(ana, "doc", "bo", "editor"), b.grant(bo, "doc", "ana", "editor")]);
+      const results = await Promise.allSettled([a.grant(ana, "doc", { kind: "human", id: "bo" }, "editor"), b.grant(bo, "doc", { kind: "human", id: "ana" }, "editor")]);
       expect(settled(results)).toEqual(["fulfilled", "rejected"]);
       expect(await owners(store)).toBe(1);
     });
 
     test("a removal and a demotion at once: one wins", async () => {
       const { a, b, store } = await setup();
-      const results = await Promise.allSettled([a.revokeGrant(ana, "doc", "bo"), b.grant(bo, "doc", "ana", "viewer")]);
+      const results = await Promise.allSettled([a.revokeGrant(ana, "doc", { kind: "human", id: "bo" }), b.grant(bo, "doc", { kind: "human", id: "ana" }, "viewer")]);
       expect(settled(results)).toEqual(["fulfilled", "rejected"]);
       expect(await owners(store)).toBe(1);
     });
 
     test("the last owner cannot demote themself, and other changes still work", async () => {
       const { plain, store } = await setup();
-      await plain.grant(ana, "doc", "bo", "editor");
-      await expect(plain.grant(ana, "doc", "ana", "editor")).rejects.toThrow("last owner");
-      await plain.grant(ana, "doc", "ana", "owner");
-      await plain.grant(ana, "doc", "bo", "owner");
-      await plain.grant(ana, "doc", "bo", "viewer");
+      await plain.grant(ana, "doc", { kind: "human", id: "bo" }, "editor");
+      await expect(plain.grant(ana, "doc", { kind: "human", id: "ana" }, "editor")).rejects.toThrow("last owner");
+      await plain.grant(ana, "doc", { kind: "human", id: "ana" }, "owner");
+      await plain.grant(ana, "doc", { kind: "human", id: "bo" }, "owner");
+      await plain.grant(ana, "doc", { kind: "human", id: "bo" }, "viewer");
       expect(await owners(store)).toBe(1);
     });
   });
