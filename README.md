@@ -5,30 +5,37 @@
 
 [Package](https://www.npmjs.com/package/agentic-identity) · [Source](https://github.com/pooriaarab/agentic-identity) · [Support](https://github.com/pooriaarab/agentic-identity/issues)
 
-People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
+People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: in development. The package exports `VERSION` only. It is not on npm
-> yet, and none of the features below work yet.
+> Status: 0.1.0 preview. This release has principals and delegation chains,
+> the sharing model (roles, invites, share links, audit), six backend ports
+> with in-memory adapters for most, Cloudflare D1 and R2 adapters, and the contract suites.
+> OIDC sign-in, the SDK, the CLI, the MCP server, and the HTTP API are not in
+> this release.
 
-## Planned features
+## Install
 
-- Sign in with any OpenID Connect provider (Keycloak, EU Login, Google).
+```sh
+npm install agentic-identity
+```
+
+## Features
+
 - Five kinds of principal: a person, an agent for a person, an agent made by an agent, an agent with its own identity, and a token that acts as the user.
 - Delegation chains where each step can only narrow scopes.
-- Roles per resource: owner, editor, commenter, viewer.
-- Invites by email and share links with expiry.
+- Roles per resource: owner, editor, commenter, viewer. A folder role passes down.
+- Invites by email for a person, or by handle for an agent.
+- Share links with a role, an optional expiry, and a signed-in-only option.
+- An audit trail of access checks that shows who acted, and for whom. Each entry keeps the principal kind.
+- Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
+- A region claim on every adapter except `Auth`. `assertRegion` fails at start-up when a claim is missing or wrong.
+
+## Not in 0.1.0
+
+- Sign in with any OpenID Connect provider (Keycloak, EU Login, Google).
 - API keys and personal access tokens for agents.
-- An audit trail that shows who acted, and for whom. Each entry keeps the principal kind.
-- Storage behind ports, so you can move from Cloudflare D1 to another store.
-- Region settings on every adapter, so data stays in the EU.
 - Per-user data export and hard delete.
-
-## Planned surfaces
-
-- **Library and SDK**: `import { ... } from "agentic-identity"`.
-- **CLI**: `npx agentic-identity`.
-- **MCP server**: `npx agentic-identity mcp`, for Claude Code and other MCP clients.
-- **HTTP API**: a Cloudflare Worker you deploy to your own account.
+- The SDK, the CLI (`npx agentic-identity`), the MCP server, and the HTTP API (a Cloudflare Worker).
 
 ## Principals and scopes
 
@@ -80,8 +87,9 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
-`Auth`, `Realtime`, `Mail`, and `Queue`. Each has a memory adapter and a
-contract suite.
+`Auth`, `Realtime`, `Mail`, and `Queue`. Each has a contract suite. `Store`,
+`Blobs`, `Auth`, `Mail`, and `Queue` have memory adapters. `Realtime` has
+`createHmacRealtime`, which you can also use in tests.
 
 - `Store` keeps JSON docs in named collections. It has `get`, `put`, `delete`,
   `query`, and `transaction`. A query takes equality filters, one `orderBy`, a
@@ -93,7 +101,7 @@ contract suite.
   can rotate. `Mail` sends one message and refuses a bad address or a header
   injection. `Queue` sends a JSON body to a topic, with a delay. A handler that
   throws gets the message again, up to 3 attempts, and then the message is parked.
-- Every adapter takes a `region` option (`"eu"`, `"us"`, or `"unknown"`) and
+- Every adapter except `Auth` takes a `region` option (`"eu"`, `"us"`, or `"unknown"`) and
   exposes it. The default is `"unknown"`. The region is a claim that you make:
   an adapter cannot always see where its data lives. Call
   `assertRegion("eu", store, blobs)` at start-up to fail when a claim is

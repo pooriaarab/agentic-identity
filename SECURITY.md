@@ -16,10 +16,9 @@ data in a report.
 
 ## Supported versions
 
-The package is in development. Only the latest commit on `main` gets fixes.
+Only the latest 0.1.x release gets fixes.
 
 ## Secure defaults
 
 - The package ships no default credentials.
-- Test-only sign-in is off unless an environment variable turns it on.
 - Logs hold no email addresses and no document content.

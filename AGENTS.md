@@ -1,11 +1,15 @@
 # agentic-identity agent guide
 
-People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail.
+People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
 ## Status
 
-The package is in development. It exports `VERSION` only. The CLI, the MCP
-server, and the HTTP API do not exist yet. Do not call a tool that is not here.
+Release 0.1.0 is a preview. It has principals and delegation chains, the
+sharing model (roles, invites, links, audit), the `Store`, `Blobs`, `Auth`,
+`Realtime`, `Mail`, and `Queue` ports with memory adapters (and an HMAC
+`Realtime`), Cloudflare D1 and R2 adapters, and the port contract suites (`agentic-identity/testing`). OIDC
+sign-in, the SDK, the CLI, the MCP server, and the HTTP API do not exist yet. Do
+not call a tool that is not here.
 
 ## Rules
 
