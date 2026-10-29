@@ -1,7 +1,6 @@
 // A person's data: export it as JSON, or delete it for good. A person owns their
 // agents, grants, and tokens (every principal below them), and the resources only
 // they own. Each step reads what the earlier steps found, so nothing is guessed.
-import { sha256Hex } from "./credentials.js";
 import type { Doc, Store } from "./ports.js";
 
 type Docs = { id: string; data: Doc }[];
@@ -109,7 +108,7 @@ export async function deletePerson(store: Store, personId: string, options: { re
   await redactTargets(store, handleInvites.map((i) => i.id));
   await remove("invites", handleInvites);
   await Promise.all(handles.map((handle) => store.delete("handles", handle)));
-  // The tombstone keeps the fact of the erase, its time, and its request. The person is only a digest.
+  // The tombstone keeps the fact of the erase, its time, and its request. It names no one.
   const tombstoneId = crypto.randomUUID();
   await store.put("audit", tombstoneId, {
     id: tombstoneId,
@@ -121,7 +120,7 @@ export async function deletePerson(store: Store, personId: string, options: { re
     chain: [],
     machineMade: false,
     targetKind: "person",
-    targetId: (await sha256Hex(personId)).slice(0, 24),
+    targetId: ERASED,
     ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
   });
   await Promise.all(principals.map((p) => store.delete("principals", p.id)));

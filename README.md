@@ -156,13 +156,16 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
 - `can` writes an audit entry for every allow and deny. It keeps the chain and
   a machine label, and holds no email address.
 - Each grant, revoke, invite, accept, link create, link revoke, key create, key rotate,
-  key revoke, export, and erase writes one entry in the same transaction as the change.
+  and key revoke writes one entry in the same transaction as the change. An export writes
+  its entry just before it reads the data. An erase writes its tombstone just before it
+  removes the person, and a second run of a failed erase writes a second tombstone.
   The entry holds the actor with its kind, the target kind and id, the action, the time,
   and the request id. It holds no email, handle, or key. An erase of a person removes
-  their entries and leaves one tombstone with the time and the request id. It blanks
+  their entries and leaves one tombstone with the time and the request id, and no id of the person. It blanks
   the target of entries that named what it erased.
-- `listPersonAudit(ctx, { limit, cursor })` lists what a person did, and what their
-  agents and tokens did for them. Only the person may read it.
+- `listPersonAudit(ctx, { limit, cursor })` lists what a person did, and what the agents
+  and tokens that act for them did. An agent with its own identity is not included, and
+  neither are entries from before 0.5.0. Only the person may read it.
 - `listAudit(ctx, resourceId, { limit, cursor })` needs an owner. It returns
   `{ entries, nextCursor }`, newest first. `limit` is a whole number from 1 to 200
   (default 50). `nextCursor` is set only when more entries exist. Pass it as `cursor`

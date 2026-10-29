@@ -8,7 +8,7 @@ import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
-import { StoreConflictError, parseRegion, type Store, type StoreOps } from "./ports.js";
+import { StoreConflictError, parseRegion, type Doc, type Store, type StoreOps } from "./ports.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
@@ -289,10 +289,16 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
       if (!target) return fail(404, "not found");
       if (!(await mayManage(tx, ctx, target))) return fail(403, "forbidden");
       if (target.revokedAt != null || !["agent", "agent_of_human", "agent_of_agent"].includes(target.kind)) return fail(400, "bad principal");
-      const old = await tx.query("credentials", { where: { principalId: target.id, kind: "api_key" }, limit: 100 });
-      if (old.nextCursor !== undefined) return fail(409, "try again");
-      for (const key of old.items) if (key.data.revokedAt == null) await tx.put("credentials", key.id, { ...key.data, revokedAt: now() });
-      const apiKey = await issueCredential(tx, { principalId: target.id, kind: "api_key", label: String(old.items[0]?.data.label ?? "") });
+      // Revoked keys stay as rows, so read every page. A guarded read that is too long gives up.
+      const old: { id: string; data: Doc }[] = [];
+      for (let cursor: string | undefined, pages = 0; ; pages++) {
+        if (pages >= 20) return fail(409, "try again");
+        const page = await tx.query("credentials", { where: { principalId: target.id, kind: "api_key" }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+        old.push(...page.items);
+        if ((cursor = page.nextCursor) === undefined) break;
+      }
+      for (const key of old) if (key.data.revokedAt == null) await tx.put("credentials", key.id, { ...key.data, revokedAt: now() });
+      const apiKey = await issueCredential(tx, { principalId: target.id, kind: "api_key", label: String(old[0]?.data.label ?? "") });
       await recordChange(tx, ctx, { action: "key.rotate", targetKind: "principal", targetId: target.id }, now());
       return { id: target.id, apiKey };
     });

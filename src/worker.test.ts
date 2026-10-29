@@ -13,7 +13,7 @@
 //  8. A rotate stops every old key of the agent and gives one new key. Only the owner or a parent
 //     rotates. A person, a token, a missing principal, and a revoked agent cannot be rotated.
 //  9. An export writes an entry that the export holds. An erase leaves one tombstone with no id of
-//     the person, and no other entry of theirs.
+//     the person, and no other entry of theirs. An agent with over 100 old keys can still rotate.
 // 10. The person lists their own log, newest first, in pages. An agent and a token cannot.
 // 11. A resource id with a left-over allowed entry cannot be made again.
 import { describe, expect, test } from "vitest";
@@ -329,6 +329,14 @@ describe("change log of keys, export, and erase", () => {
     expect((await w.call("GET", "/me", { token: fresh.apiKey })).status).toBe(200);
     await w.call("DELETE", `/principals/${w.agent.id}`, { token: w.ana });
     expect((await w.call("POST", `/principals/${w.agent.id}/keys`, { token: w.ana })).status).toBe(400);
+  });
+
+  test("an agent with more than 100 old keys can still be rotated", async () => {
+    const w = await world();
+    for (let i = 0; i < 101; i++) await w.store.put("credentials", `old${i}`, { principalId: w.agent.id, kind: "api_key", revokedAt: 1 });
+    const fresh = await w.json(await w.call("POST", `/principals/${w.agent.id}/keys`, { token: w.ana }));
+    expect((await w.call("GET", "/me", { token: fresh.apiKey })).status).toBe(200);
+    expect((await w.call("GET", "/me", { token: w.agent.apiKey })).status).toBe(401);
   });
 
   test("an export writes an entry that the export holds, and an erase leaves one tombstone", async () => {

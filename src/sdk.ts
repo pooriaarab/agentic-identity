@@ -180,7 +180,7 @@ export function createClient(options: ClientOptions) {
     },
     /** The log of one resource, newest first. Needs an owner. Pass `nextCursor` as `cursor` to read the next page. */
     audit: (resourceId: string, input: { limit?: number; cursor?: string } = {}) => request<AuditPage>("GET", `/resources/${part(resourceId, "resourceId")}/audit${paging(input)}`),
-    /** What the person did, and what their agents and tokens did for them, newest first. Needs the person. */
+    /** What the person did, and what the agents and tokens that act for them did, newest first. An agent with its own identity is not included. Needs the person. */
     myAudit: (input: { limit?: number; cursor?: string } = {}) => request<AuditPage>("GET", `/me/audit${paging(input)}`),
   };
 }
