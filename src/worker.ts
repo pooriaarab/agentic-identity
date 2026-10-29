@@ -31,11 +31,22 @@ const DEFAULT_LIMITS = {
 const FLOW_TTL_MS = 600_000;
 const cookieFlags = { httpOnly: true, secure: true, sameSite: "Lax" } as const;
 
-/** A path on this origin, or `/`. Anything a browser could read as another site gives `/`. */
+/**
+ * A path on this origin, or `/`. Control characters, spaces, and `\` are refused as given.
+ * The authoritative check runs on the parsed result, because URL parsing removes dot
+ * segments and can turn a raw input that looks safe into `//host`, which a browser reads
+ * as another site.
+ */
 function safeReturnTo(to: string, origin: string): string {
-  if (!to.startsWith("/") || to.startsWith("//") || /[\u0000-\u0020\u007f-\u009f\u2028\u2029\\]/.test(to)) return "/";
-  const url = new URL(to, origin);
-  return url.origin === origin ? url.pathname + url.search + url.hash : "/";
+  if (/[\u0000-\u0020\u007f-\u009f\u2028\u2029\\]/.test(to)) return "/";
+  let url: URL;
+  try {
+    url = new URL(to, origin);
+  } catch {
+    return "/";
+  }
+  if (url.origin !== origin || !/^\/(?![/\\])/.test(url.pathname)) return "/";
+  return url.pathname + url.search + url.hash;
 }
 
 class HttpError extends Error {
