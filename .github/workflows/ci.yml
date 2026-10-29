@@ -43,11 +43,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REQUIRE_NETLIFY_REAL_CLIENT: "1"
+      NETLIFY_REAL_SERVER: "1"
+      REQUIRE_NETLIFY_REAL_SERVER: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - run: npm ci
-      - name: Run the real Netlify Blobs client on its local server
-        run: npx vitest run src/adapters/netlify.real.test.ts
+      - name: Run the contract suites on the real Netlify Blobs client and its local server
+        run: npx vitest run src/adapters/netlify.real.test.ts src/adapters/netlify.test.ts
