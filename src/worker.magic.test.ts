@@ -13,11 +13,12 @@
 // 11. Opening the link (GET, HEAD, a scanner) must not use the token up. Only a POST with our own
 //     Origin does, so a page on another site cannot sign a person into the attacker's account.
 // 12. A bad mail setting in the Worker env turns this off and does not break other routes.
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { createMemoryMail, createMemoryStore } from "./adapters/memory.js";
 import { sha256Hex } from "./credentials.js";
 import type { Mail } from "./ports.js";
-import { createApp, type WorkerConfig } from "./worker.js";
+import { createApp, mailFromEnv, type WorkerConfig } from "./worker.js";
+import { deletePerson } from "./gdpr.js";
 
 let t = 1_000_000_000;
 
@@ -102,7 +103,8 @@ describe("magic-link sign-in", () => {
       const res = await open(token, method);
       expect(res.status).toBe(200);
       expect(res.headers.get("set-cookie")).toBeNull();
-      expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+      // A browser sends `Origin: null` from a `no-referrer` page, so the page must keep our Origin.
+      expect(res.headers.get("referrer-policy")).toBe("same-origin");
       expect(res.headers.get("cache-control")).toBe("no-store");
     }
     expect(await (await open(token)).text()).toContain(`name="token" value="${token}"`);
@@ -112,6 +114,35 @@ describe("magic-link sign-in", () => {
       expect(res.headers.get("set-cookie")).toBeNull();
     }
     expect((await verify(token)).status).toBe(303);
+  });
+
+  test("an erase removes a pending link, and the press has its own budget", async () => {
+    const { ask, tokenFrom, verify, me, store } = setup({ rateLimits: { magicVerify: { limit: 2, windowMs: 600_000 } } });
+    await ask("ana@example.test");
+    const first = tokenFrom();
+    const cookie = (await verify(first)).headers.get("set-cookie")!.split(";")[0]!;
+    const id = ((await (await me(cookie)).json()) as { principalId: string }).principalId;
+    await ask("ana@example.test", "2.2.2.2");
+    const pending = tokenFrom();
+    await deletePerson(store, id);
+    expect((await store.query("magic_links", { limit: 10 })).items).toHaveLength(0);
+    expect((await verify(pending)).status).toBe(400);
+    expect((await verify(pending)).status).toBe(429);
+  });
+
+  test("a bad mail setting in the env turns this off and never throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const base = { DB: {} as never, REGION: "eu", PUBLIC_URL: "https://app.test", MAIL_FROM: "login@app.test", MAIL_HTTP_URL: "https://mail.test/send" };
+    expect(await mailFromEnv(base)).toBeDefined();
+    expect(await mailFromEnv({ ...base, MAIL_HTTP_URL: "http://mail.test/send" })).toBeUndefined();
+    expect(await mailFromEnv({ ...base, MAIL_FROM: "not-an-address" })).toBeUndefined();
+    expect(await mailFromEnv({ ...base, REGION: "mars" })).toBeUndefined();
+    expect(await mailFromEnv({ ...base, PUBLIC_URL: "app.test" })).toBeUndefined();
+    expect(await mailFromEnv({ ...base, PUBLIC_URL: "http://app.test" })).toBeUndefined();
+    expect(await mailFromEnv({ ...base, MAIL_HTTP_URL: undefined, SEND_EMAIL: { send: async () => undefined } })).toBeUndefined();
+    expect(await mailFromEnv({ ...base, MAIL_FROM: undefined })).toBeUndefined();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("app.test");
+    warn.mockRestore();
   });
 
   test("an address with a trailing dot is refused", async () => {

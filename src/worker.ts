@@ -22,7 +22,7 @@ export interface WorkerConfig {
   /** Turns on `POST /test/token`, which makes a new person with narrow rights. For tests only. */
   unsafeTestMint: boolean;
   /** Requests per window. A principal counts at the root of its chain. */
-  rateLimits?: Partial<Record<"principal" | "ip" | "login" | "loginAll" | "magicIp" | "magicEmail" | "magicAll", RateRule>>;
+  rateLimits?: Partial<Record<"principal" | "ip" | "login" | "loginAll" | "magicIp" | "magicEmail" | "magicAll" | "magicVerify", RateRule>>;
 }
 
 /** A magic link works for 15 minutes, once. */
@@ -38,6 +38,7 @@ const DEFAULT_LIMITS = {
   magicIp: { limit: 10, windowMs: 600_000 },
   magicEmail: { limit: 3, windowMs: 600_000 },
   magicAll: { limit: 600, windowMs: MAGIC_TTL_MS },
+  magicVerify: { limit: 30, windowMs: 600_000 },
 };
 
 const FLOW_TTL_MS = 600_000;
@@ -190,6 +191,11 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   // says whether an address is known. The token is random, lives 15 minutes, works once, and
   // the store holds only its hash.
   const verifyPath = "/api/v1/auth/magic/verify";
+  // Rows nobody used are removed here, oldest first.
+  const pruneMagic = async () => {
+    const stale = await store.query("magic_links", { orderBy: { field: "expiresAt" }, limit: 25 });
+    await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("magic_links", f.id)));
+  };
   app.post("/auth/magic", async (c) => {
     if (!config.magicLink || !deps.mail) return fail(404, "magic-link sign-in is not configured");
     const input = await body(c);
@@ -201,8 +207,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     await throttle(`magic:ip:${ip}`, limits.magicIp);
     await throttle("magic:all", limits.magicAll);
     await throttle(`magic:email:${email}`, limits.magicEmail);
-    const stale = await store.query("magic_links", { orderBy: { field: "expiresAt" }, limit: 25 });
-    await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("magic_links", f.id)));
+    await pruneMagic();
     const token = randomToken(32);
     await store.put("magic_links", await sha256Hex(token), { email, returnTo, expiresAt: now() + MAGIC_TTL_MS });
     const link = `${origin}${verifyPath}?token=${token}`;
@@ -221,6 +226,8 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   // and a page on another site cannot press the button for the person.
   app.on(["GET", "HEAD"], "/auth/magic/verify", async (c) => {
     noLeak(c);
+    // `no-referrer` would make the browser send `Origin: null` on the form post. `same-origin` sends our Origin and no Referer to another site.
+    c.header("referrer-policy", "same-origin");
     const token = c.req.query("token") ?? "";
     if (!config.magicLink) return fail(404, "magic-link sign-in is not configured");
     if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
@@ -234,9 +241,11 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     noLeak(c);
     if (!config.magicLink) return fail(404, "magic-link sign-in is not configured");
     if (c.req.header("origin") !== new URL(config.magicLink.publicUrl).origin) return fail(403, "bad origin");
+    await throttle(`magic-verify:${c.req.header("cf-connecting-ip") ?? "unknown"}`, limits.magicVerify);
     const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
     const token = typeof form.token === "string" ? form.token : "";
     if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
+    await pruneMagic();
     const hash = await sha256Hex(token);
     // The row is read and deleted together, so two clicks cannot both win.
     const link = await store.transaction(async (tx) => {
@@ -493,11 +502,18 @@ interface Env {
   SEND_EMAIL?: { send(message: unknown): Promise<void> };
 }
 
-async function mailFromEnv(env: Env): Promise<Mail | undefined> {
-  if (!env.MAIL_FROM) return undefined;
-  const region = parseRegion(env.REGION);
+export async function mailFromEnv(env: Env): Promise<Mail | undefined> {
+  if (!env.MAIL_FROM || !env.PUBLIC_URL) return undefined;
+  // The cookie is `Secure`, so the link must open on https (or on localhost for development).
   try {
-    return await buildMail({ ...env, MAIL_FROM: env.MAIL_FROM }, region);
+    const url = new URL(env.PUBLIC_URL);
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) throw new Error("not https");
+  } catch {
+    console.warn("magic-link PUBLIC_URL is not valid");
+    return undefined;
+  }
+  try {
+    return await buildMail({ ...env, MAIL_FROM: env.MAIL_FROM }, parseRegion(env.REGION));
   } catch {
     // A bad mail setting turns magic-link off. It must not break the other routes.
     console.warn("magic-link mail settings are not valid");
@@ -549,7 +565,7 @@ export default {
       throw error;
     });
     await schema;
-    const mail = env.PUBLIC_URL ? await mailFromEnv(env) : undefined;
+    const mail = await mailFromEnv(env);
     const config = { ...workerConfig(env), ...(mail && env.PUBLIC_URL ? { magicLink: { publicUrl: env.PUBLIC_URL } } : {}) };
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config, ...(mail ? { mail } : {}) }).fetch(request);
   },

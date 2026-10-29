@@ -331,7 +331,7 @@ sends `POST /api/v1/auth/magic/verify`, which needs the Origin of `publicUrl`, s
 createApp({ store, mail: createHttpMail({ url, fetch, from, token }), config: { magicLink: { publicUrl: "https://app.example", appName: "Docs" }, unsafeTestMint: false } });
 ```
 
-The Worker entry turns it on when `PUBLIC_URL`, `MAIL_FROM`, and a mail transport are set. The
+The Worker entry turns it on when `PUBLIC_URL` (https, or localhost), `MAIL_FROM`, and a mail transport are set. The
 transport is `MAIL_HTTP_URL` (with `MAIL_HTTP_TOKEN`) for `createHttpMail`, or a `SEND_EMAIL`
 binding for `createCloudflareMail`. A bad mail setting turns this sign-in off and logs a fixed
 line. It is off (404) without them. OIDC is not needed.
@@ -340,12 +340,14 @@ line. It is off (404) without them. OIDC is not needed.
   it is used. A link works once and ends after 15 minutes. A bad, used, or expired link is a 400.
 - The answer is `202 { "ok": true }` for every valid address, known or not, and also when the mail
   fails to send. Only a malformed address is a 400.
-- Budgets: 3 requests per address and 10 per IP in 10 minutes, and 600 for all callers in 15 minutes.
+- Budgets: 3 requests per address and 10 per IP in 10 minutes, 600 for all callers in 15 minutes,
+  and 30 button presses per IP in 10 minutes (`magicVerify`). An erase of the person removes a pending link.
   Over budget is a 429 with `Retry-After`. Set `rateLimits.magicEmail`, `magicIp`, or `magicAll`.
 - The person is `u_` plus a hash of the address, and the email is marked verified. It is a
   different person than an OIDC sign-in with the same address: the two methods are not linked.
 - Opening the link (a mail scanner, a HEAD request, a page on another site) does not use the token.
-  Only the button does, so another site cannot sign a person into the attacker's account.
+  Only the button does, and it needs our Origin, so another site cannot press it for the person.
+  A person can still be told to open a link that the attacker asked for, and press the button.
 - The per-address budget is counted for any caller, so a caller can keep an address from getting
   mail for a while. A failed send logs `magic-link mail failed`, never an address.
 - An address with a trailing dot in the domain is refused. Plus tags and dots are other addresses.
