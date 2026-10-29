@@ -1,9 +1,20 @@
 import { expect, it } from "vitest";
-import { runBlobsContract, runStoreContract } from "../testing.js";
-import { createMemoryBlobs, createMemoryStore } from "./memory.js";
+import { runAuthContract, runBlobsContract, runMailContract, runQueueContract, runRealtimeContract, runStoreContract } from "../testing.js";
+import { createHmacRealtime } from "./hmac.js";
+import { createMemoryAuth, createMemoryBlobs, createMemoryMail, createMemoryQueue, createMemoryStore } from "./memory.js";
 
 runStoreContract((options) => createMemoryStore(options));
 runBlobsContract((options) => createMemoryBlobs(options));
+runAuthContract((options) => createMemoryAuth(options));
+runRealtimeContract((options) => createHmacRealtime(options));
+runMailContract((options) => {
+  const mail = createMemoryMail(options);
+  return { mail, delivered: () => mail.outbox() };
+});
+runQueueContract((options) => {
+  const queue = createMemoryQueue(options);
+  return { queue, run: () => queue.run(), dead: (topic) => queue.dead(topic) };
+});
 
 it("keeps stores without a shared name apart", async () => {
   const [one, two] = [createMemoryStore(), createMemoryStore()];

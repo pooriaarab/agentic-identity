@@ -1,5 +1,7 @@
 // The backend ports. App code talks to these and never to a vendor API.
 // Every adapter must pass the contract suites in `agentic-identity/testing`.
+import type { PrincipalContext } from "./core/principals.js";
+
 /**
  * Where an adapter keeps data. It is a claim the operator makes, unless the
  * adapter can observe it. `"unknown"` is the default, and no policy accepts it.
@@ -113,4 +115,70 @@ export interface Blobs {
   delete(key: string): Promise<void>;
   /** A time-limited URL. `expiresInSeconds` runs from 1 to 604800 (7 days). */
   signedUrl(key: string, options: { method: "GET" | "PUT"; expiresInSeconds: number }): Promise<string>;
+}
+
+export interface Auth {
+  /** Read the credential on a request. Returns null for a missing, bad, expired, or revoked one. Never throws on bad input. */
+  authenticate(request: Request): Promise<PrincipalContext | null>;
+}
+
+export interface RoomKey {
+  /** Letters, digits, `_` and `-`. It appears in every token. */
+  id: string;
+  /** 32 bytes or more. */
+  secret: string;
+}
+
+export type RoomAccess = "read" | "write";
+
+export interface RoomGrant {
+  room: string;
+  principalId: string;
+  access: RoomAccess;
+  /** Epoch milliseconds. */
+  expiresAt: number;
+}
+
+export interface Realtime {
+  readonly region: Region;
+  /** `ttlSeconds` runs from 1 to 86400. */
+  issueRoomToken(grant: { room: string; principalId: string; access: RoomAccess; ttlSeconds: number }): Promise<string>;
+  /** Null for any token that is not valid for this room right now. Never throws on bad input. */
+  verifyRoomToken(token: string, room: string): Promise<RoomGrant | null>;
+}
+
+export interface MailMessage {
+  /** One address. */
+  to: string;
+  subject: string;
+  text: string;
+  html?: string;
+}
+
+export interface Mail {
+  readonly region: Region;
+  send(message: MailMessage): Promise<{ id: string }>;
+}
+
+export function assertMailMessage(m: MailMessage): void {
+  if (!/^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(m.to) || m.to.length > 254) throw new Error("invalid recipient address");
+  if (m.subject.length === 0 || m.subject.length > 200 || /[\r\n]/.test(m.subject)) throw new Error("invalid subject");
+  if (m.text.length === 0 || m.text.length > 200_000 || (m.html?.length ?? 0) > 200_000) throw new Error("invalid body");
+}
+
+export type QueueHandler = (body: Json, meta: { attempt: number }) => Promise<void>;
+
+/** A handler that throws gets the message again, until this many attempts. */
+export const QUEUE_MAX_ATTEMPTS = 3;
+
+export interface Queue {
+  readonly region: Region;
+  /** `delaySeconds` runs from 0 to 86400. The body must be JSON. */
+  send(topic: string, body: Json, options?: { delaySeconds?: number }): Promise<void>;
+  /** One handler per topic. A second call for the same topic throws. */
+  consume(topic: string, handler: QueueHandler): void;
+}
+
+export function assertTopic(name: string): void {
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(name)) throw new Error(`invalid topic "${name}"`);
 }
