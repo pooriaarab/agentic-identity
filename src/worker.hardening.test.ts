@@ -63,6 +63,44 @@ describe("the test mint", () => {
     expect((await s.json(await s.call("GET", "/me", { token: await s.mint("bo", { scopes: ["*:write"] }) }))).scopes).toEqual(["*:write"]);
   });
 
+  test.each([
+    ["a nested list", [["*:admin"]]],
+    ["a nested list next to a good scope", ["doc:read", ["*:admin"]]],
+    ["a deeply nested list", [[["*:admin"]]]],
+    ["an object", [{ toString: (): string => "*:admin" }]],
+    ["an object with the scope as a key", [{ "*:admin": true }]],
+    ["a number", [1]],
+    ["null", [null]],
+    ["a boolean", [true]],
+    ["upper case", ["*:ADMIN"]],
+    ["mixed case", ["*:Admin"]],
+    ["a leading space", [" *:admin"]],
+    ["a trailing space", ["*:admin "]],
+    ["a tab", ["*:admin\t"]],
+    ["a newline", ["*:admin\n"]],
+    ["a zero-width character", ["*:\u200badmin"]],
+    ["a full-width star", ["\uff0a:admin"]],
+    ["too many scopes", Array.from({ length: 33 }, () => "doc:read")],
+    ["a scope that is too long", [`${"a".repeat(80)}:read`]],
+  ])("refuses %s as scopes before it stores or normalizes anything", async (_name, scopes) => {
+    const s = setup();
+    const res = await s.call("POST", "/test/token", { body: { userId: "x", scopes } });
+    expect(res.status).toBe(400);
+    expect(await s.store.get("principals", "x")).toBeNull();
+  });
+
+  test.each([
+    ["a nested list", [["doc:read"]]],
+    ["an object", [{ toString: (): string => "doc:read" }]],
+    ["upper case", ["DOC:read"]],
+  ])("refuses %s as scopes on /agents, /tokens, and /delegations", async (_name, scopes) => {
+    const s = setup();
+    const ana = await s.mint("ana");
+    for (const [path, extra] of [["/agents", { handle: "scribe" }], ["/tokens", {}], ["/delegations", {}]] as const) {
+      expect((await s.call("POST", path, { token: ana, body: { ...extra, scopes } })).status).toBe(400);
+    }
+  });
+
   test("never marks an email as verified, so it cannot accept an email invite", async () => {
     const s = setup();
     const [ana, cy] = [await s.mint("ana"), await s.mint("cy", { email: "CY@example.test" })];
