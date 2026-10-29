@@ -511,6 +511,29 @@ const report = await eraseAccount(userId, [docs, tasks], store, { actor: ctx });
 - Pass an id as the subject, not an email: the manifest holds it.
 - Erase the sign-in last, and only when `report.ok` is true.
 
+### Package contract and registry
+
+A package that holds personal data owns its storage layout. The host must not read that layout. Each package exports one `AccountPackage`, and the host registers it:
+
+```ts
+import { createAccountRegistry, type AccountPackage } from "agentic-identity/account";
+
+const tasksAccount: AccountPackage<{ tasks: Tasks; ctx: PrincipalContext }> = {
+  id: "tasks",
+  exportAccount: async (subject, deps) => ({ boards: [/* plain JSON records */] }), // collection -> records
+  eraseAccount: async (subject, deps) => ({ boards: 2 }), // collection -> count removed
+};
+
+const registry = createAccountRegistry().register(tasksAccount, { tasks, ctx });
+const { zip } = await registry.export({ id: userId, kind: "human" });
+const report = await registry.erase({ id: userId, kind: "human" }, store, { actor: ctx }); // report.counts.tasks.boards === 2
+```
+
+- The subject has an id and a kind. A missing or unknown kind throws. The registry passes the kind through so a package that keys its data on id and kind can do so. The principals of one identity deployment have unique ids, and the manifest and the audit entries record the id only, so keep ids unique across kinds.
+- `exportAccount` returns collection names with lists of plain JSON records. A value that JSON would change or drop (`undefined`, `NaN`, a `Date`, a class instance, a hole in an array, a getter, a loop) fails the export and names the package. Each collection becomes `<package id>/<collection>.json` in the zip.
+- `eraseAccount` returns whole-number counts for each collection. A bad count fails that package, and its audit entry says `denied` even if the data is gone, because only the counts were bad: run the erase again, which is safe. The other packages still run.
+- The registry runs on `exportAccount` and `eraseAccount` above, so it has the same zip, audit, and failure rules. The zip manifest lists packages sorted by id, and `report.results` follows the order of `registry.ids()`. `registry.erase` adds `report.counts`, for each package that finished.
+
 Limits: a zip over the size limits throws a plain `Error`. Some names (such as `con`, `aux`, or a name with `:`) do not unzip on Windows, and the module does not check for them. No zip64, so a zip holds at most 65,535 files and 4 GiB. An eraser error message goes in the report, so do not put personal data in it.
 
 ## Cloudflare adapters

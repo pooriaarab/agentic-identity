@@ -1,8 +1,8 @@
 // Account export and erase across apps. Each app gives an exporter and an eraser (the
 // `AccountApp` port). Export joins every app's files into one zip with a manifest. Erase runs
 // every app's eraser and writes one audit entry per app. No Node API is used: a Worker can run it.
-import type { Doc, Store } from "./ports.js";
-import { auditEntry, PRINCIPAL_KINDS, type PrincipalContext } from "./core/principals.js";
+import type { Doc, Json, Store } from "./ports.js";
+import { auditEntry, PRINCIPAL_KINDS, type PrincipalContext, type PrincipalKind } from "./core/principals.js";
 
 export interface AccountFile {
   /** A relative path inside the app's folder, with `/` separators. */
@@ -296,4 +296,177 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
     results.push({ appId: app.id, ok: error === undefined, ...(error === undefined ? {} : { error }), audited });
   }
   return { ok: results.every((r) => r.ok && r.audited), results };
+}
+
+// ---- Package contract and registry ----
+
+/** Who the account is. The kind is passed through so a package that keys its data on id and kind can do so. */
+export interface AccountSubject {
+  id: string;
+  kind: PrincipalKind;
+}
+
+/** What a package holds about a subject: collection name to records. Every record is plain JSON. */
+export type AccountRecords = Record<string, Json[]>;
+
+/** What an erase removed: collection name to a count of records. */
+export type AccountCounts = Record<string, number>;
+
+/**
+ * The contract a package fulfils. `deps` is whatever the package needs to reach its data (a store,
+ * a client, a context): the host builds it and the registry passes it through unchanged.
+ * `exportAccount` returns `{}` when the package holds nothing. `eraseAccount` must be safe to run twice.
+ */
+export interface AccountPackage<Deps = unknown> {
+  /** A short stable id: lower case letters, digits, `.`, `_`, `-`. It names the package's folder in the zip. */
+  id: string;
+  exportAccount(subject: AccountSubject, deps: Deps): Promise<AccountRecords>;
+  eraseAccount(subject: AccountSubject, deps: Deps): Promise<AccountCounts>;
+}
+
+export interface PackageEraseReport extends EraseReport {
+  /** For each package that finished, what it removed. A failed package has no entry. */
+  counts: Record<string, AccountCounts>;
+}
+
+const NAME = APP_ID; // a package id and a collection name follow the app id rule
+const DEPTH_LIMIT = 64;
+
+function checkSubject(subject: unknown): AccountSubject {
+  const s = subject as Partial<AccountSubject> | null | undefined;
+  const id = s?.id;
+  const kind = s?.kind;
+  if (typeof id !== "string" || id === "") throw new Error("subject needs an id");
+  if (!(PRINCIPAL_KINDS as readonly unknown[]).includes(kind)) throw new Error("subject needs a valid kind");
+  // Read once and copied: a getter must not show one value to the check and another to a package.
+  return Object.freeze({ id, kind: kind as PrincipalKind });
+}
+
+/**
+ * A deep copy made only of what `JSON.stringify` would write, or an error. It reads each value once and
+ * refuses what JSON would change or drop: accessors, symbols, hidden or extra keys, holes, `undefined`,
+ * `NaN`, a `Date`, a class instance, and a loop. The copy, not the original, goes to the zip.
+ */
+function snapshot(value: unknown, seen: Set<object>, depth: number): Json {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return value;
+    throw new Error("records must be plain JSON");
+  }
+  if (typeof value !== "object" || depth > DEPTH_LIMIT || seen.has(value)) throw new Error("records must be plain JSON");
+  seen.add(value);
+  const keys = Reflect.ownKeys(value);
+  const own = (key: string | symbol): unknown => {
+    const d = Object.getOwnPropertyDescriptor(value, key);
+    if (d === undefined || !("value" in d) || !d.enumerable) throw new Error("records must be plain JSON");
+    return d.value;
+  };
+  let copy: Json;
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) throw new Error("records must be plain JSON"); // a subclass may have its own toJSON
+    if (keys.length !== value.length + 1) throw new Error("records must be plain JSON"); // a hole, or a key that is not an index
+    copy = [];
+    for (let i = 0; i < value.length; i++) copy.push(snapshot(own(String(i)), seen, depth + 1));
+  } else {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) throw new Error("records must be plain JSON");
+    const out: { [key: string]: Json } = {};
+    for (const key of keys) {
+      if (typeof key === "symbol") throw new Error("records must be plain JSON");
+      Object.defineProperty(out, key, { value: snapshot(own(key), seen, depth + 1), enumerable: true, writable: true, configurable: true });
+    }
+    copy = out;
+  }
+  seen.delete(value); // a shared child is fine: only a loop is not
+  return copy;
+}
+
+function copyRecords(records: unknown): AccountRecords {
+  // The top level goes through `snapshot` too: a Map or a class instance is not an object of collections.
+  const copy = snapshot(records, new Set(), -1);
+  if (typeof copy !== "object" || copy === null || Array.isArray(copy)) throw new Error("export must be an object of collections");
+  const out: AccountRecords = Object.create(null);
+  for (const [name, list] of Object.entries(copy)) {
+    if (!NAME.test(name)) throw new Error("invalid collection name");
+    if (!Array.isArray(list)) throw new Error("a collection must be a list");
+    out[name] = list;
+  }
+  return out;
+}
+
+function copyCounts(counts: unknown): AccountCounts {
+  const copy = snapshot(counts, new Set(), -1);
+  if (typeof copy !== "object" || copy === null || Array.isArray(copy)) throw new Error("erase must return an object of counts");
+  const out: AccountCounts = Object.create(null);
+  for (const [name, n] of Object.entries(copy)) {
+    if (!NAME.test(name)) throw new Error("invalid collection name");
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) throw new Error("a count must be a whole number, zero or more");
+    out[name] = n + 0; // -0 becomes 0
+  }
+  return out;
+}
+
+export interface AccountRegistry {
+  /** Adds a package with the deps it needs. A repeated id throws. */
+  register<Deps>(pkg: AccountPackage<Deps>, deps: Deps): AccountRegistry;
+  /** The registered ids, in order of registration. */
+  ids(): string[];
+  /**
+   * Runs every package's `exportAccount` and returns one zip. Each package's collections are files
+   * `<package id>/<collection>.json`. One failing package aborts the export, as in `exportAccount`.
+   */
+  export(subject: AccountSubject, options?: AccountOptions): Promise<{ zip: Uint8Array; manifest: AccountManifest }>;
+  /** Runs every package's `eraseAccount`, audits each, and adds what each one removed. Same rules as `eraseAccount`. The audit and the actor check see the subject id only, not the kind: keep ids unique across kinds. */
+  erase(subject: AccountSubject, store: Pick<Store, "put" | "get">, options?: AccountOptions): Promise<PackageEraseReport>;
+}
+
+export function createAccountRegistry(): AccountRegistry {
+  const entries: { id: string; exportAccount: AccountPackage<never>["exportAccount"]; eraseAccount: AccountPackage<never>["eraseAccount"]; deps: unknown }[] = [];
+
+  // `who` is frozen: a package must not change the subject for the next one.
+  const apps = (who: AccountSubject, counts?: Record<string, AccountCounts>): AccountApp[] => {
+    // A guard that should never fire: `who.id` is the only id passed in. It stays so a later change cannot send a package another subject.
+    const sameSubject = (id: string) => {
+      if (id !== who.id) throw new Error("subject does not match");
+    };
+    return entries.map(({ id: pkgId, exportAccount: runExport, eraseAccount: runErase, deps }) => ({
+      id: pkgId,
+      async exportFor(id) {
+        sameSubject(id);
+        const records = await runExport(who, deps as never);
+        return Object.entries(copyRecords(records)).map(([name, list]) => ({ path: `${name}.json`, content: JSON.stringify(list, null, 2) }));
+      },
+      async eraseFor(id) {
+        sameSubject(id);
+        const done = await runErase(who, deps as never);
+        const copy = copyCounts(done);
+        if (counts) counts[pkgId] = { ...copy };
+      },
+    }));
+  };
+
+  const registry: AccountRegistry = {
+    register(pkg, deps) {
+      const id = pkg?.id; // read once: a getter must give the registry one id
+      if (typeof id !== "string" || !NAME.test(id) || id === "manifest.json") throw new Error("invalid package id");
+      // The methods are read once, with the id, and called on the package.
+      const { exportAccount: exporter, eraseAccount: eraser } = pkg;
+      if (typeof exporter !== "function" || typeof eraser !== "function") throw new Error("package needs exportAccount and eraseAccount");
+      if (entries.some((e) => e.id === id)) throw new Error(`duplicate package id "${id}"`);
+      entries.push({ id, exportAccount: (s, d) => exporter.call(pkg, s, d as never), eraseAccount: (s, d) => eraser.call(pkg, s, d as never), deps });
+      return registry;
+    },
+    ids: () => entries.map((e) => e.id),
+    async export(subject, options) {
+      const who = checkSubject(subject);
+      return exportAccount(who.id, apps(who), options);
+    },
+    async erase(subject, store, options) {
+      const who = checkSubject(subject);
+      const counts: Record<string, AccountCounts> = Object.create(null); // a package id such as "constructor" must not hit an inherited key
+      const report = await eraseAccount(who.id, apps(who, counts), store, options);
+      return { ...report, counts };
+    },
+  };
+  return registry;
 }
