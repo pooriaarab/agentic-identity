@@ -39,6 +39,12 @@ test("a person, an agent, and a visitor use the whole API through the SDK", asyn
   const invite = await ana.createInvite("plan", { role: "viewer", handle: "scribe" });
   await agent.acceptInvite(invite.id);
   expect((await agent.access("plan", "read")).allowed).toBe(true);
+  expect((await ana.listInvites("plan")).invites).toMatchObject([{ id: invite.id, for: "handle", handle: "scribe", acceptedAt: expect.any(Number) }]);
+  expect(await ana.revokeInvite(invite.id).catch((e: unknown) => (e as ApiError).status)).toBe(409);
+  const stale = await ana.createInvite("plan", { role: "viewer", handle: "scribe" });
+  expect(await ana.revokeInvite(stale.id)).toEqual({ ok: true });
+  expect((await ana.listInvites("plan")).invites.find((i) => i.id === stale.id)?.revokedAt).toBeTypeOf("number");
+  expect(await agent.listInvites("plan").catch((e: unknown) => (e as ApiError).status)).toBe(403);
   const link = await ana.createLink("plan", { role: "viewer", expiresInMs: 600_000 });
   const visitor = createClient({ baseUrl: worker.origin });
   expect((await visitor.access("plan", "read")).allowed).toBe(false);

@@ -3,9 +3,9 @@
 // clear, refuses a token that could split a header, never follows a redirect, encodes every
 // path part, and puts the token in no error.
 import { ACTIONS, type Action, type AuditEntry, type ChainStep, type PrincipalKind, type Scope } from "./core/principals.js";
-import { ROLES, SUBJECT_KINDS, type Decision, type Grant, type Resource, type Role, type Subject } from "./core/sharing.js";
+import { ROLES, SUBJECT_KINDS, type Decision, type Grant, type InviteSummary, type Resource, type Role, type Subject } from "./core/sharing.js";
 
-export type { Action, AuditEntry, ChainStep, Decision, Grant, PrincipalKind, Resource, Role, Scope, Subject };
+export type { Action, AuditEntry, ChainStep, Decision, Grant, InviteSummary, PrincipalKind, Resource, Role, Scope, Subject };
 
 export interface ClientOptions {
   /** The origin of the Worker, with an optional path prefix. `https`, or `http` on localhost only. */
@@ -169,6 +169,11 @@ export function createClient(options: ClientOptions) {
     deleteResource: (resourceId: string) => request<{ deleted: true }>("DELETE", `/resources/${part(resourceId, "resourceId")}`),
     createInvite: (resourceId: string, input: { role: Role; email?: string; handle?: string; expiresInMs?: number }) =>
       request<{ id: string }>("POST", `/resources/${part(resourceId, "resourceId")}/invites`, drop({ ...input, role: oneOf(input.role, ROLES, "role") })),
+    /** The invites on a resource, in id order. It holds no email. Needs an owner. */
+    listInvites: (resourceId: string, input: { limit?: number; cursor?: string } = {}) =>
+      request<{ invites: InviteSummary[]; nextCursor?: string }>("GET", `/resources/${part(resourceId, "resourceId")}/invites${paging(input)}`),
+    /** Stops an invite from being accepted. Needs an owner. An invite that was accepted is refused (409): revoke the grant instead. */
+    revokeInvite: (inviteId: string) => request<{ ok: true }>("DELETE", `/invites/${part(inviteId, "inviteId")}`),
     acceptInvite: (inviteId: string) => request<{ ok: true }>("POST", `/invites/${part(inviteId, "inviteId")}/accept`),
     createLink: (resourceId: string, input: { role: Role; expiresInMs?: number; signedInOnly?: boolean }) =>
       request<NewLink>("POST", `/resources/${part(resourceId, "resourceId")}/links`, drop({ ...input, role: oneOf(input.role, ROLES, "role") })),

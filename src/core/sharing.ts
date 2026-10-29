@@ -41,7 +41,7 @@ export type Grant = { resourceId: string; subjectKind: SubjectKind; subjectId: s
 
 export type Resource = { id: string; type: string; parentId?: string | null };
 export type Decision = { allowed: boolean; role?: Role };
-export type InviteSummary = { id: string; resourceId: string; role: Role; for: "email" | "handle"; handle?: string; expiresAt?: number; acceptedAt?: number };
+export type InviteSummary = { id: string; resourceId: string; role: Role; for: "email" | "handle"; handle?: string; expiresAt?: number; acceptedAt?: number; revokedAt?: number };
 type Identity = { email?: string; handle?: string };
 
 const randomToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -302,6 +302,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         ...(typeof d.email !== "string" ? { handle: d.handle as string } : {}),
         ...(typeof d.expiresAt === "number" ? { expiresAt: d.expiresAt } : {}),
         ...(typeof d.acceptedAt === "number" ? { acceptedAt: d.acceptedAt } : {}),
+        ...(d.revokedAt != null ? { revokedAt: typeof d.revokedAt === "number" ? d.revokedAt : 0 } : {}),
       }));
       return { invites, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
     },
@@ -313,7 +314,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       await store.transaction(async (tx) => {
         const invite = await tx.get("invites", inviteId);
         const mine = invite?.email !== undefined ? ctx.kind === "human" && identity.email?.toLowerCase() === invite.email : ctx.kind === "agent" && identity.handle === invite?.handle;
-        const live = invite && invite.acceptedAt === undefined && finiteOrAbsent(invite.expiresAt) && (invite.expiresAt == null || (invite.expiresAt as number) > now());
+        const live = invite && invite.acceptedAt === undefined && invite.revokedAt == null && finiteOrAbsent(invite.expiresAt) && (invite.expiresAt == null || (invite.expiresAt as number) > now());
         if (!invite || !live || !mine) throw forbidden();
         const target = await requireResource(tx, invite.resourceId as string);
         const current = rank((await tx.get("grants", grantKey(invite.resourceId as string, subject)))?.role);
@@ -321,6 +322,22 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         await tx.put("invites", inviteId, { ...invite, acceptedAt: now() });
         if (rank(invite.role) > current) await putGrant(tx, invite.resourceId as string, subject, invite.role as Role);
         await recordChange(tx, ctx, { action: "invite.accept", resourceId: invite.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
+      });
+    },
+
+    /** Needs an owner of the invite's resource. An accepted invite cannot be revoked: the grant stays, and `revokeGrant` removes it. */
+    async revokeInvite(ctx: PrincipalContext, inviteId: string): Promise<void> {
+      const invite = await store.get("invites", inviteId);
+      if (!invite) throw forbidden();
+      await requireAdmin(ctx, invite.resourceId as string);
+      // In a transaction, so an invite that an erase removed in between is not put back.
+      await store.transaction(async (tx) => {
+        const current = await tx.get("invites", inviteId);
+        if (!current) throw forbidden();
+        if (current.acceptedAt !== undefined) throw new Error("invite already accepted");
+        if (current.revokedAt != null) return;
+        await tx.put("invites", inviteId, { ...current, revokedAt: now() });
+        await recordChange(tx, ctx, { action: "invite.revoke", resourceId: current.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
       });
     },
 

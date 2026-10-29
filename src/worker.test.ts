@@ -187,6 +187,28 @@ describe("sharing over HTTP", () => {
     expect((await s.call("POST", `/invites/${byEmail.id}/accept`, { token: cy })).status).toBe(200);
   });
 
+  test("only an owner lists and revokes invites, a revoked invite fails, and the list holds no email", async () => {
+    const { s, ana, bo } = await world();
+    const agent = await json(await s.call("POST", "/agents", { token: bo, body: { handle: "scribe", scopes: ["doc:read"] } }));
+    const invite = await json(await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", handle: "scribe" } }));
+    await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", email: "secret@example.test" } });
+    expect((await s.call("GET", "/resources/plan/invites", { token: bo })).status).toBe(403);
+    expect((await s.call("GET", "/resources/plan/invites")).status).toBe(401);
+    expect((await s.call("GET", "/resources/plan/invites?limit=x", { token: ana })).status).toBe(400);
+    const listed = await s.call("GET", "/resources/plan/invites?limit=1", { token: ana });
+    const page = (await listed.json()) as { invites: unknown[]; nextCursor?: string };
+    expect(page.invites).toHaveLength(1);
+    expect(page.nextCursor).toBeDefined();
+    expect(JSON.stringify(await (await s.call("GET", "/resources/plan/invites", { token: ana })).json())).not.toContain("secret");
+    expect((await s.call("DELETE", `/invites/${invite.id}`, { token: bo })).status).toBe(403);
+    expect((await s.call("DELETE", "/invites/none", { token: ana })).status).toBe(403);
+    expect((await s.call("DELETE", `/invites/${invite.id}`, { token: ana })).status).toBe(200);
+    expect((await s.call("POST", `/invites/${invite.id}/accept`, { token: agent.apiKey! })).status).toBe(403);
+    const other = await json(await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", handle: "scribe" } }));
+    expect((await s.call("POST", `/invites/${other.id}/accept`, { token: agent.apiKey! })).status).toBe(200);
+    expect((await s.call("DELETE", `/invites/${other.id}`, { token: ana })).status).toBe(409);
+  });
+
   test("only an owner reads the audit log, and it holds the chain", async () => {
     const { s, ana, bo } = await world();
     await access(s, "plan", "read", bearer(bo));

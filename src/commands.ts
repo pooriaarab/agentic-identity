@@ -195,6 +195,14 @@ export const COMMANDS: Command[] = [
     run: async (app, args) => createSharing(app.store, { now: app.now }).listInvites(await app.actor(), str(args, "resource"), paging(args)),
   },
   {
+    path: ["invites", "revoke"], tool: "identity_invites_revoke", summary: "Stop an invite from being accepted. Needs an owner.",
+    args: [{ name: "invite", type: "string", description: "The invite id.", positional: true, required: true }],
+    run: async (app, args) => {
+      await createSharing(app.store, { now: app.now }).revokeInvite(await app.actor(), str(args, "invite"));
+      return { ok: true };
+    },
+  },
+  {
     path: ["links", "create"], tool: "identity_links_create", summary: "Make a share link. The token shows once. Needs an owner.",
     args: [
       resource,
