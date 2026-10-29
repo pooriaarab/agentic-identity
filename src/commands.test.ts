@@ -59,6 +59,14 @@ describe("principals list", () => {
   });
 });
 
+describe("principals list for an agent", () => {
+  test("an agent without all rights cannot list the principals", async () => {
+    const { run } = await setup();
+    const made = (await run(undefined, ["agents", "create"], { handle: "helper", scopes: ["doc:admin"] })) as { id: string };
+    await expect(run(made.id, ["principals", "list"], {})).rejects.toThrow("forbidden");
+  });
+});
+
 describe("the actor", () => {
   test("an unknown, revoked, or expired actor is refused by every command", async () => {
     const { store, run, tick } = await setup();

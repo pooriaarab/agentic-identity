@@ -9,8 +9,10 @@ import { StoreConflictError, parseRegion, type AdapterOptions, type Doc, type St
 import { createMemoryStore } from "./memory.js";
 
 const FORMAT = 1;
-const LOCK_WAIT_MS = 2_000;
-const LOCK_STALE_MS = 10_000;
+// A write holds the lock for a moment. A writer waits longer than a lock takes to count as stale,
+// so one command after a crash still gets through.
+const LOCK_WAIT_MS = 5_000;
+const LOCK_STALE_MS = 3_000;
 
 interface Shared {
   path: string;
@@ -19,6 +21,8 @@ interface Shared {
   mirror: Map<string, Map<string, Doc>>;
   /** What the file looked like when this copy was read or written. `undefined` forces a read. */
   seen: string | undefined;
+  /** The end of the last call. Calls on one path run one after another, so memory and file agree. */
+  queue: Promise<unknown>;
 }
 const files = new Map<string, Promise<Shared>>();
 
@@ -66,7 +70,7 @@ async function load(shared: Shared): Promise<void> {
 function open(path: string): Promise<Shared> {
   let known = files.get(path);
   if (!known) {
-    const shared: Shared = { path, inner: createMemoryStore(), mirror: new Map(), seen: undefined };
+    const shared: Shared = { path, inner: createMemoryStore(), mirror: new Map(), seen: undefined, queue: Promise.resolve() };
     known = load(shared).then(() => shared);
     // A file that cannot be read is not kept, so a later call tries again.
     known.catch(() => files.delete(path));
@@ -74,6 +78,12 @@ function open(path: string): Promise<Shared> {
   }
   return known;
 }
+
+const serial = <R>(shared: Shared, fn: () => Promise<R>): Promise<R> => {
+  const run = shared.queue.then(fn);
+  shared.queue = run.catch(() => undefined);
+  return run;
+};
 
 const refresh = async (shared: Shared) => {
   if (shared.seen !== signature(shared.path)) await load(shared);
@@ -131,11 +141,9 @@ function withLock<R>(path: string, fn: (owned: () => boolean) => R): R {
 type Write = { collection: string; id: string; doc: Doc | null };
 
 /** Writes the file, or throws and leaves the file and this copy to be read again. */
-function commit(shared: Shared, used: Store, writes: Write[]): void {
+function commit(shared: Shared, writes: Write[]): void {
   if (writes.length === 0) return;
   try {
-    // An in-process call that read the file again since this one began has newer data than this one.
-    if (shared.inner !== used) throw new StoreConflictError();
     withLock(shared.path, (owned) => {
       if (shared.seen !== signature(shared.path)) throw new StoreConflictError("the store file changed during the write");
       const next = new Map([...shared.mirror].map(([name, docs]) => [name, new Map(docs)]));
@@ -169,7 +177,7 @@ function commit(shared: Shared, used: Store, writes: Write[]): void {
   }
 }
 
-/** Stores made on the same path in one process share their data. */
+/** Stores made on the same path in one process share their data, and their calls run one at a time. */
 export function createFileStore(options: AdapterOptions & { path: string }): Store {
   const region = options.region === undefined ? "unknown" : parseRegion(options.region);
   const path = resolve(options.path);
@@ -187,12 +195,14 @@ export function createFileStore(options: AdapterOptions & { path: string }): Sto
   });
   const single = async <R>(run: (ops: StoreOps) => Promise<R>): Promise<R> => {
     const shared = await open(path);
-    await refresh(shared);
-    const used = shared.inner;
-    const sink: Write[] = [];
-    const result = await run(trace(used, sink));
-    commit(shared, used, sink);
-    return result;
+    return serial(shared, async () => {
+      await refresh(shared);
+      const used = shared.inner;
+      const sink: Write[] = [];
+      const result = await run(trace(used, sink));
+      commit(shared, sink);
+      return result;
+    });
   };
   return {
     region,
@@ -202,16 +212,19 @@ export function createFileStore(options: AdapterOptions & { path: string }): Sto
     delete: (collection, id) => single((ops) => ops.delete(collection, id)),
     async transaction(fn) {
       const shared = await open(path);
-      await refresh(shared);
-      const used = shared.inner;
-      let sink: Write[] = [];
-      // The memory adapter may run `fn` again, so only the writes of the run that committed count.
-      const result = await used.transaction((tx) => {
-        sink = [];
-        return fn(trace(tx, sink));
+      // Use `tx`, never the store, inside `fn`: a call on the store waits for this one to end.
+      return serial(shared, async () => {
+        await refresh(shared);
+        const used = shared.inner;
+        let sink: Write[] = [];
+        // The memory adapter may run `fn` again, so only the writes of the run that committed count.
+        const result = await used.transaction((tx) => {
+          sink = [];
+          return fn(trace(tx, sink));
+        });
+        commit(shared, sink);
+        return result;
       });
-      commit(shared, used, sink);
-      return result;
     },
   };
 }

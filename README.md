@@ -138,11 +138,12 @@ Every command has `--help`. The commands are:
   an agent, so its scopes and roles apply.
 - `invites accept --email` takes the email as given. The CLI does not verify it,
   because whoever holds the file is trusted. An agent accepts with its own handle.
-- `invites list` shows no email.
+- `invites list` shows no email. `principals list` needs an actor with all rights (`*:admin`).
 - Several processes can use one file. Each command reads the file again when
   another process changed it. A write that another process overtook fails with
   an error such as "the store file changed during the write" and changes
-  nothing. Run it again.
+  nothing. Run it again. A crash can leave `store.json.lock`. A command removes it
+  when it is 3 seconds old.
 - The same file store is available as `createFileStore` from `agentic-identity/file`.
 
 ## Principals and scopes

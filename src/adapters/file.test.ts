@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -83,28 +83,14 @@ it("does not keep a write whose save failed", async () => {
   const path = pathFor();
   const store = createFileStore({ path });
   await store.put("docs", "a", { x: 1 });
-  writeFileSync(`${path}.lock`, "");
+  // A folder cannot be removed as a stale lock, so the lock stays held.
+  mkdirSync(`${path}.lock`);
   await expect(store.put("docs", "b", { x: 2 })).rejects.toThrow("locked");
-  unlinkSync(`${path}.lock`);
+  rmdirSync(`${path}.lock`);
   expect(await store.get("docs", "b")).toBeNull();
   await store.put("docs", "c", { x: 3 });
   expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "c"]);
-}, 10_000);
-
-it("writes only the run of a transaction that committed", async () => {
-  const path = pathFor();
-  const [one, two] = [createFileStore({ path }), createFileStore({ path })];
-  await one.put("docs", "a", { x: 0 });
-  let runs = 0;
-  await one.transaction(async (tx) => {
-    runs++;
-    await tx.get("docs", "a");
-    if (runs === 1) await two.put("docs", "a", { x: 5 });
-    await tx.put("docs", `run${runs}`, { runs });
-  });
-  expect(runs).toBe(2);
-  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "run2"]);
-});
+}, 15_000);
 
 it("refuses a file that holds a doc that is not an object", async () => {
   for (const docs of [{ local: null }, { x: "str" }, { y: [1] }]) {
@@ -114,28 +100,46 @@ it("refuses a file that holds a doc that is not an object", async () => {
   }
 });
 
-it("refuses a write when the file was read again in this process after the transaction began", async () => {
-  const path = pathFor();
-  const [one, two] = [createFileStore({ path }), createFileStore({ path })];
-  await one.put("docs", "a", { n: 0 });
-  await expect(
-    one.transaction(async (tx) => {
-      const a = await tx.get("docs", "a");
-      // Another process saves a = 10. A second store here reads the file again, then this write lands.
-      writeFileSync(`${path}.other`, JSON.stringify({ format: 1, collections: { docs: { a: { n: 10 } } } }));
-      renameSync(`${path}.other`, path);
-      await two.get("docs", "a");
-      await tx.put("docs", "a", { n: (a?.n as number) + 1 });
-    }),
-  ).rejects.toThrow(StoreConflictError);
-  expect(onDisk(path).docs.a).toEqual({ n: 10 });
-  expect(await one.get("docs", "a")).toEqual({ n: 10 });
-});
-
 it("does not show the start of a file that is not a store", async () => {
   const path = pathFor();
   writeFileSync(path, "jo@ex.io");
   const error = await createFileStore({ path }).get("docs", "a").catch((e: Error) => e);
   expect(String(error)).toContain("not an agentic-identity store file");
   expect(String(error)).not.toContain("ex.io");
+});
+
+it("keeps memory and file the same when two calls overlap", async () => {
+  const path = pathFor();
+  const s = createFileStore({ path });
+  await s.put("docs", "k", { v: "0" });
+  const a = s.transaction(async (tx) => {
+    await tx.put("docs", "k", { v: "A" });
+  });
+  const b = (async () => {
+    await null;
+    await null;
+    return s.put("docs", "k", { v: "B" });
+  })();
+  await Promise.all([a, b]);
+  expect(await s.get("docs", "k")).toEqual(onDisk(path).docs.k);
+});
+
+it("notices a replacement of the file that has the same size", async () => {
+  const path = pathFor();
+  const store = createFileStore({ path });
+  await store.put("docs", "a", { x: 1 });
+  writeFileSync(`${path}.other`, readFileSync(path, "utf8").replace('"x":1', '"x":2'));
+  renameSync(`${path}.other`, path);
+  expect(await store.get("docs", "a")).toEqual({ x: 2 });
+});
+
+it("removes a lock that a crash left behind", async () => {
+  const path = pathFor();
+  const store = createFileStore({ path });
+  await store.put("docs", "a", { x: 1 });
+  writeFileSync(`${path}.lock`, "crashed");
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(`${path}.lock`, old, old);
+  await store.put("docs", "b", { x: 2 });
+  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "b"]);
 });

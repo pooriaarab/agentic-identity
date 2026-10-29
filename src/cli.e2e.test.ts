@@ -61,7 +61,7 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
   });
 
   test("an error does not echo an email that was mistyped", () => {
-    for (const args of [["invites", "accept", "abc", "ann@example.com"], ["ann@example.com"], ["--as", "ann@example.com", "whoami"]]) {
+    for (const args of [["invites", "accept", "abc", "ann@example.com"], ["ann@example.com"], ["--as", "ann@example.com", "whoami"], ["invites", "create", "d9", "viewer", "--ann@example.com"]]) {
       const r = run(...args);
       expect(r.code, args.join(" ")).toBeGreaterThan(0);
       expect(r.err).not.toContain("example.com");
@@ -115,6 +115,7 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     const link = run("links", "create", "doc2", "viewer", "--signed-in-only").json();
     expect(run("links", "resolve", "doc2", link.token).json()).toEqual({ allowed: false });
     expect(run("invites", "create", "doc2", "viewer").code).toBe(2);
+    expect(run("invites", "create", "doc2", "viewer", "--handle", "bot", "--expires-in-ms", "0").code).toBe(2);
     expect(run("audit", "doc2", "--limit", "0").code).toBe(2);
     // The file is private and keeps no token, only its hash.
     expect(statSync(store).mode & 0o777).toBe(0o600);

@@ -72,6 +72,9 @@ const limit: Arg = { name: "limit", type: "number", description: "The most items
 const cursor: Arg = { name: "cursor", type: "string", description: "The nextCursor of the last page." };
 const expiresInMs: Arg = { name: "expires-in-ms", type: "number", description: "Time to live, in milliseconds." };
 
+const checkExpiry = (ms: unknown) => {
+  if (ms !== undefined && (typeof ms !== "number" || !Number.isSafeInteger(ms) || ms <= 0)) throw new UsageError("expires-in-ms must be a positive whole number");
+};
 const isPerson = (ctx: PrincipalContext) => ctx.kind === "human" && ctx.chain.length === 1;
 
 export const COMMANDS: Command[] = [
@@ -85,7 +88,8 @@ export const COMMANDS: Command[] = [
   {
     path: ["principals", "list"], tool: "identity_principals_list", summary: "List the principals in the store.", args: [limit, cursor],
     run: async (app, args) => {
-      await app.actor();
+      // The list names every principal with its scopes, so only an actor with all rights reads it.
+      if (!hasScope((await app.actor()).scopes, "*:admin")) throw new Error("forbidden");
       const page = await app.store.query("principals", paging(args));
       const keep = ["id", "kind", "handle", "parentId", "ownerId", "scopes", "expiresAt", "revokedAt"];
       return { principals: page.items.map((i) => Object.fromEntries(keep.filter((k) => i.data[k] !== undefined).map((k) => [k, i.data[k]]))), ...opt(page.nextCursor, "nextCursor") };
@@ -159,6 +163,7 @@ export const COMMANDS: Command[] = [
     ],
     run: async (app, args) => {
       if ((args.email === undefined) === (args.handle === undefined)) throw new UsageError("give an email or a handle, not both");
+      checkExpiry(args["expires-in-ms"]);
       return createSharing(app.store, { now: app.now }).createInvite(await app.actor(), str(args, "resource"), {
         role: str(args, "role") as Role, ...opt(args.email as string | undefined, "email"), ...opt(args.handle as string | undefined, "handle"), ...opt(args["expires-in-ms"] as number | undefined, "expiresInMs"),
       });
@@ -193,7 +198,7 @@ export const COMMANDS: Command[] = [
     ],
     run: async (app, args) => {
       const ms = args["expires-in-ms"];
-      if (ms !== undefined && (typeof ms !== "number" || !Number.isSafeInteger(ms) || ms <= 0)) throw new UsageError("expires-in-ms must be a positive whole number");
+      checkExpiry(ms);
       return createSharing(app.store, { now: app.now }).createLink(await app.actor(), str(args, "resource"), {
         role: str(args, "role") as Role, signedInOnly: args["signed-in-only"] === true, ...(ms === undefined ? {} : { expiresAt: app.now() + (ms as number) }),
       });

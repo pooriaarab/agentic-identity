@@ -116,7 +116,9 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
     io.out(JSON.stringify(await command.run(app, values), null, 2));
     return 0;
   } catch (error) {
-    io.err(`error: ${error instanceof Error ? error.message : String(error)}`);
+    const code = (error as { code?: string }).code;
+    // A parse error repeats the text of the flag, and a mistyped flag can be an address.
+    io.err(`error: ${code?.startsWith("ERR_PARSE_ARGS") ? "bad option or value. Run with --help." : error instanceof Error ? error.message : String(error)}`);
     return error instanceof UsageError || error instanceof RangeError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
   }
 }
