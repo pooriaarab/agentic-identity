@@ -268,6 +268,63 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(await one.get("members", "x")).toEqual(runs === 2 ? { role: "owner", note: "n" } : { role: "owner" });
     });
 
+    // A query guards the docs it returned. The failure cases: a rival write changes a returned
+    // doc, a rival delete removes one, and a rival write changes a doc a read-only run returned.
+    it("never commits a run that another store's write overtook, for a doc a query returned", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("members", "x", { team: "a", role: "owner" });
+      const race = raceWrite(() => two.put("members", "x", { team: "a", role: "viewer" }));
+      let runs = 0;
+      let landed = false;
+      let owners = 0;
+      await one.transaction(async (tx) => {
+        landed = false;
+        owners = (await tx.query("members", { where: { team: "a", role: "owner" } })).items.length;
+        if (++runs === 1) landed = await race.start();
+        await tx.put("results", "r", { owners });
+      });
+      expect(landed).toBe(false);
+      await race.settle();
+      // A run that counted the owner before the demotion must not commit its count.
+      expect(await one.get("results", "r")).toEqual({ owners: runs === 2 ? 0 : 1 });
+    });
+
+    it("never commits a run that another store's delete overtook, for a doc a query returned", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("members", "x", { team: "a" });
+      const race = raceWrite(() => two.delete("members", "x"));
+      let runs = 0;
+      let landed = false;
+      await one.transaction(async (tx) => {
+        landed = false;
+        const found = (await tx.query("members", { where: { team: "a" } })).items.length;
+        if (++runs === 1) landed = await race.start();
+        await tx.put("results", "r", { found });
+      });
+      expect(landed).toBe(false);
+      await race.settle();
+      expect(await one.get("results", "r")).toEqual({ found: runs === 2 ? 0 : 1 });
+    });
+
+    it("never commits a read-only run that another store's write overtook, for a doc a query returned", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("members", "x", { team: "a", n: 1 });
+      const race = raceWrite(() => two.put("members", "x", { team: "a", n: 2 }));
+      const seen: unknown[] = [];
+      let landed = false;
+      await one.transaction(async (tx) => {
+        landed = false;
+        seen.push((await tx.query("members", { where: { team: "a" } })).items[0]?.data.n);
+        if (seen.length === 1) landed = await race.start();
+      });
+      expect(landed).toBe(false);
+      await race.settle();
+      expect(seen).toEqual(seen.length === 2 ? [1, 2] : [1]);
+    });
+
     // The rule Firestore sets, so that one app behaves the same on every adapter.
     it("fails a read that comes after a write in the same transaction, and writes nothing", async () => {
       const s = await make({});
