@@ -14,6 +14,9 @@
 // 10. Counts are reported for each package that finished, and a failed package has none.
 // 11. An empty registry is refused, as an empty app list is.
 // 12. A package given the deps it was registered with gets those same deps.
+// 13. What JSON would change or drop fails the export: a sparse array, an extra key on an array, a hidden
+//     `toJSON`, a symbol key, a getter. The zip holds what the check saw (a getter runs once).
+// 14. The subject kind reaches every package unchanged, for export and erase. Nesting past 64 levels fails.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -85,8 +88,32 @@ describe("export", () => {
       expect(err).toBeInstanceOf(AccountExportError);
       expect(err.appId).toBe("tasks");
     }
+    const hidden = { a: 1 };
+    Object.defineProperty(hidden, "toJSON", { value: () => "swapped", enumerable: false });
+    let reads = 0;
+    const getter = { get v() { return ++reads === 1 ? 1 : undefined; } };
+    const sneaky: unknown[] = [new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
+    for (const record of sneaky) {
+      await expect(createAccountRegistry().register(pkg("tasks", { rows: [record] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
+    }
     const ok = await createAccountRegistry().register(pkg("tasks", { rows: [{ x: shared, y: shared }, null, "s", 1.5, [true]] }), {}).export(ana, { now });
     expect(ok.manifest.apps[0]!.files).toHaveLength(1);
+  });
+
+  test("limits nesting to 64 levels", async () => {
+    const nest = (n: number) => { let v: unknown = 1; for (let i = 0; i < n; i++) v = [v]; return v; };
+    await createAccountRegistry().register(pkg("tasks", { rows: [nest(63)] }), {}).export(ana, { now });
+    await expect(createAccountRegistry().register(pkg("tasks", { rows: [nest(66)] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
+  });
+
+  test("gives every package the subject's kind unchanged", async () => {
+    const seen: AccountSubject[] = [];
+    const spy: AccountPackage = { id: "a", exportAccount: async (s) => (seen.push({ ...s }), {}), eraseAccount: async (s) => (seen.push({ ...s }), {}) };
+    const bot: AccountSubject = { id: "ana", kind: "agent" };
+    const r = createAccountRegistry().register(spy, {});
+    await r.export(bot, { now });
+    await r.erase(bot, createMemoryStore(), { actor: null, now });
+    expect(seen).toEqual([bot, bot]);
   });
 
   test("refuses a bad shape or collection name", async () => {
@@ -118,7 +145,7 @@ describe("erase", () => {
     expect(report.ok).toBe(true);
     expect(report.counts).toEqual({ tasks: { boards: 2, tasks: 0 }, tables: { rows: 5 } });
     const audit = await entries(store);
-    expect(audit.map((e) => e.targetId)).toEqual(["tasks", "tables"]);
+    expect(audit.map((e) => e.targetId).sort()).toEqual(["tables", "tasks"]); // keys are random ids, so the order of reads is not the order of writes
     expect(JSON.stringify(audit)).not.toContain(ana.id);
   });
 

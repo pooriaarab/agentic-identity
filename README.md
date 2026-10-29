@@ -529,8 +529,8 @@ const { zip } = await registry.export({ id: userId, kind: "human" });
 const report = await registry.erase({ id: userId, kind: "human" }, store, { actor: ctx }); // report.counts.tasks.boards === 2
 ```
 
-- The subject has an id and a kind. A missing or unknown kind throws. A person and an agent can share an id, so a package keys on both.
-- `exportAccount` returns collection names with lists of plain JSON records. A value that JSON would change or drop (`undefined`, `NaN`, a `Date`, a class instance, a loop) fails the export and names the package. Each collection becomes `<package id>/<collection>.json` in the zip.
+- The subject has an id and a kind. A missing or unknown kind throws. A person and an agent can share an id, so a package keys on both. The manifest and the audit entries record the id only, so keep ids unique across kinds in one deployment, or run one export for each kind.
+- `exportAccount` returns collection names with lists of plain JSON records. A value that JSON would change or drop (`undefined`, `NaN`, a `Date`, a class instance, a hole in an array, a getter, a loop) fails the export and names the package. Each collection becomes `<package id>/<collection>.json` in the zip.
 - `eraseAccount` returns whole-number counts for each collection. A bad count fails that package. The other packages still run.
 - The registry runs on `exportAccount` and `eraseAccount` above, so it has the same zip, audit, and failure rules. `registry.erase` adds `report.counts`, for each package that finished.
 
