@@ -53,10 +53,12 @@ const APP_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const FILE_LIMIT = 65_535;
 const BYTE_LIMIT = 0xffff_ffff;
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 const bytesOf = (content: string | Uint8Array) => (typeof content === "string" ? encoder.encode(content) : content);
 const NAME_LIMIT = 0xffff;
 
 function checkApps(apps: AccountApp[]): void {
+  if (!Array.isArray(apps) || apps.length === 0) throw new Error("apps are required");
   const seen = new Set<string>();
   for (const app of apps) {
     if (typeof app.id !== "string" || !APP_ID.test(app.id) || app.id === "manifest.json") throw new Error("invalid app id");
@@ -66,7 +68,7 @@ function checkApps(apps: AccountApp[]): void {
 }
 
 function checkPath(path: unknown): asserts path is string {
-  if (typeof path !== "string" || path === "" || path.startsWith("/") || path.includes("\\") || path.includes("\0")) throw new Error("invalid file path");
+  if (typeof path !== "string" || path === "" || path.startsWith("/") || path.includes("\\") || path.includes("\0") || decoder.decode(encoder.encode(path)) !== path) throw new Error("invalid file path");
   if (path.split("/").some((part) => part === "" || part === "." || part === "..")) throw new Error("invalid file path");
 }
 
@@ -177,7 +179,7 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
         if (folders.has(file.path)) throw new Error("file path over a file");
         const given = bytesOf(file.content);
         if (!(given instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
-        const data = typeof file.content === "string" ? given : given.slice(); // a later change to the exporter's buffer must not split the hash from the zip
+        const data = typeof file.content === "string" ? given : new Uint8Array(given); // a later change to the exporter's buffer must not split the hash from the zip
         const name = `${app.id}/${file.path}`;
         if (encoder.encode(name).length > NAME_LIMIT) throw new Error("file name too long for a zip");
         entries.push({ name, data });
@@ -230,7 +232,7 @@ async function isMine(store: Pick<Store, "get">, subject: string, actor: Princip
 export interface EraseResult {
   appId: string;
   ok: boolean;
-  /** The error message of a failed eraser. It may name data: do not log it. */
+  /** The error message of a failed eraser. It may name data: do not log it, and do not put personal data in it. */
   error?: string;
   /** False when the audit entry for this app could not be written. */
   audited: boolean;

@@ -12,9 +12,10 @@
 // 10. An empty subject is refused.
 // 11. A path under a file ("x" and "x/y"), a bad content type, and a name over 65,535 bytes fail as
 //     an AccountExportError and make no zip.
-// 13. A failing actor lookup, or an eraser that removes the actor, still blanks the actor.
 // 12. When the actor is the subject or acts for them, the entries name no one, and they survive
 //     `deletePerson`. An admin actor stays in the entry.
+// 13. A failing actor lookup, or an eraser that removes the actor, still blanks the actor.
+// 14. A path with a lone surrogate, a Buffer that changes after export, and an empty app list are refused or copied.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -90,8 +91,23 @@ describe("exportAccount", () => {
     await expect(bad([{ path: "n".repeat(70_000), content: "1" }])).rejects.toBeInstanceOf(AccountExportError);
   });
 
+  test("refuses a lone surrogate in a path and copies a Buffer", async () => {
+    await expect(exportAccount("ana", [app("a", [{ path: "a\uD800", content: "1" }])], { now })).rejects.toMatchObject({ cause: { message: "invalid file path" } });
+    const buf = Buffer.from("ab");
+    const slow: AccountApp = { id: "a", exportFor: async () => [{ path: "f", content: buf }], eraseFor: async () => {} };
+    const gate: AccountApp = { id: "b", exportFor: async () => { buf[0] = 0; return []; }, eraseFor: async () => {} };
+    const { manifest, zip } = await exportAccount("ana", [slow, gate], { now });
+    expect(manifest.apps[0]!.files[0]!.bytes).toBe(2);
+    expect(Buffer.from(zip).includes(Buffer.from("ab"))).toBe(true);
+  });
+
+  test("refuses an empty app list", async () => {
+    await expect(exportAccount("ana", [], { now })).rejects.toThrow("apps are required");
+    await expect(eraseAccount("ana", [], createMemoryStore(), { now })).rejects.toThrow("apps are required");
+  });
+
   test("refuses an empty subject", async () => {
-    await expect(exportAccount("", [], { now })).rejects.toThrow("subject is required");
+    await expect(exportAccount("", [app("a")], { now })).rejects.toThrow("subject is required");
   });
 });
 
