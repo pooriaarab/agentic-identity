@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getStore } from "@netlify/blobs";
 import { BlobsServer } from "@netlify/blobs/server";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createNetlifyBlobs, createNetlifyStore, type NetlifyStoreLike } from "./netlify.js";
 import { createFakeNetlifyStore } from "./netlify.fake.js";
 
@@ -15,7 +15,13 @@ const strongStore = (store: NetlifyStoreLike) => createNetlifyStore(store, { con
 const SECRET = "s".repeat(32);
 const URL_BASE = "https://files.example/blob";
 
+let realTestsRun = 0;
+const REAL_TESTS = 3;
+
 describe("the real @netlify/blobs client on the local server", () => {
+  afterEach(() => {
+    realTestsRun += 1;
+  });
   let server: BlobsServer;
   let directory: string;
   let real: NetlifyStoreLike;
@@ -29,11 +35,6 @@ describe("the real @netlify/blobs client on the local server", () => {
   afterAll(async () => {
     await server.stop();
     rmSync(directory, { recursive: true, force: true });
-  });
-
-  it.runIf(process.env.REQUIRE_NETLIFY_REAL_CLIENT === "1")("runs on the real client when CI asks for it", () => {
-    expect(real).toBeDefined();
-    expect(server).toBeDefined();
   });
 
   it("tells an eventual store from a strong one", () => {
@@ -81,4 +82,9 @@ describe("the real @netlify/blobs client on the local server", () => {
     };
     expect(await script(createFakeNetlifyStore())).toEqual(await script(real));
   });
+});
+
+// Outside the describe, so skipping the describe does not skip this guard.
+it.runIf(process.env.REQUIRE_NETLIFY_REAL_CLIENT === "1")("ran every real-client test when CI asks for it", () => {
+  expect(realTestsRun).toBe(REAL_TESTS);
 });

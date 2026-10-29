@@ -1,7 +1,8 @@
 // The contract suites run on a fake of the Netlify Blobs client (`netlify.fake.ts`). The local
 // `BlobsServer` of `@netlify/blobs` cannot run them: it checks a condition and then writes in two
-// steps, it builds an ETag from the file mtime, and it sends no ETag on a read. The real client and that server
-// run in `netlify.real.test.ts`, for what the server does right.
+// steps, it builds an ETag from the file mtime, and it sends no ETag on a read. The real client and
+// that server run in `netlify.real.test.ts`, for what the server does right. `npm test` runs that
+// file too, and the CI job `netlify-real-client` runs it alone.
 import { describe, expect, it } from "vitest";
 import { StoreConflictError } from "../ports.js";
 import { runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
