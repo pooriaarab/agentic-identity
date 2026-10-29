@@ -374,6 +374,32 @@ const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.
   and `verifySignedBlobUrl` both throw when it is missing or short. Use one
   secret per bucket.
 
+## Run on local files
+
+`agentic-identity/file` has a `Store` and a `Blobs` that keep data in a folder on disk. Use them
+for local development and for CLIs on Node. They pass the `Store`, audit, and `Blobs` contract
+suites, including the guards for two stores on one folder.
+
+```ts
+import { createFileBlobs, createFileStore } from "agentic-identity/file";
+
+const store = createFileStore({ dir: "./.data" });
+const blobs = createFileBlobs({ dir: "./.data", urlBase: "https://files.example/blob", urlSecret });
+```
+
+- A write goes to a temp file, is synced, and is renamed over the target. A reader never sees half
+  of a write.
+- A file name is the SHA-256 of the doc id or blob key. Keys with slashes, dots, or non-ASCII
+  characters are safe, and `A` and `a` stay apart on a case-insensitive file system.
+- Every write and every transaction commit takes a lock folder in `dir`. Stores on one folder, in
+  one process or in several, share data and keep the transaction and `ifMatch` guarantees. A
+  lock that is 60 seconds old is taken as left by a dead process and removed.
+- A crash during a transaction commit can leave some of its writes applied. The files are not a
+  production database: there is one writer at a time, and a query reads every doc in a collection.
+- `signedUrl` needs `urlBase` and `urlSecret` (32 bytes or more), as on R2. It makes an HMAC URL
+  that your server checks with `verifySignedBlobUrl`. Without them, `signedUrl` throws.
+- Do not use a network file system. The lock and the rename need a local one.
+
 ## Run on Firebase
 
 `agentic-identity/firestore` has a Firestore `Store` and a Firestore `Blobs`. They call the

@@ -52,6 +52,10 @@
       "types": "./dist/adapters/firestore.d.ts",
       "import": "./dist/adapters/firestore.js"
     },
+    "./file": {
+      "types": "./dist/adapters/file.d.ts",
+      "import": "./dist/adapters/file.js"
+    },
     "./worker": {
       "types": "./dist/worker.d.ts",
       "import": "./dist/worker.js"
