@@ -2,7 +2,7 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
-import { beginLogin, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
+import { beginLogin, callbackUri, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
 import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
@@ -69,7 +69,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const app = new Hono().basePath("/api/v1");
   const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
   const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
-  const redirectUri = `${config.signIn?.publicUrl}/api/v1/auth/callback`;
+  const redirectUri = config.signIn ? callbackUri(config.signIn.provider, config.signIn.publicUrl) : "";
 
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status, error.retryAfterSeconds === undefined ? {} : { "retry-after": String(error.retryAfterSeconds) });
@@ -390,6 +390,7 @@ interface Env {
   OIDC_ISSUER?: string;
   OIDC_CLIENT_ID?: string;
   OIDC_CLIENT_SECRET?: string;
+  OIDC_CALLBACK_PATH?: string;
 }
 
 /** The test mint signs people in with no check. A config that names a region or an https URL is a real one. */
@@ -421,7 +422,7 @@ export default {
       throw error;
     });
     await schema;
-    const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "" }) : undefined;
+    const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "", ...(env.OIDC_CALLBACK_PATH ? { callbackPath: env.OIDC_CALLBACK_PATH } : {}) }) : undefined;
     const config = { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1", ...(provider && env.PUBLIC_URL ? { signIn: { provider, publicUrl: env.PUBLIC_URL } } : {}) };
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config }).fetch(request);
   },

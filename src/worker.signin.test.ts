@@ -28,6 +28,7 @@ async function idp() {
   const keys = async () => crypto.subtle.generateKey({ ...rsa, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ["sign", "verify"]);
   const [good, other] = [await keys(), await keys()];
   const jwk = { ...(await crypto.subtle.exportKey("jwk", good.publicKey)), kid: "k1", alg: "RS256" };
+  const tokenRedirects: (string | null)[] = [];
   const codes = new Map<string, { id_token: string; challenge: string }>();
   const sign = async (claims: object, key = good.privateKey, header: object = { alg: "RS256", kid: "k1" }) => {
     const body = `${b64(header)}.${b64(claims)}`;
@@ -41,6 +42,7 @@ async function idp() {
     if (url === `${ISSUER}/jwks`) return Response.json({ keys: [jwk] });
     if (url === `${ISSUER}/token`) {
       const form = new URLSearchParams(String(init?.body));
+      tokenRedirects.push(form.get("redirect_uri"));
       const found = codes.get(form.get("code") ?? "");
       const ok = found && form.get("client_secret") === "secret" && (await s256(form.get("code_verifier") ?? "")) === found.challenge;
       return ok ? Response.json({ id_token: found.id_token }) : Response.json({ error: "invalid_grant" }, { status: 400 });
@@ -54,7 +56,7 @@ async function idp() {
     codes.set(code, { id_token: await sign({ ...base, ...claims }, how.key ?? good.privateKey, how.header), challenge: login.get("code_challenge") ?? "" });
     return code;
   };
-  return { fetchImpl, approve, otherKey: other.privateKey };
+  return { fetchImpl, tokenRedirects, approve, otherKey: other.privateKey };
 }
 
 async function setup(extra: Partial<WorkerConfig> = {}) {
@@ -93,6 +95,22 @@ describe("sign-in", () => {
     expect(cookie).toMatch(/SameSite=Lax/);
     const me = (await (await s.call("GET", "/me", { cookie: cookie.split(";")[0]! })).json()) as { kind: string };
     expect(me.kind).toBe("human");
+  });
+
+  test("a callbackPath on the provider is the redirect_uri in the authorize redirect and the token exchange", async () => {
+    const custom = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/auth/done" });
+    const s = await setup({ signIn: { provider: custom, publicUrl: "https://app.test" } });
+    const { params, state, flow } = await s.login();
+    expect(params.get("redirect_uri")).toBe("https://app.test/auth/done");
+    expect((await s.callback(state, await s.server.approve(params), flow)).status).toBe(302);
+    expect(s.server.tokenRedirects).toEqual(["https://app.test/auth/done"]);
+  });
+
+  test("with no callbackPath the token exchange uses the default redirect_uri", async () => {
+    const s = await setup();
+    const { params, state, flow } = await s.login();
+    await s.callback(state, await s.server.approve(params), flow);
+    expect(s.server.tokenRedirects).toEqual(["https://app.test/api/v1/auth/callback"]);
   });
 
   test.each([["//evil.test"], ["https://evil.test/x"], ["/\\evil.test"]])("a returnTo of %s goes to /", async (to) => {

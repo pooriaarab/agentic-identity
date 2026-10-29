@@ -7,9 +7,17 @@ export interface OidcProviderConfig {
   clientSecret: string;
   /** Always includes `openid`. */
   scopes: string[];
+  /** Where the provider sends the person back. It is set only when it is not `DEFAULT_CALLBACK_PATH`. */
+  callbackPath?: string;
 }
 
-export function oidcProvider(config: { issuer: string; clientId: string; clientSecret: string; scopes?: string[] }): OidcProviderConfig {
+/** The path the Worker uses for the redirect URI when a provider sets no `callbackPath`. */
+export const DEFAULT_CALLBACK_PATH = "/api/v1/auth/callback";
+
+/** The redirect URI for a provider: the origin and the provider's callback path. Use it for both `beginLogin` and `finishLogin`. */
+export const callbackUri = (provider: Pick<OidcProviderConfig, "callbackPath">, origin: string): string => `${origin.replace(/\/+$/, "")}${provider.callbackPath ?? DEFAULT_CALLBACK_PATH}`;
+
+export function oidcProvider(config: { issuer: string; clientId: string; clientSecret: string; scopes?: string[]; callbackPath?: string }): OidcProviderConfig {
   let url: URL;
   try {
     url = new URL(config.issuer);
@@ -22,12 +30,16 @@ export function oidcProvider(config: { issuer: string; clientId: string; clientS
   if (config.clientId === "" || config.clientSecret === "") throw new Error("clientId and clientSecret are required");
   const scopes = config.scopes ?? ["openid", "email", "profile"];
   if (!scopes.includes("openid")) throw new Error("scopes must include openid");
-  return { issuer: config.issuer, clientId: config.clientId, clientSecret: config.clientSecret, scopes };
+  const path = config.callbackPath;
+  if (path !== undefined && (!/^\/[^\s\\?#]*$/.test(path) || path.startsWith("//") || path.split("/").some((part) => part === "." || part === ".."))) {
+    throw new Error("callbackPath must be an absolute path with no query or fragment");
+  }
+  return { issuer: config.issuer, clientId: config.clientId, clientSecret: config.clientSecret, scopes, ...(path === undefined || path === DEFAULT_CALLBACK_PATH ? {} : { callbackPath: path }) };
 }
 
 /** The preset for Google sign-in. Any other provider uses `oidcProvider` with its own issuer. */
-export const googleProvider = (clientId: string, clientSecret: string): OidcProviderConfig =>
-  oidcProvider({ issuer: "https://accounts.google.com", clientId, clientSecret });
+export const googleProvider = (clientId: string, clientSecret: string, options: { callbackPath?: string } = {}): OidcProviderConfig =>
+  oidcProvider({ issuer: "https://accounts.google.com", clientId, clientSecret, ...options });
 
 /**
  * Thrown by `beginLogin` and `finishLogin` for a bad discovery document or an unreachable provider, and

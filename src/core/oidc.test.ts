@@ -4,8 +4,8 @@
 //  3. A discovery answer that is not JSON, is `null`, is an error status, or does not arrive is an `OidcError`
 //     from `beginLogin` and `finishLogin`. So is a token endpoint that does not arrive, and an id token with bad parts.
 import { expect, test } from "vitest";
-import { OidcError as RootOidcError, googleProvider } from "../index.js";
-import { OidcError, beginLogin, finishLogin } from "./oidc.js";
+import { OidcError as RootOidcError, googleProvider, oidcProvider } from "../index.js";
+import { OidcError, beginLogin, callbackUri, finishLogin } from "./oidc.js";
 
 test("googleProvider is the Google issuer, and needs a client id and secret", () => {
   expect(googleProvider("id", "secret")).toEqual({ issuer: "https://accounts.google.com", clientId: "id", clientSecret: "secret", scopes: ["openid", "email", "profile"] });
@@ -56,4 +56,16 @@ test("a token endpoint that does not answer, and an id token with bad parts, giv
   await expect(finishLogin(provider, input, serve(() => new Response("null")))).rejects.toThrow(new OidcError("the provider refused the code"));
   await expect(finishLogin(provider, input, serve(() => Response.json({ id_token: "a.b" })))).rejects.toThrow(new OidcError("bad id token"));
   await expect(finishLogin(provider, input, serve(() => Response.json({ id_token: "x.y.z" })))).rejects.toThrow(OidcError);
+});
+
+test("callbackPath works on oidcProvider and googleProvider, and the default stays unset", () => {
+  expect(googleProvider("id", "secret", { callbackPath: "/auth/done" }).callbackPath).toBe("/auth/done");
+  expect(oidcProvider({ issuer: "https://idp.test", clientId: "id", clientSecret: "s", callbackPath: "/cb" }).callbackPath).toBe("/cb");
+  expect(googleProvider("id", "secret", {})).not.toHaveProperty("callbackPath");
+  expect(callbackUri(googleProvider("id", "secret"), "https://app.test")).toBe("https://app.test/api/v1/auth/callback");
+  expect(callbackUri(googleProvider("id", "secret", { callbackPath: "/auth/done" }), "https://app.test/")).toBe("https://app.test/auth/done");
+});
+
+test.each([[""], ["cb"], ["//evil.test/cb"], ["/cb?x=1"], ["/cb#x"], ["/a/../cb"], ["/a b"], ["/a\\b"], ["https://evil.test/cb"]])("a callbackPath of %j is refused", (path) => {
+  expect(() => googleProvider("id", "secret", { callbackPath: path })).toThrow("callbackPath");
 });
