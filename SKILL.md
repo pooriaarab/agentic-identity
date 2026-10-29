@@ -1,6 +1,6 @@
 ---
 name: agentic-identity
-description: "People, agents, and the access they share: delegation, invites, links, and an audit trail. 0.2.0 preview: principals, sharing, ports, Cloudflare adapters, contract suites, HTTP API, OIDC sign-in, typed SDK."
+description: "People, agents, and the access they share: delegation, invites, links, and an audit trail. 0.2.0 preview: principals, sharing, ports, memory and Cloudflare adapters, contract suites, HTTP API, OIDC sign-in, typed SDK."
 ---
 
 # agentic-identity
