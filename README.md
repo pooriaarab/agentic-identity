@@ -492,8 +492,8 @@ holds an address or a body.
   HTTP mail API, so it fits an EU-hosted provider. The URL must use https. The default body is
   `{ from, to, subject, text, html? }`. Pass `body` to shape it for another API. `token` goes
   in the `Authorization: Bearer` header. A reply that is not 2xx throws `MailError` with the
-  status. It does not follow a redirect (a 3xx is a `MailError`), so the token never leaves for another host. The suite runs it
-  against a Worker that miniflare serves.
+  status. It does not follow a redirect (a 3xx is a `MailError`), so the token never leaves for
+  another host. The suite runs it against a Worker that miniflare serves.
 - `createCloudflareMail(binding, { from, EmailMessage })` sends through a `send_email` binding
   of Cloudflare Email Workers. Pass the `EmailMessage` class from `cloudflare:email`. It builds
   one MIME message (plain, or plain and HTML) and encodes a non-ASCII subject. The suite runs

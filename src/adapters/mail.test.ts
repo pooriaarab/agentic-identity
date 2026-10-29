@@ -100,6 +100,15 @@ describe("HTTP mail", () => {
     }
   });
 
+  it("calls fetch as a plain function, not as a method of the options", async () => {
+    // A Worker's global fetch throws "Illegal invocation" when `this` is another object.
+    const strict = function (this: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(Response.json({ id: "x" }));
+    } as unknown as typeof fetch;
+    expect((await make({ fetch: strict }).send(message)).id).toBe("x");
+  });
+
   it("refuses a bad token with a fixed message that does not quote it", async () => {
     for (const token of ["", "a b", "tok\r\nX: y", 5 as unknown as string]) {
       const error = await make({ token: () => token }).send(message).catch((e: unknown) => e as Error);
@@ -114,6 +123,8 @@ describe("HTTP mail", () => {
   it("refuses a URL with credentials, and a timeout that is too large, when it is built", () => {
     expect(() => make({ url: "https://user:secret@mail.example.test/send" })).toThrow("credentials");
     expect(() => make({ timeoutMs: 2 ** 40 })).toThrow(RangeError);
+    expect(() => make({ timeoutMs: 2 ** 31 })).toThrow(RangeError);
+    expect(() => make({ timeoutMs: 2 ** 31 - 1 })).not.toThrow();
   });
 
   it("lets the caller shape the body for another API", async () => {
@@ -172,8 +183,10 @@ describe("Cloudflare mail", () => {
   });
 
   it("refuses a clock that is not finite", async () => {
-    const { mail } = setup({ now: () => NaN });
-    await expect(mail.send({ to: "ana@example.test", subject: "Hi", text: "x" })).rejects.toThrow(RangeError);
+    for (const bad of [NaN, Infinity, 1e20]) {
+      const { mail } = setup({ now: () => bad });
+      await expect(mail.send({ to: "ana@example.test", subject: "Hi", text: "x" })).rejects.toThrow(RangeError);
+    }
   });
 
   it("writes only the headers it means to in a message with an HTML part", () => {

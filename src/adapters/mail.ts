@@ -40,7 +40,9 @@ export function createHttpMail(options: HttpMailOptions): Mail {
   assertSender(options.from);
   const { from } = options;
   const timeoutMs = options.timeoutMs ?? 10_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31) throw new RangeError("timeoutMs must be above 0 and at most 2147483648");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw new RangeError("timeoutMs must be above 0 and at most 2147483647");
+  // Call it as a plain function: the global fetch of a Worker throws when `this` is the options.
+  const doFetch = options.fetch;
   return {
     region: options.region === undefined ? "unknown" : parseRegion(options.region),
     async send(message) {
@@ -51,7 +53,7 @@ export function createHttpMail(options: HttpMailOptions): Mail {
       const payload = options.body ? options.body(message, from) : { from, to: message.to, subject: message.subject, text: message.text, ...(message.html === undefined ? {} : { html: message.html }) };
       const text = payload !== null && typeof payload === "object" ? JSON.stringify(payload) : undefined;
       if (text === undefined) throw new Error("the mail body builder must return an object");
-      const response = await options.fetch(url, {
+      const response = await doFetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
         body: text,
@@ -130,7 +132,7 @@ export function createCloudflareMail(binding: EmailBindingLike, options: Cloudfl
       assertMailMessage(message);
       const id = crypto.randomUUID();
       const at = now();
-      if (!Number.isFinite(at)) throw new RangeError("the clock must return a finite number");
+      if (!Number.isFinite(at) || Number.isNaN(new Date(at).getTime())) throw new RangeError("the clock must return a time a date can hold");
       const raw = buildMime(message, from, id, at);
       // The binding and the class check the envelope, and their errors can quote the address.
       try {
