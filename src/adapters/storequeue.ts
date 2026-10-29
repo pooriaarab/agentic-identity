@@ -38,9 +38,16 @@ const isMessage = (doc: unknown): doc is Message => {
 };
 
 export function createStoreQueue(store: Store, options: StoreQueueOptions = {}): Queue & { run(): Promise<void>; dead(topic: string): Promise<Json[]> } {
-  const now = options.now ?? Date.now;
-  const lease = (options.leaseSeconds ?? 60) * 1000;
-  if (!Number.isFinite(lease) || lease <= 0) throw new RangeError("leaseSeconds must be above 0");
+  const clock = options.now ?? Date.now;
+  /** The time in whole milliseconds. A bad clock throws, before any write. */
+  const now = (): number => {
+    const at = clock();
+    if (!Number.isSafeInteger(at) || at < 0) throw new RangeError("the clock must return whole milliseconds, 0 or more");
+    return at;
+  };
+  const leaseSeconds = options.leaseSeconds === undefined ? 60 : options.leaseSeconds;
+  const lease = leaseSeconds * 1000;
+  if (typeof leaseSeconds !== "number" || !Number.isFinite(lease) || lease <= 0) throw new RangeError("leaseSeconds must be above 0");
   const handlers = new Map<string, QueueHandler>();
   const runner = crypto.randomUUID();
   let counter = 0;
@@ -102,7 +109,6 @@ export function createStoreQueue(store: Store, options: StoreQueueOptions = {}):
       const text = JSON.stringify(body);
       if (text === undefined) throw new TypeError("the body must be JSON");
       const at = now();
-      if (!Number.isFinite(at)) throw new RangeError("the clock must return a finite number");
       const key = `${String(at).padStart(15, "0")}-${String(counter++).padStart(8, "0")}-${crypto.randomUUID()}`;
       const message: Message = { topic, body: JSON.parse(text) as Json, due: at + delay * 1000, attempt: 0, state: "pending", key, claim: "" };
       await store.put(COLLECTION, key, message);

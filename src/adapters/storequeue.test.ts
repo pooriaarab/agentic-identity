@@ -10,7 +10,9 @@
 //     whether it sorts first or last, and must not show in `dead()`.
 //  6. One instance that runs twice at once must not let the first run settle the second's claim.
 //  7. A failed settle, or a claim that loses its race for good, must not stop the rest of the run.
-//  8. A clock that returns NaN must not store a message that nothing can deliver.
+//  8. A clock that is not whole milliseconds (NaN, a fraction, a negative) must not send, claim, or
+//     settle: no message is delivered early and no doc changes.
+//  9. A bad doc is parked, so it is not read again.
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { StoreConflictError, type Json, type Store } from "../ports.js";
@@ -209,9 +211,31 @@ describe("Store queue leases", () => {
     expect(seen).toEqual([2, 1]);
   });
 
-  it("refuses to send with a clock that is not a finite number", async () => {
-    const q = createStoreQueue(createMemoryStore(), { now: () => NaN });
-    await expect(q.send("a", 1)).rejects.toThrow();
+  it("refuses to send, or to run, with a clock that is not whole milliseconds", async () => {
+    for (const bad of [NaN, Infinity, 1.5, -1]) {
+      const { store, make, at } = setup();
+      const q = make();
+      const seen: Json[] = [];
+      q.consume("a", async (b) => void seen.push(b));
+      await q.send("a", "later", { delaySeconds: 3600 });
+      await q.send("a", "now");
+      const before = JSON.stringify((await store.query("queue_messages")).items);
+      const broken = createStoreQueue(store, { now: () => bad });
+      broken.consume("a", async (b) => void seen.push(b));
+      await expect(broken.send("a", 1)).rejects.toThrow(RangeError);
+      await expect(broken.run()).rejects.toThrow(RangeError);
+      expect(seen).toEqual([]);
+      expect(JSON.stringify((await store.query("queue_messages")).items)).toBe(before);
+      at(0);
+      await q.run();
+      expect(seen).toEqual(["now"]);
+    }
+  });
+
+  it("refuses a lease that is not a positive number", () => {
+    for (const leaseSeconds of [0, -1, NaN, "60" as unknown as number, null as unknown as number]) {
+      expect(() => createStoreQueue(createMemoryStore(), { leaseSeconds })).toThrow();
+    }
   });
 
   it("goes on with the other topics when a settle fails", async () => {

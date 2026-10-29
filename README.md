@@ -468,7 +468,13 @@ contract suite on memory, on D1 (miniflare), and on Firestore (the emulator in C
 - A doc in `queue_messages` that is not a valid message is parked, and `run()` goes on. A run
   whose claim loses a race for good (`StoreConflictError`) moves to the next topic.
 - Parked messages and parked bad docs stay in the Store. There is no purge yet, so delete them
-  from `queue_messages` yourself. On D1 they slow each claim a little as they pile up.
+  from `queue_messages` yourself.
+- A Store error that is not a conflict (a network error) ends `run()`, so the fault shows.
+  The clock must return whole milliseconds, 0 or more. Any other value ends `run()` and `send()`
+  with a `RangeError` before a write.
+- On D1 each claim scans the whole `queue_messages` collection, so a run over n messages reads
+  about n² rows. For a large queue, add an expression index on `topic`, `state`, and `due`,
+  like the `docs_team` example in the D1 schema notes.
 - Firestore needs two composite indexes on `queue_messages`: (`topic`, `state`, `due`) and
   (`topic`, `state`, `key`), each ascending. The emulator does not check indexes. Production
   Firestore refuses the queries until you create them.
