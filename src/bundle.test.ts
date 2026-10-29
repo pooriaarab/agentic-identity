@@ -9,7 +9,7 @@ function isNodeImport(path: string): boolean {
 }
 
 describe("worker bundles", () => {
-  test.each(["src/index.ts", "src/sdk.ts", "src/worker.ts"])(
+  test.each(["src/index.ts", "src/sdk.ts", "src/worker.ts", "src/http.ts"])(
     "%s imports no Node builtin",
     async (entry) => {
       const result = await build({

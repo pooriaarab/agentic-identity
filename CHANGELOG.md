@@ -4,6 +4,7 @@
 
 ### Added
 
+- `requirePrincipal` in `agentic-identity/http` is one framework-free bearer check for app Workers. It takes a `Request` and the `Auth` port and returns the principal, or a 401 or 403 `Response`. `kinds` and `scope` options narrow who passes.
 - The README documents `PRINCIPAL_KINDS`, `PrincipalKind`, and `Principal`. Apps import them from `agentic-identity` and keep no local copy.
 - `createFirestoreBlobs` in `agentic-identity/firestore` is a `Blobs` adapter on Firestore docs. It cuts an object into chunk docs and swaps a meta doc in one transaction, so `ifMatch` and `ifNoneMatch` hold. It passes the `Blobs` contract suite.
 - The CI job `firestore-emulator` runs the `Store`, audit, and `Blobs` contract suites against the Firestore emulator. It fails when the emulator is not up, so it cannot pass on the fake.

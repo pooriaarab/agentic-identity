@@ -239,6 +239,25 @@ await visitor.access("plan", "read", { linkToken: link.token });
 - `withToken(token)` makes a client for another credential, such as an agent key.
 - The default time limit is 30 seconds (`timeoutMs`).
 
+## HTTP helper
+
+`agentic-identity/http` is one bearer check for every app Worker. It uses only
+`Request` and `Response`, so it runs anywhere `fetch` does. The `Auth` port reads the
+credential (a bearer key, or the `session` cookie) and decides if it is expired or revoked.
+
+```ts
+import { requirePrincipal } from "agentic-identity/http";
+
+const who = await requirePrincipal(request, auth, { kinds: ["human", "agent_of_human"], scope: "doc:write" });
+if (who instanceof Response) return who;
+// who.kind is one of PRINCIPAL_KINDS, and who.chain holds the delegation chain.
+```
+
+- A missing, wrong-scheme, bad, expired, or revoked credential is a 401 with `WWW-Authenticate: Bearer`.
+- A good credential of a kind not in `kinds`, or without `scope`, is a 403.
+- An `Auth` that throws is a 503. A bad `kinds` or `scope` option throws a `RangeError`.
+- The body is `{"error": "..."}` and never holds the credential.
+
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
