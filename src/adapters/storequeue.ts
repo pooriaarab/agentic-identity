@@ -7,7 +7,7 @@
 // because the second transaction sees the new `due` or loses the race. A runner that crashes
 // leaves the lease to expire, and the message returns with a higher attempt. Delivery is
 // at-least-once, so a handler must cope with a repeat.
-import { QUEUE_MAX_ATTEMPTS, assertTopic, parseRegion, type AdapterOptions, type Json, type Queue, type QueueHandler, type Store } from "../ports.js";
+import { QUEUE_MAX_ATTEMPTS, assertTopic, parseRegion, type AdapterOptions, type Doc, type Json, type Queue, type QueueHandler, type Store } from "../ports.js";
 
 const COLLECTION = "queue_messages";
 const PAGE = 50;
@@ -34,7 +34,7 @@ interface Message {
 
 const isMessage = (doc: unknown): doc is Message => {
   const m = doc as Message | null;
-  return !!m && typeof m.topic === "string" && typeof m.due === "number" && Number.isFinite(m.due) && Number.isInteger(m.attempt) && (m.state === "pending" || m.state === "dead");
+  return !!m && typeof m.topic === "string" && typeof m.due === "number" && Number.isFinite(m.due) && Number.isInteger(m.attempt) && m.attempt >= 0 && (m.state === "pending" || m.state === "dead");
 };
 
 export function createStoreQueue(store: Store, options: StoreQueueOptions = {}): Queue & { run(): Promise<void>; dead(topic: string): Promise<Json[]> } {
@@ -50,9 +50,15 @@ export function createStoreQueue(store: Store, options: StoreQueueOptions = {}):
     for (;;) {
       const { items } = await store.query<Message>(COLLECTION, { where: { topic, state: "pending" }, orderBy: { field: "due" }, limit: 1 });
       const head = items[0];
-      if (!head || !isMessage(head.data) || head.data.due > now()) return null;
+      if (!head) return null;
+      // Bad data fails closed for that doc alone: park it, and go on with the topic.
+      if (isMessage(head.data) ? head.data.due > now() : false) return null;
       const outcome = await store.transaction(async (tx) => {
         const current = await tx.get<Message>(COLLECTION, head.id);
+        if (current && !isMessage(current) && (current as Doc).state === "pending") {
+          await tx.put(COLLECTION, head.id, { ...(current as Doc), state: "dead", due: now() });
+          return "lost" as const;
+        }
         // Another runner took it, or finished it, since the query.
         if (!isMessage(current) || current.state !== "pending" || current.due > now()) return "lost" as const;
         const attempt = current.attempt + 1;
@@ -107,7 +113,8 @@ export function createStoreQueue(store: Store, options: StoreQueueOptions = {}):
           } catch {
             failed = true;
           }
-          await settle(held.id, held.message, failed);
+          // A failed settle leaves the lease to end, and the message returns. Go on with the rest.
+          await settle(held.id, held.message, failed).catch(() => undefined);
         }
       }
     },
@@ -116,7 +123,7 @@ export function createStoreQueue(store: Store, options: StoreQueueOptions = {}):
       const bodies: Json[] = [];
       for (let cursor: string | undefined; ; ) {
         const page = await store.query<Message>(COLLECTION, { where: { topic, state: "dead" }, orderBy: { field: "key" }, limit: PAGE, ...(cursor === undefined ? {} : { cursor }) });
-        bodies.push(...page.items.map((item) => item.data.body));
+        bodies.push(...page.items.filter((item) => isMessage(item.data)).map((item) => item.data.body));
         if ((cursor = page.nextCursor) === undefined) return bodies;
       }
     },

@@ -6,7 +6,10 @@
 //     another runner delivers it, with a higher attempt.
 //  3. A runner whose lease ended must not delete or park a message that another runner now holds.
 //  4. A message that crashed its runners on every attempt must park, not loop for ever.
-//  5. A doc in the collection that is not a message must not stop the other topics.
+//  5. A doc in the collection that is not a message must not stop its own topic or the others,
+//     whether it sorts first or last, and must not show in `dead()`.
+//  6. One instance that runs twice at once must not let the first run settle the second's claim.
+//  7. A failed settle must not stop the rest of the run.
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Json, Store } from "../ports.js";
@@ -132,15 +135,67 @@ describe("Store queue leases", () => {
     expect((await store.get("queue_messages", id))!.state).toBe("dead");
   });
 
-  it("skips a doc that is not a message and still serves the other topics", async () => {
+  it("parks a doc that is not a message, even when it is first, and serves the rest of its topic", async () => {
     const { store, make } = setup();
     const q = make();
     const seen: Json[] = [];
     q.consume("a", async (b) => void seen.push(b));
     q.consume("b", async (b) => void seen.push(b));
-    await store.put("queue_messages", "junk", { topic: "a", state: "pending", due: "soon" });
+    await store.put("queue_messages", "junk1", { topic: "a", state: "pending", due: "soon" });
+    await store.put("queue_messages", "junk2", { topic: "a", state: "pending", due: -1, attempt: "x" });
+    await store.put("queue_messages", "junk3", { topic: "a", state: "pending", due: -2, attempt: -100, body: 1 });
+    await store.put("queue_messages", "junk4", { topic: "a", state: "dead", key: "k" });
+    await q.send("a", "late");
     await q.send("b", "ok");
     await q.run();
-    expect(seen).toEqual(["ok"]);
+    expect(seen).toEqual(["late", "ok"]);
+    expect(await q.dead("a")).toEqual([]);
+  });
+
+  it("does not let one run settle the claim of another run on the same instance", async () => {
+    const { store, make, at } = setup();
+    const q = make();
+    const releases: (() => void)[] = [];
+    q.consume("a", () => new Promise<void>((r) => releases.push(r)));
+    await q.send("a", 1);
+    const first = q.run();
+    await new Promise((r) => setTimeout(r, 20));
+    at(30_000);
+    const second = q.run();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(releases).toHaveLength(2);
+    releases[0]!();
+    await first;
+    expect((await store.query("queue_messages")).items).toHaveLength(1);
+    releases[1]!();
+    await second;
+    expect((await store.query("queue_messages")).items).toHaveLength(0);
+  });
+
+  it("goes on with the other topics when a settle fails", async () => {
+    let fail = false;
+    const base = createMemoryStore();
+    const store: Store = {
+      ...base,
+      region: base.region,
+      transaction: (fn) => {
+        if (!fail) return base.transaction(fn);
+        fail = false;
+        return Promise.reject(new Error("conflict"));
+      },
+    };
+    const q = createStoreQueue(store);
+    const seen: Json[] = [];
+    q.consume("a", async (b) => {
+      seen.push(b);
+      fail = true;
+    });
+    q.consume("b", async (b) => void seen.push(b));
+    await q.send("a", 1);
+    await q.send("b", 2);
+    await q.run();
+    expect(seen).toEqual([1, 2]);
+    // The failed settle left message 1 claimed, so it returns once its lease ends.
+    expect((await base.query("queue_messages")).items).toHaveLength(1);
   });
 });

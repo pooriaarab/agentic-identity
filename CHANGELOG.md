@@ -8,6 +8,7 @@
 
 ### Added
 
+- `createStoreQueue` is a `Queue` adapter that keeps messages in any `Store`, so it runs on D1 and on Firestore. A runner claims a message in a transaction with a lease, so two runners deliver it once. It passes the `Queue` contract suite on memory, D1, and Firestore. The CI job `firestore-emulator` runs it too.
 - `requirePrincipal` in `agentic-identity/http` is one framework-free bearer check for app Workers. It takes a `Request` and the `Auth` port and returns the principal, or a 401 or 403 `Response`. `kinds` and `scope` options narrow who passes. A write on the session cookie needs an `Origin` listed in `origins`, or it is a 403. An `Auth` that throws gives a 503.
 - `parsePrincipal` and `subjectOf` check a principal from outside input. A missing or unknown kind, or an id outside a closed character set, throws `PrincipalParseError`. `subjectOf` gives `kind:id`.
 - The README documents `PRINCIPAL_KINDS`, `PrincipalKind`, and `Principal`. Apps import them from `agentic-identity` and keep no local copy.

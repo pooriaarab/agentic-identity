@@ -459,6 +459,14 @@ contract suite on memory, on D1 (miniflare), and on Firestore (the emulator in C
   one Store do not both deliver it. A runner that crashes loses the lease, and another runner
   delivers the message with a higher attempt. Delivery is at-least-once: write handlers that
   cope with a repeat.
+- A handler must finish within `leaseSeconds`. After that another runner may deliver the
+  message again, and the first runner's result is dropped.
+- A retry has the due time of its failure, so it goes behind messages sent after it. The order
+  is strict only for messages that succeed the first time.
+- A doc in `queue_messages` that is not a valid message is parked, and `run()` goes on.
+- Firestore needs two composite indexes on `queue_messages`: (`topic`, `state`, `due`) and
+  (`topic`, `state`, `key`), each ascending. The emulator does not check indexes. Production
+  Firestore refuses the queries until you create them.
 - It is not Cloudflare Queues. A Cloudflare Queues binding has its own clock and cannot run the
   contract suite, which sets the clock.
 
