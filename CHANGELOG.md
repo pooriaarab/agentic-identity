@@ -4,6 +4,7 @@
 
 ### Added
 
+- `callbackPath` on `oidcProvider` and `googleProvider`, and `OIDC_CALLBACK_PATH` in the Worker. The sign-in callback can use a path outside `/api/v1`. The redirect URI, the authorize redirect, the token exchange, and the flow cookie all use that path. `callbackUri(provider, origin)` builds the same URI for your own code.
 - Email magic-link sign-in, a second way to sign in next to OIDC. `POST /auth/magic` mails a link with a random token that works once and ends after 15 minutes. The store holds only the hash of the token. `GET /auth/magic/verify` shows a page with one button, so a link scanner does not use the token. The button sends `POST /auth/magic/verify`, which sets the session cookie. The answer to a request is the same for every address, and each address, each IP, and all requests have a rate budget. It works with any `Mail` port, such as `createHttpMail` and `createCloudflareMail`. Set `magicLink` in the config and pass `mail` to `createApp`. The Worker entry reads `MAIL_FROM` with `MAIL_HTTP_URL` (and `MAIL_HTTP_TOKEN`) or a `SEND_EMAIL` binding.
 
 ## 0.8.0 - 2026-10-29
