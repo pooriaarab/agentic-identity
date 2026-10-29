@@ -1,4 +1,4 @@
-// An in-process fake of the Firestore REST surface that the adapter uses: get, runQuery,
+// An in-process fake of the Firestore REST surface that the adapter uses: get, batchGet, runQuery,
 // commit, beginTransaction, and rollback. It locks like Firestore: a transaction locks each doc
 // it reads (a missing doc too, and every doc a query returns), a write from outside waits for
 // the lock, and a transaction that waits too long gets 409 ABORTED. Used when no emulator runs.
@@ -169,6 +169,16 @@ export function createFakeFirestore(options: FakeFirestoreOptions = {}): { fetch
       if (transaction !== undefined) await lockFor(transaction, path);
       const found = snapshot(path);
       return found ? json(200, { name: `${database}/documents/${path}`, fields: found.fields }) : json(404, { error: { code: 404, status: "NOT_FOUND" } });
+    }
+    if (method === "POST" && rest === ":batchGet") {
+      const rows: object[] = [];
+      for (const resource of body.documents as string[]) {
+        const path = relative(resource);
+        if (transaction !== undefined) await lockFor(transaction, path);
+        const found = snapshot(path);
+        rows.push(found ? { found: { name: resource, fields: found.fields }, readTime: "now" } : { missing: resource, readTime: "now" });
+      }
+      return json(200, rows);
     }
     if (method === "POST" && rest === ":runQuery") {
       let rows = runQuery(body);
