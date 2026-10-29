@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `listGrants(ctx, resourceId, { limit, cursor })` lists the honored grants on a resource, an owner only. It has the SDK call `listGrants` and the route `GET /resources/:id/grants`.
+- `deleteResource(ctx, resourceId)` erases a resource with its grants, invites, links, and audit entries, so grants no longer outlive an erase. An owner only. A resource with children is refused (409 over HTTP). It has the SDK call `deleteResource` and the route `DELETE /resources/:id`. It works on every `Store` adapter, and the tests run it on the memory store and on D1.
+
 ### Breaking
 
 - A grant now names its subject by kind and id. A person and an agent with the same id no longer share a role. `grant(ctx, resourceId, { kind, id }, role)` and `revokeGrant(ctx, resourceId, { kind, id })` take a `Subject`. `kind` is `human` or `agent`, and there is no default.

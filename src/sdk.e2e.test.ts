@@ -48,7 +48,10 @@ test("a person, an agent, and a visitor use the whole API through the SDK", asyn
   await ana.createResource({ id: "memo", type: "doc" });
   await ana.grant("memo", { kind: "agent", id: scribe.id }, "editor");
   expect((await agent.access("memo", "write")).allowed).toBe(false);
+  expect((await ana.listGrants("memo")).grants.map((g) => [g.subjectKind, g.role])).toEqual([["agent", "editor"], ["human", "owner"]]);
   await ana.revokeGrant("memo", { kind: "agent", id: scribe.id });
+  expect(await ana.deleteResource("memo")).toEqual({ deleted: true });
+  expect((await agent.access("memo", "write")).allowed).toBe(false);
 
   // The audit log holds the chain, and only an owner reads it.
   const log = await ana.audit("plan");

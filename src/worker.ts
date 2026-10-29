@@ -263,6 +263,19 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return c.json({ ok: true });
   }));
 
+  app.get("/resources/:id/grants", authed(async (c, ctx) => {
+    const limit = c.req.query("limit");
+    const cursor = c.req.query("cursor");
+    if (limit !== undefined && !/^[0-9]{1,6}$/.test(limit)) return fail(400, "bad limit");
+    return c.json(await sharing.listGrants(ctx, id(c), { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
+  }));
+
+  // Erases the resource with its grants, invites, links, and audit entries. 409 when it has children.
+  app.delete("/resources/:id", authed(async (c, ctx) => {
+    await sharing.deleteResource(ctx, id(c)).catch((e: Error) => (/children|too many owners/.test(e.message) ? fail(409, e.message) : Promise.reject(e)));
+    return c.json({ deleted: true });
+  }));
+
   app.post("/resources/:id/invites", authed(async (c, ctx) => {
     const input = await body(c);
     const expiresInMs = typeof input.expiresInMs === "number" ? { expiresInMs: input.expiresInMs } : {};

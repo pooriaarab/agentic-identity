@@ -132,6 +132,22 @@ describe("sharing over HTTP", () => {
     expect((await access(s, "plan", "read", bearer(bo))).allowed).toBe(false);
   });
 
+  test("an owner lists grants and erases a resource, and others are refused", async () => {
+    const { s, ana, bo } = await world();
+    await s.call("POST", "/resources/plan/grants", { token: ana, body: { subjectKind: "human", subjectId: "bo", role: "editor" } });
+    expect((await s.call("GET", "/resources/plan/grants", { token: bo })).status).toBe(403);
+    const listed = await json(await s.call("GET", "/resources/plan/grants", { token: ana }));
+    expect((listed as unknown as { grants: { subjectId: string }[] }).grants.map((g) => g.subjectId)).toEqual(["ana", "bo"]);
+    expect((await s.call("GET", "/resources/plan/grants?limit=x", { token: ana })).status).toBe(400);
+    await s.call("POST", "/resources", { token: ana, body: { id: "kid", type: "doc", parentId: "plan" } });
+    expect((await s.call("DELETE", "/resources/plan", { token: bo })).status).toBe(403);
+    expect((await s.call("DELETE", "/resources/plan", { token: ana })).status).toBe(409);
+    expect((await s.call("DELETE", "/resources/kid", { token: ana })).status).toBe(200);
+    expect((await s.call("DELETE", "/resources/plan", { token: ana })).status).toBe(200);
+    expect((await access(s, "plan", "read", bearer(bo))).allowed).toBe(false);
+    expect((await s.call("GET", "/resources/plan/grants", { token: ana })).status).toBe(403);
+  });
+
   test("a bad credential is a 401, and no credential is an anonymous visitor", async () => {
     const { s } = await world();
     expect((await access(s, "plan", "read", bearer("aid_nope"))).status).toBe(401);

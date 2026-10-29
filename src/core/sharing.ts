@@ -16,6 +16,8 @@ const rank = (role: unknown) => ROLES.indexOf(role as Role);
 /** The default and the largest page of `listAudit`. */
 export const AUDIT_PAGE = 50;
 export const MAX_AUDIT_PAGE = 200;
+/** `deleteResource` removes the owner grants in one transaction, so it refuses more owners than this. */
+export const MAX_OWNERS_ON_ERASE = 100;
 const linkRoles: readonly Role[] = ROLES.filter((r) => r !== "owner");
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -160,6 +162,47 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         if ((await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
         if (legacy) await tx.delete("grants", legacy);
         await tx.delete("grants", grantKey(resourceId, who));
+      });
+    },
+
+    /** The grants on one resource that are honored, in id order. Needs an owner. Pass the `nextCursor` as `cursor` to read on. */
+    async listGrants(ctx: PrincipalContext, resourceId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ grants: Grant[]; nextCursor?: string }> {
+      const limit = options.limit ?? AUDIT_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
+      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+      await requireAdmin(ctx, resourceId);
+      const page = await store.query("grants", { where: { resourceId }, limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
+      const honored = page.items.filter((g) => SUBJECT_KINDS.includes(g.data.subjectKind as SubjectKind) && rank(g.data.role) >= 0);
+      return { grants: honored.map((g) => g.data as unknown as Grant), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
+    },
+
+    /**
+     * Erases a resource and what hangs on it: its grants, invites, links, and audit entries. A
+     * resource with children is refused, so no child is left without its folder. Needs an owner.
+     * The grants of the owners go last, with the resource, so a failed erase can run again.
+     */
+    async deleteResource(ctx: PrincipalContext, resourceId: string): Promise<void> {
+      await requireAdmin(ctx, resourceId);
+      if ((await store.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new Error("the resource has children");
+      if ((await store.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 })).items.length > MAX_OWNERS_ON_ERASE) throw new Error("too many owners: revoke some first");
+      for (const collection of ["links", "invites", "audit"]) {
+        for (;;) {
+          const page = await store.query(collection, { where: { resourceId }, limit: 100 });
+          if (page.items.length === 0) break;
+          await Promise.all(page.items.map((d) => store.delete(collection, d.id)));
+        }
+      }
+      // Every grant but an owner's, whatever its role field holds. The owners go in the transaction.
+      for (let cursor: string | undefined; ; ) {
+        const page = await store.query("grants", { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+        await Promise.all(page.items.filter((g) => g.data.role !== "owner").map((g) => store.delete("grants", g.id)));
+        if ((cursor = page.nextCursor) === undefined) break;
+      }
+      await store.transaction(async (tx) => {
+        const owners = await tx.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 });
+        if (owners.items.length > MAX_OWNERS_ON_ERASE) throw new Error("too many owners: revoke some first");
+        for (const o of owners.items) await tx.delete("grants", o.id);
+        await tx.delete("resources", resourceId);
       });
     },
 

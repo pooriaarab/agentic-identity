@@ -3,9 +3,9 @@
 // clear, refuses a token that could split a header, never follows a redirect, encodes every
 // path part, and puts the token in no error.
 import { ACTIONS, type Action, type AuditEntry, type ChainStep, type PrincipalKind, type Scope } from "./core/principals.js";
-import { ROLES, SUBJECT_KINDS, type Decision, type Resource, type Role, type Subject } from "./core/sharing.js";
+import { ROLES, SUBJECT_KINDS, type Decision, type Grant, type Resource, type Role, type Subject } from "./core/sharing.js";
 
-export type { Action, AuditEntry, ChainStep, Decision, PrincipalKind, Resource, Role, Scope, Subject };
+export type { Action, AuditEntry, ChainStep, Decision, Grant, PrincipalKind, Resource, Role, Scope, Subject };
 
 export interface ClientOptions {
   /** The origin of the Worker, with an optional path prefix. `https`, or `http` on localhost only. */
@@ -142,6 +142,16 @@ export function createClient(options: ClientOptions) {
       request<{ ok: true }>("POST", `/resources/${part(resourceId, "resourceId")}/grants`, { subjectKind: oneOf(subject?.kind, SUBJECT_KINDS, "subject.kind"), subjectId: id(subject?.id, "subjectId"), role: oneOf(role, ROLES, "role") }),
     revokeGrant: (resourceId: string, subject: Subject) =>
       request<{ ok: true }>("DELETE", `/resources/${part(resourceId, "resourceId")}/grants/${oneOf(subject?.kind, SUBJECT_KINDS, "subject.kind")}/${part(subject?.id, "subjectId")}`),
+    /** The grants on a resource that are honored. Needs an owner. */
+    listGrants: (resourceId: string, input: { limit?: number; cursor?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (input.limit !== undefined) query.set("limit", String(input.limit));
+      if (input.cursor !== undefined) query.set("cursor", input.cursor);
+      const text = query.toString();
+      return request<{ grants: Grant[]; nextCursor?: string }>("GET", `/resources/${part(resourceId, "resourceId")}/grants${text ? `?${text}` : ""}`);
+    },
+    /** Erases the resource with its grants, invites, links, and audit entries. Needs an owner. A resource with children is refused. */
+    deleteResource: (resourceId: string) => request<{ deleted: true }>("DELETE", `/resources/${part(resourceId, "resourceId")}`),
     createInvite: (resourceId: string, input: { role: Role; email?: string; handle?: string; expiresInMs?: number }) =>
       request<{ id: string }>("POST", `/resources/${part(resourceId, "resourceId")}/invites`, drop({ ...input, role: oneOf(input.role, ROLES, "role") })),
     acceptInvite: (inviteId: string) => request<{ ok: true }>("POST", `/invites/${part(inviteId, "inviteId")}/accept`),
