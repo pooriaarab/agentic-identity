@@ -16,6 +16,8 @@
 // 12. A package given the deps it was registered with gets those same deps.
 // 13. What JSON would change or drop fails the export: a sparse array, an extra key on an array, a hidden
 //     `toJSON`, a symbol key, a getter. The zip holds what the check saw (a getter runs once).
+// 15. A package id like "constructor" has no inherited entry in `counts`. A count of -0 is 0. A subject read through a
+//     getter reaches packages as the values the check saw. A method that changes after register is not used.
 // 14. The subject kind reaches every package unchanged, for export and erase. Nesting past 64 levels fails.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -102,6 +104,7 @@ describe("export", () => {
   });
 
   test("limits nesting to 64 levels", async () => {
+    // A level is one array inside the collection list: nest(64) has 64 and passes, nest(65) fails.
     const nest = (n: number) => { let v: unknown = 1; for (let i = 0; i < n; i++) v = [v]; return v; };
     await createAccountRegistry().register(pkg("tasks", { rows: [nest(64)] }), {}).export(ana, { now });
     await expect(createAccountRegistry().register(pkg("tasks", { rows: [nest(65)] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
@@ -138,6 +141,33 @@ describe("export", () => {
     expect(r.ids()).toEqual(["tasks"]);
     const report = await r.erase(ana, createMemoryStore(), { actor: null, now });
     expect([report.results[0]!.appId, Object.keys(report.counts)]).toEqual(["tasks", ["tasks"]]);
+  });
+
+  test("a failed package with an inherited-looking id has no counts entry", async () => {
+    const boom: AccountPackage = { id: "constructor", exportAccount: async () => ({}), eraseAccount: async () => { throw new Error("x"); } };
+    const report = await createAccountRegistry().register(boom, {}).erase(ana, createMemoryStore(), { actor: null, now });
+    expect("constructor" in report.counts).toBe(false);
+  });
+
+  test("a count of -0 is 0", async () => {
+    const report = await createAccountRegistry().register(pkg("tasks", {}, { rows: -0 }), {}).erase(ana, createMemoryStore(), { actor: null, now });
+    expect(Object.is(report.counts.tasks!.rows, 0)).toBe(true);
+  });
+
+  test("a subject with getters reaches packages as the values the check saw", async () => {
+    let reads = 0;
+    const tricky = { get id() { return ++reads === 1 ? "ana" : "bob"; }, get kind() { return reads === 1 ? "human" : "agent"; } };
+    const seen: AccountSubject[] = [];
+    const spy: AccountPackage = { id: "a", exportAccount: async (s) => (seen.push({ ...s }), {}), eraseAccount: async () => ({}) };
+    await createAccountRegistry().register(spy, {}).export(tricky as never, { now }).catch(() => {});
+    for (const s of seen) expect(s).toEqual({ id: "ana", kind: "human" });
+  });
+
+  test("a method that changes after register is not used", async () => {
+    const p = { id: "a", exportAccount: async () => ({ rows: [1] }), eraseAccount: async () => ({}) } as AccountPackage;
+    const r = createAccountRegistry().register(p, {});
+    (p as { exportAccount: unknown }).exportAccount = "gone";
+    expect((await r.export(ana, { now })).manifest.apps[0]!.files).toHaveLength(1);
   });
 
   test("an empty registry is refused", async () => {

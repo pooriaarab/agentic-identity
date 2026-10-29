@@ -401,7 +401,7 @@ function copyCounts(counts: unknown): AccountCounts {
   for (const [name, n] of Object.entries(copy)) {
     if (!NAME.test(name)) throw new Error("invalid collection name");
     if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) throw new Error("a count must be a whole number, zero or more");
-    out[name] = n;
+    out[name] = n + 0; // -0 becomes 0
   }
   return out;
 }
@@ -421,23 +421,24 @@ export interface AccountRegistry {
 }
 
 export function createAccountRegistry(): AccountRegistry {
-  const entries: { id: string; pkg: AccountPackage<never>; deps: unknown }[] = [];
+  const entries: { id: string; exportAccount: AccountPackage<never>["exportAccount"]; eraseAccount: AccountPackage<never>["eraseAccount"]; deps: unknown }[] = [];
 
   // `who` is frozen: a package must not change the subject for the next one.
   const apps = (who: AccountSubject, counts?: Record<string, AccountCounts>): AccountApp[] => {
+    // A guard that should never fire: `who.id` is the only id passed in. It stays so a later change cannot send a package another subject.
     const sameSubject = (id: string) => {
       if (id !== who.id) throw new Error("subject does not match");
     };
-    return entries.map(({ id: pkgId, pkg, deps }) => ({
+    return entries.map(({ id: pkgId, exportAccount: runExport, eraseAccount: runErase, deps }) => ({
       id: pkgId,
       async exportFor(id) {
         sameSubject(id);
-        const records = await pkg.exportAccount(who, deps as never);
+        const records = await runExport(who, deps as never);
         return Object.entries(copyRecords(records)).map(([name, list]) => ({ path: `${name}.json`, content: JSON.stringify(list, null, 2) }));
       },
       async eraseFor(id) {
         sameSubject(id);
-        const done = await pkg.eraseAccount(who, deps as never);
+        const done = await runErase(who, deps as never);
         const copy = copyCounts(done);
         if (counts) counts[pkgId] = { ...copy };
       },
@@ -448,9 +449,11 @@ export function createAccountRegistry(): AccountRegistry {
     register(pkg, deps) {
       const id = pkg?.id; // read once: a getter must give the registry one id
       if (typeof id !== "string" || !NAME.test(id) || id === "manifest.json") throw new Error("invalid package id");
-      if (typeof pkg.exportAccount !== "function" || typeof pkg.eraseAccount !== "function") throw new Error("package needs exportAccount and eraseAccount");
+      // The methods are read once, with the id, and called on the package.
+      const { exportAccount: exporter, eraseAccount: eraser } = pkg;
+      if (typeof exporter !== "function" || typeof eraser !== "function") throw new Error("package needs exportAccount and eraseAccount");
       if (entries.some((e) => e.id === id)) throw new Error(`duplicate package id "${id}"`);
-      entries.push({ id, pkg: pkg as AccountPackage<never>, deps });
+      entries.push({ id, exportAccount: (s, d) => exporter.call(pkg, s, d as never), eraseAccount: (s, d) => eraser.call(pkg, s, d as never), deps });
       return registry;
     },
     ids: () => entries.map((e) => e.id),
@@ -460,7 +463,7 @@ export function createAccountRegistry(): AccountRegistry {
     },
     async erase(subject, store, options) {
       const who = checkSubject(subject);
-      const counts: Record<string, AccountCounts> = {};
+      const counts: Record<string, AccountCounts> = Object.create(null); // a package id such as "constructor" must not hit an inherited key
       const report = await eraseAccount(who.id, apps(who, counts), store, options);
       return { ...report, counts };
     },
