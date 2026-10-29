@@ -124,6 +124,25 @@ describe("agentic-identity-mcp", () => {
     await c.close();
   });
 
+  test("the token and delegation tools work over stdio", { timeout: 60_000 }, async () => {
+    const c = client(mcpBin, ["--store", join(dir, "grants.json")]);
+    await c.request(1, "initialize", {});
+    type Result = { isError?: boolean; content: { text: string }[]; structuredContent?: Record<string, string> };
+    const call = async (id: number, name: string, args: object) => (await c.request(id, "tools/call", { name, arguments: args })).result as Result;
+    const token = await call(2, "identity_tokens_create", { scopes: ["doc:read"], label: "ci", expires_in_ms: 60_000 });
+    expect(token.structuredContent).toMatchObject({ id: expect.stringMatching(/^p_/), token: expect.stringMatching(/^aid_/) });
+    const delegation = await call(3, "identity_delegations_create", { scopes: ["doc:read"] });
+    expect(delegation.structuredContent).toMatchObject({ apiKey: expect.stringMatching(/^aid_/) });
+    expect(await call(4, "identity_tokens_create", { scopes: [] })).toMatchObject({ isError: true });
+    expect(await call(5, "identity_delegations_create", { scopes: ["doc:read"], expires_in_ms: 0 })).toMatchObject({ isError: true });
+    await c.close();
+    const asToken = client(mcpBin, ["--store", join(dir, "grants.json"), "--as", token.structuredContent!.id!]);
+    await asToken.request(1, "initialize", {});
+    const refused = (await asToken.request(2, "tools/call", { name: "identity_delegations_create", arguments: { scopes: ["doc:read"] } })).result as Result;
+    expect(refused).toMatchObject({ isError: true, content: [{ text: "a token cannot delegate" }] });
+    await asToken.close();
+  });
+
   test("a call as an agent has the agent's rights", { timeout: 60_000 }, async () => {
     const made = spawnSync(process.execPath, [cliBin, "--store", store, "agents", "create", "scribe", "--scopes", "doc:read"], { encoding: "utf8" });
     const agent = JSON.parse(made.stdout).id as string;

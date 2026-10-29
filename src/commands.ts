@@ -6,11 +6,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { exportAccount, eraseAccount, type AccountApp } from "./account.js";
 import { recordChange } from "./core/audit.js";
+import { issueCredential, randomToken } from "./credentials.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { revokePrincipal, rotateKey } from "./principal-admin.js";
-import { ACTIONS, hasScope, isScope, resolveChain, type Action, type Principal, type PrincipalContext } from "./core/principals.js";
+import { ACTIONS, hasScope, isScope, resolveChain, type Action, type Principal, type Scope, type PrincipalContext } from "./core/principals.js";
 import { ROLES, SUBJECT_KINDS, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
-import type { Store } from "./ports.js";
+import type { Store, StoreOps } from "./ports.js";
 
 /** The person that a new store starts with, and the one a command acts as by default. */
 export const LOCAL_PERSON = "local";
@@ -82,6 +83,28 @@ const expiresInMs: Arg = { name: "expires-in-ms", type: "number", description: "
 const checkExpiry = (ms: unknown) => {
   if (ms !== undefined && (typeof ms !== "number" || !Number.isSafeInteger(ms) || ms <= 0)) throw new UsageError("expires-in-ms must be a positive whole number");
 };
+const expiryAt = (app: App, ms: unknown): number | undefined => {
+  checkExpiry(ms);
+  return ms === undefined ? undefined : app.now() + (ms as number);
+};
+const scopeList = (args: Args): Scope[] => {
+  const scopes = args.scopes;
+  if (!Array.isArray(scopes) || scopes.length === 0 || scopes.length > 32 || !scopes.every(isScope)) throw new UsageError("scopes must be a short list in the scope format, such as doc:write");
+  return scopes;
+};
+const label: Arg = { name: "label", type: "string", description: "A name for the credential, to tell it apart in a list." };
+const scopesArg: Arg = { name: "scopes", type: "list", description: "Comma-separated scopes such as doc:write.", required: true };
+
+/** Makes a principal below the actor, with one credential. The secret shows once. The same steps as the Worker. */
+async function makeBelow(app: App, ctx: PrincipalContext, kind: "user_token" | "agent_of_human" | "agent_of_agent", credential: "pat" | "api_key", scopes: Scope[], expiresAt: number | undefined, label: unknown) {
+  return app.store.transaction(async (tx: StoreOps) => {
+    const id = `p_${randomToken(12)}`;
+    await tx.put("principals", id, { id, kind, scopes, parentId: ctx.principalId, ...(expiresAt === undefined ? {} : { expiresAt }) });
+    const secret = await issueCredential(tx, { principalId: id, kind: credential, ...(expiresAt === undefined ? {} : { expiresAt }), label: typeof label === "string" ? label : "" });
+    await recordChange(tx, ctx, { action: "key.create", targetKind: "principal", targetId: id }, app.now());
+    return { id, secret };
+  });
+}
 const isPerson = (ctx: PrincipalContext) => ctx.kind === "human" && ctx.chain.length === 1;
 
 /** What this store holds about one person, as an app for `exportAccount` and `eraseAccount`. */
@@ -151,6 +174,29 @@ export const COMMANDS: Command[] = [
         await tx.put("principals", id, { id, kind: "agent", scopes, handle, ownerId: ctx.principalId });
       });
       return { id, handle, scopes };
+    },
+  },
+  {
+    path: ["tokens", "create"], tool: "identity_tokens_create", summary: "Make a personal access token that acts as you with fewer scopes. The token shows once. Only a person can.",
+    args: [scopesArg, expiresInMs, label],
+    run: async (app, args) => {
+      const ctx = await app.actor();
+      if (!isPerson(ctx)) throw new Error("only a person makes a token");
+      const scopes = scopeList(args);
+      const { id, secret } = await makeBelow(app, ctx, "user_token", "pat", scopes, expiryAt(app, args["expires-in-ms"]), args.label);
+      return { id, token: secret };
+    },
+  },
+  {
+    path: ["delegations", "create"], tool: "identity_delegations_create", summary: "Give an agent a narrower copy of your rights. A person or an agent can. A token cannot. The key shows once.",
+    args: [scopesArg, expiresInMs, label],
+    run: async (app, args) => {
+      const ctx = await app.actor();
+      if (ctx.kind === "user_token") throw new Error("a token cannot delegate");
+      const scopes = scopeList(args);
+      if (!scopes.every((scope) => hasScope(ctx.scopes, scope))) throw new Error("scopes exceed your own");
+      const { id, secret } = await makeBelow(app, ctx, ctx.kind === "human" ? "agent_of_human" : "agent_of_agent", "api_key", scopes, expiryAt(app, args["expires-in-ms"]), args.label);
+      return { id, apiKey: secret };
     },
   },
   {
