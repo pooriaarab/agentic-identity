@@ -3,9 +3,9 @@
 // clear, refuses a token that could split a header, never follows a redirect, encodes every
 // path part, and puts the token in no error.
 import { ACTIONS, type Action, type AuditEntry, type ChainStep, type PrincipalKind, type Scope } from "./core/principals.js";
-import { ROLES, type Decision, type Resource, type Role } from "./core/sharing.js";
+import { ROLES, SUBJECT_KINDS, type Decision, type Resource, type Role, type Subject } from "./core/sharing.js";
 
-export type { Action, AuditEntry, ChainStep, Decision, PrincipalKind, Resource, Role, Scope };
+export type { Action, AuditEntry, ChainStep, Decision, PrincipalKind, Resource, Role, Scope, Subject };
 
 export interface ClientOptions {
   /** The origin of the Worker, with an optional path prefix. `https`, or `http` on localhost only. */
@@ -137,9 +137,11 @@ export function createClient(options: ClientOptions) {
     revokePrincipal: (id: string) => request<{ revoked: string }>("DELETE", `/principals/${part(id, "id")}`),
 
     createResource: (input: { type: string; id?: string; parentId?: string }) => request<Resource>("POST", "/resources", drop(input)),
-    grant: (resourceId: string, subjectId: string, role: Role) =>
-      request<{ ok: true }>("POST", `/resources/${part(resourceId, "resourceId")}/grants`, { subjectId: id(subjectId, "subjectId"), role: oneOf(role, ROLES, "role") }),
-    revokeGrant: (resourceId: string, subjectId: string) => request<{ ok: true }>("DELETE", `/resources/${part(resourceId, "resourceId")}/grants/${part(subjectId, "subjectId")}`),
+    /** The subject is a person (`human`) or an agent with its own identity (`agent`). The same id of the other kind holds no role. */
+    grant: (resourceId: string, subject: Subject, role: Role) =>
+      request<{ ok: true }>("POST", `/resources/${part(resourceId, "resourceId")}/grants`, { subjectKind: oneOf(subject?.kind, SUBJECT_KINDS, "subject.kind"), subjectId: id(subject?.id, "subjectId"), role: oneOf(role, ROLES, "role") }),
+    revokeGrant: (resourceId: string, subject: Subject) =>
+      request<{ ok: true }>("DELETE", `/resources/${part(resourceId, "resourceId")}/grants/${oneOf(subject?.kind, SUBJECT_KINDS, "subject.kind")}/${part(subject?.id, "subjectId")}`),
     createInvite: (resourceId: string, input: { role: Role; email?: string; handle?: string; expiresInMs?: number }) =>
       request<{ id: string }>("POST", `/resources/${part(resourceId, "resourceId")}/invites`, drop({ ...input, role: oneOf(input.role, ROLES, "role") })),
     acceptInvite: (inviteId: string) => request<{ ok: true }>("POST", `/invites/${part(inviteId, "inviteId")}/accept`),

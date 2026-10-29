@@ -59,7 +59,7 @@ describe("denial", () => {
     ["an unknown role", { resourceId: "folder", subjectId: "bo", role: "god" }],
     ["a missing role", { resourceId: "folder", subjectId: "bo" }],
   ])("a stored grant with %s gives nothing", async (_name, doc) => {
-    await store.put("grants", "folder:bo", doc);
+    await store.put("grants", "folder:human:bo", { ...doc, subjectKind: "human" });
     expect(await allowed(bo, "read", "folder")).toBe(false);
   });
 });
@@ -68,12 +68,12 @@ describe("roles", () => {
   const strongest: Record<Role, string> = { viewer: "read", commenter: "comment", editor: "write", owner: "admin" };
   const actions = ["read", "comment", "write", "admin"] as const;
   test.each(ROLES)("%s allows its action and the weaker ones only", async (role) => {
-    await sharing.grant(ana, "folder", "bo", role);
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, role);
     for (const [i, action] of actions.entries()) expect(await allowed(bo, action, "folder")).toBe(i <= actions.indexOf(strongest[role] as never));
   });
 
   test("a role must be a known role", async () => {
-    await expect(sharing.grant(ana, "folder", "bo", "god" as Role)).rejects.toThrow();
+    await expect(sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "god" as Role)).rejects.toThrow();
   });
 });
 
@@ -89,32 +89,32 @@ describe("scopes narrow", () => {
 
 describe("folders", () => {
   test("a grant passes down and never up", async () => {
-    await sharing.grant(ana, "folder", "bo", "viewer");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "viewer");
     expect(await allowed(bo, "read", "grandchild")).toBe(true);
-    await sharing.grant(ana, "grandchild", "cy", "viewer");
+    await sharing.grant(ana, "grandchild", { kind: "human", id: "cy" }, "viewer");
     expect(await allowed(cy, "read", "folder")).toBe(false);
     expect(await allowed(cy, "read", "child")).toBe(false);
   });
 
   test("the strongest role on the path wins, and a lower child grant does not demote", async () => {
-    await sharing.grant(ana, "folder", "bo", "viewer");
-    await sharing.grant(ana, "child", "bo", "editor");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "viewer");
+    await sharing.grant(ana, "child", { kind: "human", id: "bo" }, "editor");
     expect(await allowed(bo, "write", "grandchild")).toBe(true);
     expect(await allowed(bo, "write", "folder")).toBe(false);
-    await sharing.grant(ana, "folder", "cy", "editor");
-    await sharing.grant(ana, "child", "cy", "viewer");
+    await sharing.grant(ana, "folder", { kind: "human", id: "cy" }, "editor");
+    await sharing.grant(ana, "child", { kind: "human", id: "cy" }, "viewer");
     expect(await allowed(cy, "write", "child")).toBe(true);
   });
 
   test("a cycle, a missing parent, and a path over the cap give no inherited access", async () => {
     await store.put("resources", "x", { id: "x", type: "doc", parentId: "y" });
     await store.put("resources", "y", { id: "y", type: "doc", parentId: "x" });
-    await store.put("grants", "y:bo", { resourceId: "y", subjectId: "bo", role: "owner" });
+    await store.put("grants", "y:human:bo", { resourceId: "y", subjectKind: "human", subjectId: "bo", role: "owner" });
     expect(await allowed(bo, "read", "x")).toBe(false);
     await store.put("resources", "orphan", { id: "orphan", type: "doc", parentId: "gone" });
-    await store.put("grants", "gone:bo", { resourceId: "gone", subjectId: "bo", role: "owner" });
+    await store.put("grants", "gone:human:bo", { resourceId: "gone", subjectKind: "human", subjectId: "bo", role: "owner" });
     expect(await allowed(bo, "read", "orphan")).toBe(false);
-    await sharing.grant(ana, "folder", "bo", "viewer");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "viewer");
     let parent = "folder";
     for (let i = 0; i < 20; i++) {
       await store.put("resources", `d${i}`, { id: `d${i}`, type: "doc", parentId: parent });
@@ -128,7 +128,7 @@ describe("folders", () => {
     await expect(sharing.createResource(bo, { type: "doc", parentId: "folder" })).rejects.toThrow();
     await expect(sharing.createResource(ana, { type: "doc", parentId: "nope" })).rejects.toThrow();
     await expect(sharing.createResource(ana, { type: "Bad Type" })).rejects.toThrow();
-    await sharing.grant(ana, "folder", "bo", "editor");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "editor");
     const made = await sharing.createResource(bo, { type: "doc", parentId: "folder" });
     expect(await allowed(bo, "admin", made.id)).toBe(true);
   });
@@ -136,23 +136,23 @@ describe("folders", () => {
 
 describe("who can share", () => {
   test("only an owner grants, and the last owner stays", async () => {
-    await sharing.grant(ana, "folder", "bo", "editor");
-    await expect(sharing.grant(bo, "folder", "cy", "viewer")).rejects.toThrow();
-    await expect(sharing.revokeGrant(ana, "folder", "ana")).rejects.toThrow();
-    await sharing.grant(ana, "folder", "bo", "owner");
-    await sharing.revokeGrant(bo, "folder", "ana");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "editor");
+    await expect(sharing.grant(bo, "folder", { kind: "human", id: "cy" }, "viewer")).rejects.toThrow();
+    await expect(sharing.revokeGrant(ana, "folder", { kind: "human", id: "ana" })).rejects.toThrow();
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "owner");
+    await sharing.revokeGrant(bo, "folder", { kind: "human", id: "ana" });
     expect(await allowed(ana, "read", "folder")).toBe(false);
   });
 
   test("a revoked grant stops access", async () => {
-    await sharing.grant(ana, "folder", "bo", "viewer");
-    await sharing.revokeGrant(ana, "folder", "bo");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "viewer");
+    await sharing.revokeGrant(ana, "folder", { kind: "human", id: "bo" });
     expect(await allowed(bo, "read", "folder")).toBe(false);
   });
 
   test("an agent of an owner needs the admin scope to share", async () => {
-    await expect(sharing.grant(agentOf("ana", ["doc:write"]), "folder", "bo", "viewer")).rejects.toThrow();
-    await sharing.grant(agentOf("ana", ["doc:admin"]), "folder", "bo", "viewer");
+    await expect(sharing.grant(agentOf("ana", ["doc:write"]), "folder", { kind: "human", id: "bo" }, "viewer")).rejects.toThrow();
+    await sharing.grant(agentOf("ana", ["doc:admin"]), "folder", { kind: "human", id: "bo" }, "viewer");
   });
 });
 
@@ -190,7 +190,7 @@ describe("invites", () => {
   });
 
   test("an accepted invite does not lower a stronger role", async () => {
-    await sharing.grant(ana, "folder", "bo", "editor");
+    await sharing.grant(ana, "folder", { kind: "human", id: "bo" }, "editor");
     const invite = await sharing.createInvite(ana, "folder", { role: "viewer", email: "bo@example.test" });
     await sharing.acceptInvite(bo, invite.id, { email: "bo@example.test" });
     expect(await allowed(bo, "write", "folder")).toBe(true);

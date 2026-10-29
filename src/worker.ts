@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
 import { beginLogin, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
-import { createSharing, type Role } from "./core/sharing.js";
+import { createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
 import { parseRegion, type Store } from "./ports.js";
@@ -253,12 +253,13 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   app.post("/resources/:id/grants", authed(async (c, ctx) => {
     const input = await body(c);
-    await sharing.grant(ctx, id(c), String(input.subjectId), input.role as Role);
+    if (typeof input.subjectId !== "string") return fail(400, "subjectId must be a string");
+    await sharing.grant(ctx, id(c), { kind: input.subjectKind as SubjectKind, id: input.subjectId }, input.role as Role);
     return c.json({ ok: true });
   }));
 
-  app.delete("/resources/:id/grants/:subjectId", authed(async (c, ctx) => {
-    await sharing.revokeGrant(ctx, id(c), id(c, "subjectId"));
+  app.delete("/resources/:id/grants/:kind/:subjectId", authed(async (c, ctx) => {
+    await sharing.revokeGrant(ctx, id(c), { kind: c.req.param("kind") as SubjectKind, id: id(c, "subjectId") });
     return c.json({ ok: true });
   }));
 

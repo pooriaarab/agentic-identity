@@ -19,6 +19,13 @@ export const MAX_AUDIT_PAGE = 200;
 const linkRoles: readonly Role[] = ROLES.filter((r) => r !== "owner");
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
+/** The kinds of principal that sit at the root of a chain, so the kinds that hold a role. */
+export const SUBJECT_KINDS = ["human", "agent"] as const;
+export type SubjectKind = (typeof SUBJECT_KINDS)[number];
+/** Who holds a role. A person and an agent with the same id are two subjects. */
+export type Subject = { kind: SubjectKind; id: string };
+export type Grant = { resourceId: string; subjectKind: SubjectKind; subjectId: string; role: Role };
+
 export type Resource = { id: string; type: string; parentId?: string | null };
 export type Decision = { allowed: boolean; role?: Role };
 type Identity = { email?: string; handle?: string };
@@ -28,10 +35,27 @@ const sha256 = async (text: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
 const finiteOrAbsent = (v: unknown) => v === undefined || v === null || (typeof v === "number" && Number.isFinite(v));
 
+/** `:` cannot be in a resource id, a kind, or a subject id, so a key names one grant. */
+const grantKey = (resourceId: string, subject: Subject) => `${resourceId}:${subject.kind}:${subject.id}`;
+
+const putGrant = (tx: Pick<Store, "put">, resourceId: string, subject: Subject, role: Role) =>
+  tx.put("grants", grantKey(resourceId, subject), { resourceId, subjectKind: subject.kind, subjectId: subject.id, role });
+
+const assertSubject = (subject: unknown): Subject => {
+  const { kind, id } = (subject ?? {}) as Partial<Subject>;
+  if (!SUBJECT_KINDS.includes(kind as SubjectKind)) throw new Error(`invalid subject kind "${String(kind)}"`);
+  if (typeof id !== "string" || !SAFE_ID.test(id)) throw new Error("invalid subject");
+  return { kind: kind as SubjectKind, id };
+};
+
 export function createSharing(store: Store, options: { now?: () => number } = {}) {
   const now = options.now ?? Date.now;
   const forbidden = () => new Error("forbidden");
-  const subjectOf = (ctx: PrincipalContext) => ctx.chain[0]?.id;
+  /** The root of the chain. A root of another kind holds no role. */
+  const subjectOf = (ctx: PrincipalContext): Subject | undefined => {
+    const root = ctx.chain[0];
+    return root && SUBJECT_KINDS.includes(root.kind as SubjectKind) ? { kind: root.kind as SubjectKind, id: root.id } : undefined;
+  };
 
   /** The resource and its folders, nearest first. Null for a cycle, a path over the cap, or no resource. */
   async function pathOf(id: string): Promise<{ type: string; path: string[] } | null> {
@@ -62,9 +86,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     const found = await pathOf(id);
     if (!found || (ctx && !hasScope(ctx.scopes, `${found.type}:${action}`))) return { allowed: false };
     let best = -1;
-    const subject = ctx && subjectOf(ctx);
+    const subject = ctx ? subjectOf(ctx) : undefined;
     for (const folder of subject ? found.path : []) {
-      best = Math.max(best, rank((await store.get("grants", `${folder}:${subject}`))?.role));
+      best = Math.max(best, rank((await store.get("grants", grantKey(folder, subject!)))?.role));
     }
     if (linkToken !== undefined) best = Math.max(best, rank(await linkRole(linkToken, found.path, ctx !== null)));
     return best >= 0 && best >= rank(NEEDS[action]) ? { allowed: true, role: ROLES[best] as Role } : { allowed: false, ...(best >= 0 ? { role: ROLES[best] as Role } : {}) };
@@ -88,12 +112,18 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
   };
   // The query guards the owner docs it returns. A rival demotion of one of them makes this
   // transaction run again, so two demotions never both pass on the same owner.
-  const keepAnotherOwner = async (tx: StoreOps, resourceId: string, subjectId: string) => {
+  // A grant without a valid kind is not honored, so it does not count as an owner.
+  const keepAnotherOwner = async (tx: StoreOps, resourceId: string, subject: Subject) => {
     const owners = await tx.query("grants", { where: { resourceId, role: "owner" }, limit: 2 });
-    if (!owners.items.some((o) => o.data.subjectId !== subjectId)) throw new Error("the last owner cannot be removed");
+    const another = owners.items.some((o) => SUBJECT_KINDS.includes(o.data.subjectKind as SubjectKind) && !(o.data.subjectId === subject.id && o.data.subjectKind === subject.kind));
+    if (!another) throw new Error("the last owner cannot be removed");
   };
-  const putGrant = (tx: Pick<Store, "put">, resourceId: string, subjectId: string, role: Role) =>
-    tx.put("grants", `${resourceId}:${subjectId}`, { resourceId, subjectId, role });
+
+  // A grant stored before kinds sits at `<resource>:<id>`. A later grant or revoke is the newer
+  // decision, so it removes that doc when the principal with that id is of this kind, and the
+  // migration cannot bring it back.
+  const legacyKeyOf = async (tx: StoreOps, resourceId: string, who: Subject) =>
+    (await tx.get("principals", who.id))?.kind === who.kind ? `${resourceId}:${who.id}` : undefined;
 
   return {
     async createResource(ctx: PrincipalContext, input: { id?: string; type: string; parentId?: string }): Promise<Resource> {
@@ -110,21 +140,26 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       return resource;
     },
 
-    async grant(ctx: PrincipalContext, resourceId: string, subjectId: string, role: Role): Promise<void> {
+    async grant(ctx: PrincipalContext, resourceId: string, subject: Subject, role: Role): Promise<void> {
       assertRole(role);
-      if (!SAFE_ID.test(subjectId)) throw new Error("invalid subject");
+      const who = assertSubject(subject);
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
-        if (role !== "owner" && (await tx.get("grants", `${resourceId}:${subjectId}`))?.role === "owner") await keepAnotherOwner(tx, resourceId, subjectId);
-        await putGrant(tx, resourceId, subjectId, role);
+        const legacy = await legacyKeyOf(tx, resourceId, who);
+        if (role !== "owner" && (await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        if (legacy) await tx.delete("grants", legacy);
+        await putGrant(tx, resourceId, who, role);
       });
     },
 
-    async revokeGrant(ctx: PrincipalContext, resourceId: string, subjectId: string): Promise<void> {
+    async revokeGrant(ctx: PrincipalContext, resourceId: string, subject: Subject): Promise<void> {
+      const who = assertSubject(subject);
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
-        if ((await tx.get("grants", `${resourceId}:${subjectId}`))?.role === "owner") await keepAnotherOwner(tx, resourceId, subjectId);
-        await tx.delete("grants", `${resourceId}:${subjectId}`);
+        const legacy = await legacyKeyOf(tx, resourceId, who);
+        if ((await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        if (legacy) await tx.delete("grants", legacy);
+        await tx.delete("grants", grantKey(resourceId, who));
       });
     },
 
@@ -152,7 +187,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         const mine = invite?.email !== undefined ? ctx.kind === "human" && identity.email?.toLowerCase() === invite.email : ctx.kind === "agent" && identity.handle === invite?.handle;
         const live = invite && invite.acceptedAt === undefined && finiteOrAbsent(invite.expiresAt) && (invite.expiresAt == null || (invite.expiresAt as number) > now());
         if (!invite || !live || !mine) throw forbidden();
-        const current = rank((await tx.get("grants", `${invite.resourceId}:${subject}`))?.role);
+        const current = rank((await tx.get("grants", grantKey(invite.resourceId as string, subject)))?.role);
         await tx.put("invites", inviteId, { ...invite, acceptedAt: now() });
         if (rank(invite.role) > current) await putGrant(tx, invite.resourceId as string, subject, invite.role as Role);
       });
@@ -197,4 +232,39 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       return { entries: page.items.map((item) => item.data as unknown as AuditEntry), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
     },
   };
+}
+
+/**
+ * Rewrites grants stored before grants had a kind. They were keyed `<resource>:<id>`. The kind
+ * comes from the principal with that id: `human` or `agent`. Until a grant is rewritten it is not
+ * honored. A grant that exists at the new key keeps its role: it is the later decision. A grant whose principal is missing or has another kind is left as it is, and is listed
+ * in `unresolved` as its doc id. Run it again after a failure: it skips what is done.
+ */
+export async function migrateGrants(store: Store): Promise<{ migrated: number; unresolved: string[] }> {
+  const legacy: string[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await store.query("grants", { limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    for (const g of page.items) if (!SUBJECT_KINDS.includes(g.data.subjectKind as SubjectKind)) legacy.push(g.id);
+    if ((cursor = page.nextCursor) === undefined) break;
+  }
+  let migrated = 0;
+  const unresolved: string[] = [];
+  for (const id of legacy) {
+    const done = await store.transaction(async (tx) => {
+      const old = await tx.get("grants", id);
+      if (!old || SUBJECT_KINDS.includes(old.subjectKind as SubjectKind) || typeof old.resourceId !== "string" || typeof old.subjectId !== "string") return false;
+      const kind = (await tx.get("principals", old.subjectId))?.kind;
+      if (!SUBJECT_KINDS.includes(kind as SubjectKind) || rank(old.role) < 0 || !SAFE_ID.test(old.subjectId) || !SAFE_ID.test(old.resourceId)) return false;
+      const subject: Subject = { kind: kind as SubjectKind, id: old.subjectId };
+      if (grantKey(old.resourceId, subject) === id) return false;
+      // A grant that exists at the new key is the later decision, so it keeps its role.
+      const present = await tx.get("grants", grantKey(old.resourceId, subject));
+      await putGrant(tx, old.resourceId, subject, rank(present?.role) >= 0 ? (present!.role as Role) : (old.role as Role));
+      await tx.delete("grants", id);
+      return true;
+    });
+    if (done) migrated++;
+    else unresolved.push(id);
+  }
+  return { migrated, unresolved };
 }

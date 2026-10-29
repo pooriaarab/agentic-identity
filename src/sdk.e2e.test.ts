@@ -46,9 +46,9 @@ test("a person, an agent, and a visitor use the whole API through the SDK", asyn
   await ana.revokeLink(link.id);
   expect((await visitor.access("plan", "read", { linkToken: link.token })).allowed).toBe(false);
   await ana.createResource({ id: "memo", type: "doc" });
-  await ana.grant("memo", scribe.id, "editor");
+  await ana.grant("memo", { kind: "agent", id: scribe.id }, "editor");
   expect((await agent.access("memo", "write")).allowed).toBe(false);
-  await ana.revokeGrant("memo", scribe.id);
+  await ana.revokeGrant("memo", { kind: "agent", id: scribe.id });
 
   // The audit log holds the chain, and only an owner reads it.
   const log = await ana.audit("plan");

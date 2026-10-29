@@ -91,7 +91,7 @@ describe("ids and inputs", () => {
     const client = createClient({ baseUrl: s.origin, token: TOKEN });
     await client.revokePrincipal(id);
     await client.revokeLink(id);
-    await client.grant(id, id, "viewer");
+    await client.grant(id, { kind: "human", id }, "viewer");
     expect(s.seen.map((r) => r.url)).toEqual([`/api/v1/principals/${encoded}`, `/api/v1/links/${encoded}`, `/api/v1/resources/${encoded}/grants`]);
   });
 
@@ -99,7 +99,7 @@ describe("ids and inputs", () => {
     const s = await server();
     const client = createClient({ baseUrl: s.origin, token: TOKEN });
     expect(() => client.revokePrincipal(id as string)).toThrow();
-    expect(() => client.revokeGrant("plan", id as string)).toThrow();
+    expect(() => client.revokeGrant("plan", { kind: "human", id: id as string })).toThrow();
     expect(s.seen).toHaveLength(0);
   });
 
@@ -108,7 +108,7 @@ describe("ids and inputs", () => {
     const client = createClient({ baseUrl: s.origin, token: TOKEN });
     for (const action of ["delete", "", "READ", "constructor"]) expect(() => client.access("plan", action as "read")).toThrow(RangeError);
     for (const role of ["king", "", "OWNER", "constructor"]) {
-      expect(() => client.grant("plan", "bo", role as "viewer")).toThrow(RangeError);
+      expect(() => client.grant("plan", { kind: "human", id: "bo" }, role as "viewer")).toThrow(RangeError);
       expect(() => client.createLink("plan", { role: role as "viewer" })).toThrow(RangeError);
       expect(() => client.createInvite("plan", { role: role as "viewer", handle: "scribe" })).toThrow(RangeError);
     }
