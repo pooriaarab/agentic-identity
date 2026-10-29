@@ -300,7 +300,7 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
 
 // ---- Package contract and registry ----
 
-/** Who the account is. The kind is part of the subject: a person and an agent can share an id. */
+/** Who the account is. The kind is passed through so a package that keys its data on id and kind can do so. */
 export interface AccountSubject {
   id: string;
   kind: PrincipalKind;

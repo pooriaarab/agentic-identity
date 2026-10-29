@@ -51,9 +51,10 @@ describe("register", () => {
 describe("subject", () => {
   test("needs an id and a valid kind", async () => {
     const r = createAccountRegistry().register(pkg("tasks"), {});
-    for (const bad of [{ id: "", kind: "human" }, { id: "ana" }, { id: "ana", kind: "wizard" }, null, "ana"]) {
-      await expect(r.export(bad as never, { now })).rejects.toThrow(/subject/);
-      await expect(r.erase(bad as never, createMemoryStore(), { actor: null })).rejects.toThrow(/subject/);
+    const refusals: [unknown, string][] = [[{ id: "", kind: "human" }, "subject needs an id"], [{ id: "ana" }, "subject needs a valid kind"], [{ id: "ana", kind: "wizard" }, "subject needs a valid kind"], [null, "subject needs an id"], ["ana", "subject needs an id"]];
+    for (const [bad, message] of refusals) {
+      await expect(r.export(bad as never, { now })).rejects.toThrow(message);
+      await expect(r.erase(bad as never, createMemoryStore(), { actor: null })).rejects.toThrow(message);
     }
   });
 });
@@ -98,7 +99,8 @@ describe("export", () => {
     const getter = { get v() { return ++reads === 1 ? 1 : undefined; } };
     class Swap extends Array { toJSON() { return "swapped"; } }
     const holeAndKey = Object.assign(Object.assign(new Array(2), { 0: 1 }), { x: 1 });
-    const sneaky: unknown[] = [holeAndKey, Swap.from([1]), new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
+    const hiddenKey = Object.defineProperty({ a: 1 }, "internal", { value: "x", enumerable: false });
+    const sneaky: unknown[] = [hiddenKey, holeAndKey, Swap.from([1]), new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
     for (const record of sneaky) {
       await expect(createAccountRegistry().register(pkg("tasks", { rows: [record] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
     }
