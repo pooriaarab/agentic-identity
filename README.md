@@ -470,8 +470,9 @@ contract suite on memory, on D1 (miniflare), and on Firestore (the emulator in C
 - Parked messages and parked bad docs stay in the Store. There is no purge yet, so delete them
   from `queue_messages` yourself.
 - A Store error that is not a conflict (a network error) ends `run()`, so the fault shows.
-  The clock must return whole milliseconds, 0 or more. Any other value ends `run()` and `send()`
-  with a `RangeError` before a write.
+  The clock must return whole milliseconds, 0 or more. Any other value ends `send()`, and ends
+  `run()` when it is read at claim time, with a `RangeError` before a write. A clock that goes bad
+  between a claim and its settle writes nothing, and the message returns when its lease ends.
 - On D1 each claim scans the whole `queue_messages` collection, so a run over n messages reads
   about n² rows. For a large queue, add an expression index on `topic`, `state`, and `due`,
   like the `docs_team` example in the D1 schema notes.
