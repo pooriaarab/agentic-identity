@@ -92,7 +92,8 @@ describe("export", () => {
     Object.defineProperty(hidden, "toJSON", { value: () => "swapped", enumerable: false });
     let reads = 0;
     const getter = { get v() { return ++reads === 1 ? 1 : undefined; } };
-    const sneaky: unknown[] = [new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
+    class Swap extends Array { toJSON() { return "swapped"; } }
+    const sneaky: unknown[] = [Swap.from([1]), new Array(2), Object.assign([1], { secret: "x" }), hidden, { [Symbol("s")]: 1 }, getter];
     for (const record of sneaky) {
       await expect(createAccountRegistry().register(pkg("tasks", { rows: [record] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
     }
@@ -130,7 +131,17 @@ describe("export", () => {
     expect(err.appId).toBe("tables");
   });
 
+  test("a package id that changes between reads is read once", async () => {
+    let reads = 0;
+    const flip: AccountPackage = { get id() { return ++reads <= 1 ? "tasks" : "other"; }, exportAccount: async () => ({}), eraseAccount: async () => ({ rows: 1 }) };
+    const r = createAccountRegistry().register(flip, {});
+    expect(r.ids()).toEqual(["tasks"]);
+    const report = await r.erase(ana, createMemoryStore(), { actor: null, now });
+    expect([report.results[0]!.appId, Object.keys(report.counts)]).toEqual(["tasks", ["tasks"]]);
+  });
+
   test("an empty registry is refused", async () => {
+    await expect(createAccountRegistry().erase(ana, createMemoryStore(), { actor: null, now })).rejects.toThrow("apps are required");
     await expect(createAccountRegistry().export(ana, { now })).rejects.toThrow("apps are required");
   });
 });

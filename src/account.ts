@@ -363,6 +363,7 @@ function snapshot(value: unknown, seen: Set<object>, depth: number): Json {
   };
   let copy: Json;
   if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) throw new Error("records must be plain JSON"); // a subclass may have its own toJSON
     if (keys.length !== value.length + 1) throw new Error("records must be plain JSON"); // a hole, or a key that is not an index
     copy = [];
     for (let i = 0; i < value.length; i++) copy.push(snapshot(own(String(i)), seen, depth + 1));
@@ -420,15 +421,15 @@ export interface AccountRegistry {
 }
 
 export function createAccountRegistry(): AccountRegistry {
-  const entries: { pkg: AccountPackage<never>; deps: unknown }[] = [];
+  const entries: { id: string; pkg: AccountPackage<never>; deps: unknown }[] = [];
 
   // `who` is frozen: a package must not change the subject for the next one.
   const apps = (who: AccountSubject, counts?: Record<string, AccountCounts>): AccountApp[] => {
     const sameSubject = (id: string) => {
       if (id !== who.id) throw new Error("subject does not match");
     };
-    return entries.map(({ pkg, deps }) => ({
-      id: pkg.id,
+    return entries.map(({ id: pkgId, pkg, deps }) => ({
+      id: pkgId,
       async exportFor(id) {
         sameSubject(id);
         const records = await pkg.exportAccount(who, deps as never);
@@ -438,20 +439,21 @@ export function createAccountRegistry(): AccountRegistry {
         sameSubject(id);
         const done = await pkg.eraseAccount(who, deps as never);
         const copy = copyCounts(done);
-        if (counts) counts[pkg.id] = { ...copy };
+        if (counts) counts[pkgId] = { ...copy };
       },
     }));
   };
 
   const registry: AccountRegistry = {
     register(pkg, deps) {
-      if (typeof pkg?.id !== "string" || !NAME.test(pkg.id) || pkg.id === "manifest.json") throw new Error("invalid package id");
+      const id = pkg?.id; // read once: a getter must give the registry one id
+      if (typeof id !== "string" || !NAME.test(id) || id === "manifest.json") throw new Error("invalid package id");
       if (typeof pkg.exportAccount !== "function" || typeof pkg.eraseAccount !== "function") throw new Error("package needs exportAccount and eraseAccount");
-      if (entries.some((e) => e.pkg.id === pkg.id)) throw new Error(`duplicate package id "${pkg.id}"`);
-      entries.push({ pkg: pkg as AccountPackage<never>, deps });
+      if (entries.some((e) => e.id === id)) throw new Error(`duplicate package id "${id}"`);
+      entries.push({ id, pkg: pkg as AccountPackage<never>, deps });
       return registry;
     },
-    ids: () => entries.map((e) => e.pkg.id),
+    ids: () => entries.map((e) => e.id),
     async export(subject, options) {
       const who = checkSubject(subject);
       return exportAccount(who.id, apps(who), options);
