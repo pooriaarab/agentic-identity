@@ -88,6 +88,30 @@ describe("agentic-identity-mcp", () => {
     expect(JSON.parse(cli.stdout).grants).toHaveLength(1);
   });
 
+  test("the lifecycle tools work over stdio, and a bad argument is an error result", { timeout: 60_000 }, async () => {
+    const own = join(dir, "lifecycle.json");
+    const c = client(mcpBin, ["--store", own]);
+    await c.request(1, "initialize", {});
+    type Result = { isError?: boolean; content: { text: string }[]; structuredContent?: Record<string, string> };
+    const call = async (id: number, name: string, args: object) => (await c.request(id, "tools/call", { name, arguments: args })).result as Result;
+    const agent = (await call(2, "identity_agents_create", { handle: "robot", scopes: ["doc:read"] })).structuredContent!;
+    const rotated = await call(3, "identity_keys_rotate", { principal: agent.id });
+    expect(rotated.structuredContent).toMatchObject({ id: agent.id, apiKey: expect.stringMatching(/^aid_/) });
+    expect(await call(4, "identity_principals_revoke", { principal: agent.id })).toMatchObject({ structuredContent: { revoked: agent.id } });
+    expect(await call(5, "identity_keys_rotate", { principal: agent.id })).toMatchObject({ isError: true, content: [{ text: "bad principal" }] });
+    await call(6, "identity_resources_create", { type: "doc", id: "tmp" });
+    expect((await call(7, "identity_resources_delete", { resource: "tmp" })).structuredContent).toEqual({ deleted: true });
+    expect(await call(8, "identity_resources_delete", { resource: "tmp" })).toMatchObject({ isError: true });
+    // The erase needs the flag, as a boolean.
+    expect(await call(9, "identity_account_erase", {})).toMatchObject({ isError: true, content: [{ text: "missing --yes" }] });
+    expect(await call(10, "identity_account_erase", { yes: "true" })).toMatchObject({ isError: true });
+    const out = join(dir, "me.zip");
+    expect((await call(11, "identity_account_export", { out })).structuredContent).toMatchObject({ file: out });
+    expect(await call(12, "identity_account_export", { out })).toMatchObject({ isError: true, content: [{ text: "the file exists" }] });
+    expect(await call(13, "identity_account_erase", { yes: true })).toMatchObject({ structuredContent: { erased: true } });
+    await c.close();
+  });
+
   test("a call as an agent has the agent's rights", { timeout: 60_000 }, async () => {
     const made = spawnSync(process.execPath, [cliBin, "--store", store, "agents", "create", "scribe", "--scopes", "doc:read"], { encoding: "utf8" });
     const agent = JSON.parse(made.stdout).id as string;

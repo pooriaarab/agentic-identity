@@ -125,6 +125,11 @@ Every command has `--help`. The commands are:
 | `principals list` | Lists the principals in the file. |
 | `agents create <handle> --scopes a,b` | Makes an agent with its own identity. Only a person can. |
 | `resources create <type> [--id] [--parent]` | Makes a resource. The actor owns it. |
+| `resources delete <resource>` | Erases a resource with its grants, invites, links, and audit entries. Needs an owner. A resource with children is refused. |
+| `principals revoke <id>` | Revokes an agent, a delegation, or a token, and all below it. Needs its owner or a principal above it. |
+| `keys rotate <agent-id>` | Gives an agent a new key and stops the old ones. The new key shows once. |
+| `account export --out <file>` | Writes the person's data to a zip file with a manifest. It never overwrites a file. |
+| `account erase --yes` | Erases the person, their agents, keys, grants, and the resources only they own. It cannot be undone. |
 | `grants set\|revoke\|list` | Gives, removes, and lists roles on a resource. |
 | `invites create\|accept\|list` | Invites a person by `--email` or an agent by `--handle`. |
 | `links create\|revoke\|resolve` | Makes, revokes, and checks a share link. |
@@ -138,6 +143,7 @@ Every command has `--help`. The commands are:
   an agent, so its scopes and roles apply.
 - `invites accept --email` takes the email as given. The CLI does not verify it,
   because whoever holds the file is trusted. An agent accepts with its own handle.
+- `account export` and `account erase` need a person as the actor, not an agent or a token. `account erase` removes only what the actor owns and does nothing without `--yes`.
 - `invites list` shows no email. `principals list` needs an actor with all rights (`*:admin`).
 - Several processes can use one file. Each command reads the file again when
   another process changed it. A write that another process overtook fails with
@@ -158,7 +164,9 @@ works on the same store file as the CLI, with the same options (`--store`,
 ```
 
 - There is one tool for each CLI command: `identity_whoami`, `identity_principals_list`,
-  `identity_agents_create`, `identity_resources_create`, `identity_grants_set`,
+  `identity_agents_create`, `identity_principals_revoke`, `identity_keys_rotate`,
+  `identity_resources_create`, `identity_resources_delete`, `identity_account_export`,
+  `identity_account_erase`, `identity_grants_set`,
   `identity_grants_revoke`, `identity_grants_list`, `identity_invites_create`,
   `identity_invites_accept`, `identity_invites_list`, `identity_links_create`,
   `identity_links_revoke`, `identity_links_resolve`, and `identity_audit`.

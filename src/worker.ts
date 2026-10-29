@@ -8,7 +8,8 @@ import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
-import { StoreConflictError, parseRegion, type Doc, type Store, type StoreOps } from "./ports.js";
+import { StoreConflictError, parseRegion, type Store, type StoreOps } from "./ports.js";
+import { PrincipalAdminError, revokePrincipal, rotateKey } from "./principal-admin.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
@@ -259,51 +260,15 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     }));
   }));
 
-  // The owner of an agent, or any principal above the target in its chain, may manage it.
-  async function mayManage(ops: StoreOps, ctx: PrincipalContext, target: Principal & { ownerId?: string }): Promise<boolean> {
-    let allowed = target.ownerId === ctx.principalId;
-    for (let up = target.parentId, i = 0; up && i < 8 && !allowed; i++) {
-      allowed = up === ctx.principalId;
-      up = ((await ops.get("principals", up)) as Principal | null)?.parentId;
-    }
-    return allowed;
-  }
-
   // Revoking a principal stops it and everything below it, because rights are re-read up the chain.
+  const adminError = (e: unknown) => (e instanceof PrincipalAdminError ? fail(e.status, e.message) : Promise.reject(e));
   app.delete("/principals/:id", authed(async (c, ctx) => {
-    const revoked = await store.transaction(async (tx) => {
-      const target = (await tx.get("principals", id(c))) as (Principal & { ownerId?: string }) | null;
-      if (!target) return fail(404, "not found");
-      if (!(await mayManage(tx, ctx, target))) return fail(403, "forbidden");
-      await tx.put("principals", target.id, { ...target, revokedAt: now() });
-      await recordChange(tx, ctx, { action: "key.revoke", targetKind: "principal", targetId: target.id }, now());
-      return target.id;
-    });
+    const revoked = await revokePrincipal(store, ctx, id(c), now).catch(adminError);
     return c.json({ revoked });
   }));
 
   // A new key for an agent. Every key it had stops in the same step. The new key is shown once.
-  app.post("/principals/:id/keys", authed(async (c, ctx) => {
-    const result = await store.transaction(async (tx) => {
-      const target = (await tx.get("principals", id(c))) as (Principal & { ownerId?: string }) | null;
-      if (!target) return fail(404, "not found");
-      if (!(await mayManage(tx, ctx, target))) return fail(403, "forbidden");
-      if (target.revokedAt != null || !["agent", "agent_of_human", "agent_of_agent"].includes(target.kind)) return fail(400, "bad principal");
-      // Revoked keys stay as rows, so read every page. A guarded read that is too long gives up.
-      const old: { id: string; data: Doc }[] = [];
-      for (let cursor: string | undefined, pages = 0; ; pages++) {
-        if (pages >= 20) return fail(409, "try again");
-        const page = await tx.query("credentials", { where: { principalId: target.id, kind: "api_key" }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
-        old.push(...page.items);
-        if ((cursor = page.nextCursor) === undefined) break;
-      }
-      for (const key of old) if (key.data.revokedAt == null) await tx.put("credentials", key.id, { ...key.data, revokedAt: now() });
-      const apiKey = await issueCredential(tx, { principalId: target.id, kind: "api_key", label: String(old[0]?.data.label ?? "") });
-      await recordChange(tx, ctx, { action: "key.rotate", targetKind: "principal", targetId: target.id }, now());
-      return { id: target.id, apiKey };
-    });
-    return c.json(result);
-  }));
+  app.post("/principals/:id/keys", authed(async (c, ctx) => c.json(await rotateKey(store, ctx, id(c), now).catch(adminError))));
 
   const sharing = createSharing(store, { now });
   const pick = (input: Record<string, unknown>, ...keys: string[]) => Object.fromEntries(keys.filter((k) => typeof input[k] === "string").map((k) => [k, input[k]]));
