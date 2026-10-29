@@ -239,6 +239,31 @@ await visitor.access("plan", "read", { linkToken: link.token });
 - `withToken(token)` makes a client for another credential, such as an agent key.
 - The default time limit is 30 seconds (`timeoutMs`).
 
+## HTTP helper
+
+`agentic-identity/http` is one bearer check for every app Worker. It uses only
+`Request` and `Response`, so it runs anywhere `fetch` does. The `Auth` port reads the
+credential (a bearer key, or the `session` cookie) and decides if it is expired or revoked.
+
+```ts
+import { requirePrincipal } from "agentic-identity/http";
+
+const who = await requirePrincipal(request, auth, {
+  kinds: ["human", "agent_of_human"],
+  scope: "doc:write",
+  origins: ["https://app.example.org"],
+});
+if (who instanceof Response) return who;
+// who.kind is one of PRINCIPAL_KINDS, and who.chain holds the delegation chain.
+```
+
+- A missing, wrong-scheme, bad, expired, or revoked credential is a 401 with `WWW-Authenticate: Bearer`.
+- An `Authorization` header that is not `Bearer <token>` is a 401, even beside a valid cookie.
+- A good credential of a kind not in `kinds` (an empty list refuses everyone), or without `scope`, is a 403.
+- A write (not GET, HEAD, or OPTIONS) that rides on the session cookie needs an `Origin` listed in `origins`, or it is a 403. A page on another site can make the browser send the cookie, but it cannot set `Origin`. A bearer key needs no origin.
+- An `Auth` that throws is a 503. A bad `kinds` or `scope` option throws a `RangeError`.
+- The body is `{"error": "..."}` and never holds the credential.
+
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
