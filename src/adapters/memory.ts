@@ -1,13 +1,11 @@
 // In-memory adapters for tests and local development. Data is lost on exit.
 import type { PrincipalContext } from "../core/principals.js";
 import {
-  DEFAULT_LIMIT,
   QUEUE_MAX_ATTEMPTS,
   StoreConflictError,
   assertBlobPutOptions,
   assertCollection,
   assertResponseHeaders,
-  assertField,
   assertId,
   assertMailMessage,
   assertTopic,
@@ -27,6 +25,7 @@ import {
   type Store,
   type StoreOps,
 } from "../ports.js";
+import { selectPage } from "./query.js";
 
 interface Backend {
   tables: Map<string, Map<string, { doc: Doc; version: number }>>;
@@ -37,9 +36,6 @@ interface Backend {
 const backends = new Map<string, Backend>();
 const newBackend = (): Backend => ({ tables: new Map(), clock: 0 });
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-
-const compare = (a: Json, b: Json): number =>
-  typeof a !== typeof b ? (typeof a < typeof b ? -1 : 1) : (a as string) < (b as string) ? -1 : (a as string) > (b as string) ? 1 : 0;
 
 interface Tx {
   /** The version each doc had when the transaction first read it. 0 means missing. */
@@ -82,36 +78,10 @@ function storeOps(b: Backend, tx?: Tx): StoreOps {
     async query<T extends Doc>(collection: string, query: Query = {}): Promise<Page<T>> {
       assertCollection(collection);
       noReadAfterWrite();
-      const limit = query.limit ?? DEFAULT_LIMIT;
-      if (!Number.isInteger(limit) || limit < 1) throw new RangeError("limit must be an integer of 1 or more");
-      for (const name of Object.keys(query.where ?? {})) assertField(name);
-      const field = query.orderBy?.field;
-      if (field !== undefined) assertField(field);
-      const sign = query.orderBy?.direction === "desc" ? -1 : 1;
-      const order = (x: { v: Json; id: string }, y: { v: Json; id: string }) => sign * (compare(x.v, y.v) || compare(x.id, y.id));
-      let rows = [...(b.tables.get(collection) ?? [])]
-        .filter(([, found]) => Object.entries(query.where ?? {}).every(([k, v]) => k in found.doc && found.doc[k] === v))
-        .map(([id, found]) => ({ id, found, v: (field === undefined ? id : found.doc[field]) as Json }))
-        .filter((row) => row.v !== undefined && row.v !== null)
-        .sort(order);
-      if (query.cursor !== undefined) {
-        let after: { v: Json; id: string };
-        try {
-          const [v, id] = JSON.parse(Buffer.from(query.cursor, "base64url").toString()) as [Json, string];
-          if (typeof id !== "string") throw new Error();
-          after = { v, id };
-        } catch {
-          throw new Error("invalid cursor");
-        }
-        rows = rows.filter((row) => order(row, after) > 0);
-      }
-      const page = rows.slice(0, limit);
-      const last = page[page.length - 1];
-      for (const row of page) see(collection, row.id, row.found.version);
-      return {
-        items: page.map((row) => ({ id: row.id, data: copy(row.found.doc as T) })),
-        ...(rows.length > limit && last ? { nextCursor: Buffer.from(JSON.stringify([last.v, last.id])).toString("base64url") } : {}),
-      };
+      const found = b.tables.get(collection) ?? new Map<string, { doc: Doc; version: number }>();
+      const { page, nextCursor } = selectPage([...found].map(([id, entry]) => ({ id, doc: entry.doc })), query);
+      for (const row of page) see(collection, row.id, found.get(row.id)!.version);
+      return { items: page.map((row) => ({ id: row.id, data: copy(row.doc as T) })), ...(nextCursor === undefined ? {} : { nextCursor }) };
     },
   };
 }

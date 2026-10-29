@@ -489,6 +489,51 @@ const blobs = createFirestoreBlobs({ ...connection, urlBase: "https://files.exam
   you claim. For the emulator, pass `baseUrl: "http://" + process.env.FIRESTORE_EMULATOR_HOST`
   and leave `token` out.
 
+## Run on Netlify
+
+`agentic-identity/netlify` has a `Store` and a `Blobs` on Netlify Blobs. It uses a small
+structural type for the Netlify `Store`, so pass the result of `getStore(...)` from
+`@netlify/blobs`. Install that package yourself. This package does not depend on it.
+
+```ts
+import { getStore } from "@netlify/blobs";
+import { createNetlifyBlobs, createNetlifyStore } from "agentic-identity/netlify";
+
+const store = createNetlifyStore(getStore("identity-docs"), { region: "eu" });
+const blobs = createNetlifyBlobs(getStore("identity-files"), { region: "eu", urlBase, urlSecret });
+```
+
+Both pass the contract suites. CI runs them on an in-memory fake of the Netlify Blobs
+client (`src/adapters/netlify.fake.ts`), not on a live site. The fake follows the service:
+a conditional write checks and writes in one step, and every write makes a new ETag. A test
+runs one script on the fake and on the real client against the official local server
+(`BlobsServer`), and compares the answers. The local server cannot run the contract suites:
+it checks a condition and then writes in two steps, it builds an ETag from the file time, and
+it sends no ETag on a read. Run the suites on a live Netlify site before you rely on
+this adapter in production.
+
+- Give the `Store` and the `Blobs` each their own Netlify store. The adapter owns every key in it.
+- Every read asks for `consistency: "strong"`. The default of Netlify Blobs is eventual.
+- `Blobs` maps to Netlify directly. A conditional `set` (`onlyIfNew`, `onlyIfMatch`) is atomic,
+  and the ETag is the version. The size and content type sit in the metadata. A key is hashed,
+  so any key works. `signedUrl` makes an HMAC URL for your function, as the R2 adapter does.
+  Call `verifySignedBlobUrl(url, { secret })` there. The secret needs 32 bytes or more.
+- Netlify Blobs has no write that spans two keys, so the `Store` builds a transaction from a
+  lease lock on one key (`leaseMs`, default 30 s) and a journal. A transaction takes the lock,
+  runs, renews the lease with a check that the lock is still its own, writes the journal,
+  applies the writes, and drops the journal. A later holder applies a journal that a crashed
+  holder left. A transaction that fails after the journal is written may still land when the
+  next holder runs. It throws `StoreConflictError` when it cannot get the lock in `waitMs`
+  (default 15 s), and a lock that is not readable counts as held.
+- All writes take the same lock, so they run one at a time. A write is about six requests.
+  A hot app needs a different `Store`. A transaction that runs longer than the lease, or a
+  holder that stalls longer than the lease while it applies writes, can lose to a rival.
+- A `query` reads every doc of the collection, then filters in memory. Use it for small
+  collections. A `get` outside a transaction can see some writes of a transaction that is
+  still applying.
+- `region` is a claim. Netlify Blobs does not let you pick a region per store. Check where
+  your site's functions and blobs run.
+
 ## Develop
 
 ```sh
