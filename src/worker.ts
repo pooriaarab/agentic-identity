@@ -229,7 +229,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     // `no-referrer` would make the browser send `Origin: null` on the form post. `same-origin` sends our Origin and no Referer to another site.
     c.header("referrer-policy", "same-origin");
     const token = c.req.query("token") ?? "";
-    if (!config.magicLink) return fail(404, "magic-link sign-in is not configured");
+    if (!config.magicLink || !deps.mail) return fail(404, "magic-link sign-in is not configured");
     if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
     c.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
     return c.html(
@@ -239,7 +239,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   app.post("/auth/magic/verify", async (c) => {
     noLeak(c);
-    if (!config.magicLink) return fail(404, "magic-link sign-in is not configured");
+    if (!config.magicLink || !deps.mail) return fail(404, "magic-link sign-in is not configured");
     if (c.req.header("origin") !== new URL(config.magicLink.publicUrl).origin) return fail(403, "bad origin");
     await throttle(`magic-verify:${c.req.header("cf-connecting-ip") ?? "unknown"}`, limits.magicVerify);
     const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
@@ -502,7 +502,13 @@ interface Env {
   SEND_EMAIL?: { send(message: unknown): Promise<void> };
 }
 
-export async function mailFromEnv(env: Env): Promise<Mail | undefined> {
+type EmailMessageClass = new (from: string, to: string, raw: string) => unknown;
+const loadEmailMessage = async (): Promise<EmailMessageClass> => {
+  const specifier = "cloudflare:email";
+  return ((await import(/* @vite-ignore */ specifier)) as { EmailMessage: EmailMessageClass }).EmailMessage;
+};
+
+export async function mailFromEnv(env: Env, load: () => Promise<EmailMessageClass> = loadEmailMessage): Promise<Mail | undefined> {
   if (!env.MAIL_FROM || !env.PUBLIC_URL) return undefined;
   // The cookie is `Secure`, so the link must open on https (or on localhost for development).
   try {
@@ -513,7 +519,7 @@ export async function mailFromEnv(env: Env): Promise<Mail | undefined> {
     return undefined;
   }
   try {
-    return await buildMail({ ...env, MAIL_FROM: env.MAIL_FROM }, parseRegion(env.REGION));
+    return await buildMail({ ...env, MAIL_FROM: env.MAIL_FROM }, parseRegion(env.REGION), load);
   } catch {
     // A bad mail setting turns magic-link off. It must not break the other routes.
     console.warn("magic-link mail settings are not valid");
@@ -521,12 +527,10 @@ export async function mailFromEnv(env: Env): Promise<Mail | undefined> {
   }
 }
 
-async function buildMail(env: Env & { MAIL_FROM: string }, region: ReturnType<typeof parseRegion>): Promise<Mail | undefined> {
+async function buildMail(env: Env & { MAIL_FROM: string }, region: ReturnType<typeof parseRegion>, load: () => Promise<EmailMessageClass>): Promise<Mail | undefined> {
   if (env.MAIL_HTTP_URL) return createHttpMail({ url: env.MAIL_HTTP_URL, fetch: globalThis.fetch.bind(globalThis), from: env.MAIL_FROM, ...(env.MAIL_HTTP_TOKEN ? { token: env.MAIL_HTTP_TOKEN } : {}), region });
   if (!env.SEND_EMAIL) return undefined;
-  const specifier = "cloudflare:email";
-  const { EmailMessage } = (await import(/* @vite-ignore */ specifier)) as { EmailMessage: new (from: string, to: string, raw: string) => unknown };
-  return createCloudflareMail(env.SEND_EMAIL, { from: env.MAIL_FROM, EmailMessage, region });
+  return createCloudflareMail(env.SEND_EMAIL, { from: env.MAIL_FROM, EmailMessage: await load(), region });
 }
 
 /** The test mint signs people in with no check. A config that names a region or an https URL is a real one. */
@@ -544,6 +548,7 @@ export function unsafeMintEnvError(env: Pick<Env, "REGION" | "PUBLIC_URL" | "IDE
 
 let schema: Promise<unknown> | undefined;
 let warned = false;
+let mailSetup: Promise<Mail | undefined> | undefined;
 
 /** The Worker config from the env. A bad OIDC setting throws, so the Worker does not start. */
 export function workerConfig(env: Pick<Env, "IDENTITY_UNSAFE_TEST_MINT" | "OIDC_ISSUER" | "OIDC_CLIENT_ID" | "OIDC_CLIENT_SECRET" | "OIDC_CALLBACK_PATH" | "PUBLIC_URL">): WorkerConfig {
@@ -565,7 +570,8 @@ export default {
       throw error;
     });
     await schema;
-    const mail = await mailFromEnv(env);
+    mailSetup ??= mailFromEnv(env);
+    const mail = await mailSetup;
     const config = { ...workerConfig(env), ...(mail && env.PUBLIC_URL ? { magicLink: { publicUrl: env.PUBLIC_URL } } : {}) };
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config, ...(mail ? { mail } : {}) }).fetch(request);
   },

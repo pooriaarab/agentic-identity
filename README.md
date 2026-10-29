@@ -352,8 +352,8 @@ line. It is off (404) without them. OIDC is not needed.
   mail for a while. A failed send logs `magic-link mail failed`, never an address.
 - An address with a trailing dot in the domain is refused. Plus tags and dots are other addresses.
 - The IP comes from `CF-Connecting-IP`. Behind another host, set that header at your proxy.
-- The link carries the token in the URL. The verify answer sets `Referrer-Policy: no-referrer` and
-  `Cache-Control: no-store`. No log line holds an address.
+- The link carries the token in the URL. The page sends `Referrer-Policy: same-origin` (a browser then sends our Origin with the
+  button). The `POST` answer sends `no-referrer`. Both send `Cache-Control: no-store`. No log line holds an address.
 
 ## SDK
 

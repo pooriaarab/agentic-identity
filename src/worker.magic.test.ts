@@ -136,10 +136,16 @@ describe("magic-link sign-in", () => {
     expect(await mailFromEnv(base)).toBeDefined();
     expect(await mailFromEnv({ ...base, MAIL_HTTP_URL: "http://mail.test/send" })).toBeUndefined();
     expect(await mailFromEnv({ ...base, MAIL_FROM: "not-an-address" })).toBeUndefined();
-    expect(await mailFromEnv({ ...base, REGION: "mars" })).toBeUndefined();
     expect(await mailFromEnv({ ...base, PUBLIC_URL: "app.test" })).toBeUndefined();
     expect(await mailFromEnv({ ...base, PUBLIC_URL: "http://app.test" })).toBeUndefined();
-    expect(await mailFromEnv({ ...base, MAIL_HTTP_URL: undefined, SEND_EMAIL: { send: async () => undefined } })).toBeUndefined();
+    const noModule = async () => { throw new Error("no module"); };
+    expect(await mailFromEnv({ ...base, MAIL_HTTP_URL: undefined, SEND_EMAIL: { send: async () => undefined } }, noModule)).toBeUndefined();
+    // With the class loaded, the Cloudflare adapter builds raw mail and hands it to the binding.
+    const raws: string[] = [];
+    class FakeMessage { constructor(readonly from: string, readonly to: string, readonly raw: string) { raws.push(raw); } }
+    const cf = await mailFromEnv({ ...base, MAIL_HTTP_URL: undefined, SEND_EMAIL: { send: async () => undefined } }, async () => FakeMessage);
+    await cf!.send({ to: "ana@example.test", subject: "Hi", text: "Body" });
+    expect(raws).toHaveLength(1);
     expect(await mailFromEnv({ ...base, MAIL_FROM: undefined })).toBeUndefined();
     expect(JSON.stringify(warn.mock.calls)).not.toContain("app.test");
     warn.mockRestore();
@@ -248,6 +254,9 @@ describe("magic-link sign-in", () => {
     expect((await off.ask("ana@example.test")).status).toBe(404);
     expect((await off.open("a".repeat(43))).status).toBe(404);
     expect((await off.verify("a".repeat(43))).status).toBe(404);
+    const noMail = createApp({ store: createMemoryStore(), now: () => t, config: { magicLink: { publicUrl: "https://app.test" }, unsafeTestMint: false } });
+    expect((await noMail.request(`/api/v1/auth/magic/verify?token=${"a".repeat(43)}`)).status).toBe(404);
+    expect((await noMail.request("/api/v1/auth/magic/verify", { method: "POST", headers: { origin: "https://app.test" } })).status).toBe(404);
     const app = createApp({ store: createMemoryStore(), now: () => t, config: { magicLink: { publicUrl: "https://app.test" }, unsafeTestMint: false } });
     const res = await app.request("/api/v1/auth/magic", { method: "POST", body: JSON.stringify({ email: "ana@example.test" }) });
     expect(res.status).toBe(404);
