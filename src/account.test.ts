@@ -12,6 +12,7 @@
 // 10. An empty subject is refused.
 // 11. A path under a file ("x" and "x/y"), a bad content type, and a name over 65,535 bytes fail as
 //     an AccountExportError and make no zip.
+// 13. A failing actor lookup, or an eraser that removes the actor, still blanks the actor.
 // 12. When the actor is the subject or acts for them, the entries name no one, and they survive
 //     `deletePerson`. An admin actor stays in the entry.
 import { execFileSync } from "node:child_process";
@@ -151,6 +152,26 @@ describe("eraseAccount", () => {
     expect(erased).toEqual(["tasks:ana"]);
     const denied = (await entries(store)).filter((e) => e.outcome === "denied");
     expect(denied.map((e) => e.targetId)).toEqual(["docs"]);
+  });
+
+  test("a failing actor lookup does not stop the erase and blanks the actor", async () => {
+    const erased: string[] = [];
+    const inner = createMemoryStore();
+    const store = { get: async () => { throw new Error("down"); }, put: inner.put.bind(inner) };
+    const actor = { principalId: "root", kind: "human", chain: [{ id: "root", kind: "human" }], scopes: [] } as never;
+    const report = await eraseAccount("ana", [app("docs", [], erased), app("tasks", [], erased)], store, { now, actor });
+    expect(report.ok).toBe(true);
+    expect(erased).toHaveLength(2);
+    expect((await entries(inner)).map((e) => e.principalId)).toEqual(["(erased)", "(erased)"]);
+  });
+
+  test("an eraser that removes the actor's principal does not change the entries", async () => {
+    const store = createMemoryStore();
+    await store.put("principals", "p_bot", { id: "p_bot", kind: "agent", ownerId: "ana" });
+    const actor = { principalId: "p_bot", kind: "agent", chain: [{ id: "p_bot", kind: "agent" }], scopes: [] } as never;
+    const wipe: AccountApp = { id: "wipe", exportFor: async () => [], eraseFor: async () => { await store.delete("principals", "p_bot"); } };
+    await eraseAccount("ana", [wipe, app("docs")], store, { now, actor });
+    expect((await entries(store)).map((e) => e.principalId)).toEqual(["(erased)", "(erased)"]);
   });
 
   test("a failing audit write is reported and the erase goes on", async () => {

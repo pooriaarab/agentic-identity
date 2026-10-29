@@ -153,7 +153,7 @@ export function writeZip(entries: { name: string; data: Uint8Array }[]): Uint8Ar
 /**
  * Asks every app for its files and returns one zip. The zip holds `manifest.json` and, for each
  * app, its files under `<app id>/`. With the same files and the same `now`, the bytes are equal.
- * One failing exporter aborts the whole export with an `AccountExportError`.
+ * One failing exporter aborts the whole export with an `AccountExportError`. A zip over the size limits throws a plain `Error`: no one app is to blame.
  */
 export async function exportAccount(subject: string, apps: AccountApp[], options: AccountOptions = {}): Promise<{ zip: Uint8Array; manifest: AccountManifest }> {
   if (typeof subject !== "string" || subject === "") throw new Error("subject is required");
@@ -175,8 +175,9 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
         paths.add(file.path);
         for (let cut = file.path.indexOf("/"); cut !== -1; cut = file.path.indexOf("/", cut + 1)) folders.add(file.path.slice(0, cut));
         if (folders.has(file.path)) throw new Error("file path over a file");
-        const data = bytesOf(file.content);
-        if (!(data instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
+        const given = bytesOf(file.content);
+        if (!(given instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
+        const data = typeof file.content === "string" ? given : given.slice(); // a later change to the exporter's buffer must not split the hash from the zip
         const name = `${app.id}/${file.path}`;
         if (encoder.encode(name).length > NAME_LIMIT) throw new Error("file name too long for a zip");
         entries.push({ name, data });
@@ -199,6 +200,16 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
  */
 async function actorFor(store: Pick<Store, "get">, subject: string, actor: PrincipalContext | null): Promise<PrincipalContext | null> {
   if (actor === null) return null;
+  const blank = { principalId: ERASED, kind: "human", chain: [], ...(actor.requestId === undefined ? {} : { requestId: actor.requestId }) } as unknown as PrincipalContext;
+  // A lookup that fails blanks the actor: that is the safe failure for privacy.
+  try {
+    return (await isMine(store, subject, actor)) ? blank : actor;
+  } catch {
+    return blank;
+  }
+}
+
+async function isMine(store: Pick<Store, "get">, subject: string, actor: PrincipalContext): Promise<boolean> {
   const ids = [actor.principalId, ...actor.chain.map((step) => step.id)];
   let mine = ids.includes(subject);
   // An agent the subject made has an `ownerId` or a `parentId` that leads back to them.
@@ -213,8 +224,7 @@ async function actorFor(store: Pick<Store, "get">, subject: string, actor: Princ
     }
     frontier = next;
   }
-  if (!mine) return actor;
-  return { principalId: ERASED, kind: "human", chain: [], ...(actor.requestId === undefined ? {} : { requestId: actor.requestId }) } as unknown as PrincipalContext;
+  return mine;
 }
 
 export interface EraseResult {
@@ -235,13 +245,15 @@ export interface EraseReport {
 /**
  * Runs every app's eraser, in order. A failing eraser does not stop the rest: the report names each
  * failure, and the caller runs the erase again (erasers are safe to repeat). Each app gets one
- * audit entry, `person.erase` on target `app:<id>`, `allowed` or `denied`. The entry holds no
+ * audit entry, `person.erase` with `targetKind` `app` and `targetId` the app id, `allowed` or `denied`. The entry holds no
  * subject id. The caller erases the sign-in (see `deletePerson`) only when `ok` is true.
  */
 export async function eraseAccount(subject: string, apps: AccountApp[], store: Pick<Store, "put" | "get">, options: AccountOptions = {}): Promise<EraseReport> {
   if (typeof subject !== "string" || subject === "") throw new Error("subject is required");
   checkApps(apps);
   const now = options.now ?? Date.now;
+  // Found before the first eraser runs: an eraser may remove the principals this reads.
+  const actor = await actorFor(store, subject, options.actor ?? null);
   const results: EraseResult[] = [];
   for (const app of apps) {
     let error: string | undefined;
@@ -251,7 +263,7 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
       error = cause instanceof Error ? cause.message : "erase failed";
     }
     const id = crypto.randomUUID();
-    const entry = auditEntry(await actorFor(store, subject, options.actor ?? null), { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
+    const entry = auditEntry(actor, { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
     let audited = true;
     try {
       await store.put("audit", id, entry as unknown as Doc);
