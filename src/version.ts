@@ -1,17 +1,7 @@
-import { createRequire } from "node:module";
+import pkg from "../package.json" with { type: "json" };
 
-declare const __PACK_VERSION__: string | undefined;
-
-function readPackageVersion(): string {
-  const require = createRequire(import.meta.url);
-  const pkg = require("../package.json") as { version?: unknown };
-  if (typeof pkg.version !== "string" || pkg.version.length === 0) {
-    throw new Error("package.json carries no version string");
-  }
-  return pkg.version;
+if (typeof pkg.version !== "string" || pkg.version.length === 0) {
+  throw new Error("package.json carries no version string");
 }
 
-export const VERSION: string =
-  typeof __PACK_VERSION__ !== "undefined"
-    ? __PACK_VERSION__
-    : readPackageVersion();
+export const VERSION: string = pkg.version;
