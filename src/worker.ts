@@ -1,27 +1,56 @@
 // The HTTP API, a Cloudflare Worker built on Hono. Routes live under /api/v1.
 import { Hono, type Context } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
+import { beginLogin, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
 import { createSharing, type Role } from "./core/sharing.js";
-import { createStoreAuth, issueCredential, randomToken } from "./credentials.js";
+import { deletePerson, exportPerson } from "./gdpr.js";
+import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
 import { parseRegion, type Store } from "./ports.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
+  /** Sign-in is off (404) when this is missing. `publicUrl` is the origin of this Worker. */
+  signIn?: { provider: OidcProviderConfig; publicUrl: string };
+  sessionTtlMs?: number;
   /** Turns on `POST /test/token`, which makes a new person with narrow rights. For tests only. */
   unsafeTestMint: boolean;
   /** Requests per window. A principal counts at the root of its chain. */
-  rateLimits?: Partial<Record<"principal" | "ip" | "login", RateRule>>;
+  rateLimits?: Partial<Record<"principal" | "ip" | "login" | "loginAll", RateRule>>;
 }
 
 const DEFAULT_LIMITS = {
   principal: { limit: 60, windowMs: 60_000 },
   ip: { limit: 120, windowMs: 60_000 },
   login: { limit: 20, windowMs: 60_000 },
+  /** Sign-in starts for everyone in one flow lifetime. It caps the pending rows. */
+  loginAll: { limit: 600, windowMs: 600_000 },
 };
 
+const FLOW_TTL_MS = 600_000;
+const cookieFlags = { httpOnly: true, secure: true, sameSite: "Lax" } as const;
+
+/**
+ * A path on this origin, or `/`. Control characters, spaces, and `\` are refused as given.
+ * The authoritative check runs on the parsed result, because URL parsing removes dot
+ * segments and can turn a raw input that looks safe into `//host`, which a browser reads
+ * as another site.
+ */
+function safeReturnTo(to: string, origin: string): string {
+  if (/[\u0000-\u0020\u007f-\u009f\u2028\u2029\\]/.test(to)) return "/";
+  let url: URL;
+  try {
+    url = new URL(to, origin);
+  } catch {
+    return "/";
+  }
+  if (url.origin !== origin || !/^\/(?![/\\])/.test(url.pathname)) return "/";
+  return url.pathname + url.search + url.hash;
+}
+
 class HttpError extends Error {
-  constructor(readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503, message: string, readonly retryAfterSeconds?: number) {
+  constructor(readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503, message: string, readonly retryAfterSeconds?: number) {
     super(message);
   }
 }
@@ -31,13 +60,14 @@ const fail = (status: HttpError["status"], message: string): never => {
   throw new HttpError(status, message);
 };
 
-export function createApp(deps: { store: Store; config: WorkerConfig; now?: () => number; limiter?: RateLimiter }) {
+export function createApp(deps: { store: Store; config: WorkerConfig; now?: () => number; fetch?: typeof fetch; limiter?: RateLimiter }) {
   const { store, config } = deps;
   const now = deps.now ?? Date.now;
   const auth = createStoreAuth(store, { now });
   const app = new Hono().basePath("/api/v1");
   const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
   const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
+  const redirectUri = `${config.signIn?.publicUrl}/api/v1/auth/callback`;
 
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status, error.retryAfterSeconds === undefined ? {} : { "retry-after": String(error.retryAfterSeconds) });
@@ -56,13 +86,20 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const ip = c.req.header("cf-connecting-ip") ?? "unknown";
     const path = c.req.path;
     if (isWrite(c) || path.includes("/auth/") || path.endsWith("/access")) await throttle(`ip:${ip}`, limits.ip);
-    if (path.endsWith("/auth/login")) await throttle(`login:${ip}`, limits.login);
+    if (path.endsWith("/auth/login")) {
+      await throttle(`login:${ip}`, limits.login);
+      await throttle("login:all", limits.loginAll);
+    }
     await next();
   });
 
   const authed = (handler: (c: Context, ctx: PrincipalContext) => Promise<Response>) => async (c: Context) => {
     const ctx = await auth.authenticate(c.req.raw);
     if (!ctx) return fail(401, "unauthorized");
+    // A page on another site can make the browser send the session cookie. It cannot set Origin
+    // to ours, and it cannot add an Authorization header.
+    const viaCookie = !/^Bearer [A-Za-z0-9_-]{1,512}$/.test(c.req.header("authorization") ?? "");
+    if (isWrite(c) && viaCookie && (!config.signIn || c.req.header("origin") !== new URL(config.signIn.publicUrl).origin)) return fail(403, "bad origin");
     if (isWrite(c)) await throttle(`principal:${ctx.chain[0]!.id}`, limits.principal);
     return handler(c, ctx);
   };
@@ -83,7 +120,56 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return principal;
   }
 
+  app.get("/auth/login", async (c) => {
+    if (!config.signIn) return fail(404, "sign-in is not configured");
+    const returnTo = safeReturnTo(c.req.query("returnTo") ?? "/", new URL(config.signIn.publicUrl).origin);
+    // Rows nobody finished are removed here, oldest first. The global budget caps how many exist.
+    const stale = await store.query("auth_flows", { orderBy: { field: "expiresAt" }, limit: 25 });
+    await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("auth_flows", f.id)));
+    const login = await beginLogin(config.signIn.provider, redirectUri, deps.fetch).catch(() => fail(502, "the sign-in provider is not reachable"));
+    await store.put("auth_flows", login.state, { nonce: login.nonce, verifier: login.verifier, returnTo, expiresAt: now() + FLOW_TTL_MS });
+    setCookie(c, "oidc_flow", login.state, { ...cookieFlags, path: "/api/v1/auth", maxAge: FLOW_TTL_MS / 1000 });
+    return c.redirect(login.url, 302);
+  });
+
+  app.get("/auth/callback", async (c) => {
+    const state = c.req.query("state");
+    const code = c.req.query("code");
+    if (!config.signIn || !state || !code || getCookie(c, "oidc_flow") !== state) return fail(400, "bad sign-in state");
+    // A flow works once. Reading and deleting it together stops a replay.
+    const flow = await store.transaction(async (tx) => {
+      const found = await tx.get("auth_flows", state);
+      await tx.delete("auth_flows", state);
+      return found;
+    });
+    if (!flow || typeof flow.expiresAt !== "number" || !Number.isFinite(flow.expiresAt) || flow.expiresAt <= now()) return fail(400, "bad sign-in state");
+    const { provider } = config.signIn;
+    const who = await finishLogin(provider, { redirectUri, code, nonce: flow.nonce as string, verifier: flow.verifier as string, now: now() }, deps.fetch).catch(() => fail(401, "sign-in failed"));
+    const id = `u_${(await sha256Hex(`${provider.issuer}|${who.subject}`)).slice(0, 24)}`;
+    if (!(await store.get("principals", id))) await store.put("principals", id, { id, kind: "human", scopes: ["*:admin"] });
+    await store.put("users", id, { id, issuer: provider.issuer, subject: who.subject, emailVerified: who.emailVerified, ...(who.email ? { email: who.email } : {}) });
+    const ttl = config.sessionTtlMs ?? 28_800_000;
+    setCookie(c, "session", await issueCredential(store, { principalId: id, kind: "session", expiresAt: now() + ttl }), { ...cookieFlags, path: "/", maxAge: ttl / 1000 });
+    deleteCookie(c, "oidc_flow", { path: "/api/v1/auth" });
+    return c.redirect(flow.returnTo as string, 302);
+  });
+
+  app.post("/auth/logout", authed(async (c) => {
+    const token = getCookie(c, "session") ?? c.req.header("authorization")?.slice(7);
+    if (token) await revokeCredential(store, token, now());
+    return c.json({ ok: true });
+  }));
+
   app.get("/me", authed(async (c, ctx) => c.json({ principalId: ctx.principalId, kind: ctx.kind, chain: ctx.chain, scopes: ctx.scopes })));
+
+  // The export and the delete need the person at the keyboard, not an agent or a token.
+  app.get("/me/export", authed(async (c, ctx) => (isPerson(ctx) ? c.json(await exportPerson(store, ctx.principalId)) : fail(403, "only the person can export"))));
+
+  app.delete("/me", authed(async (c, ctx) => {
+    if (!isPerson(ctx)) return fail(403, "only the person can delete");
+    await deletePerson(store, ctx.principalId);
+    return c.json({ deleted: true });
+  }));
 
   // A new person with narrow rights. It never touches a principal or a user that exists,
   // and it never marks an email as verified.
@@ -222,6 +308,9 @@ interface Env {
   REGION: string;
   PUBLIC_URL?: string;
   IDENTITY_UNSAFE_TEST_MINT?: string;
+  OIDC_ISSUER?: string;
+  OIDC_CLIENT_ID?: string;
+  OIDC_CLIENT_SECRET?: string;
 }
 
 /** The test mint signs people in with no check. A config that names a region or an https URL is a real one. */
@@ -253,7 +342,8 @@ export default {
       throw error;
     });
     await schema;
-    const config = { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1" };
+    const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "" }) : undefined;
+    const config = { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1", ...(provider && env.PUBLIC_URL ? { signIn: { provider, publicUrl: env.PUBLIC_URL } } : {}) };
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config }).fetch(request);
   },
 };
