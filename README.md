@@ -145,6 +145,10 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
 - `can` writes an audit entry for every allow and deny. It keeps the chain and
   a machine label, and holds no email address. Grants, invites, and links do not
   write audit entries yet.
+- `listAudit(ctx, resourceId, { limit, cursor })` needs an owner. It returns
+  `{ entries, nextCursor }`, newest first. `limit` is a whole number from 1 to 200
+  (default 50). `nextCursor` is set only when more entries exist. Pass it as `cursor`
+  to read the next page. A bad `limit` or `cursor` throws.
 
 ## Worker API
 
@@ -157,6 +161,8 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   Scopes can only narrow, and a grant can expire.
 - `DELETE /principals/:id` revokes it, and every key below it stops at once.
 - `/resources`, `/grants`, `/invites`, `/links`, `/access`, and `/audit` expose sharing.
+  `GET /resources/:id/audit?limit=&cursor=` returns `{ entries, nextCursor }`, newest
+  first. The SDK call is `audit(resourceId, { limit, cursor })`.
 - `POST /test/token` makes a new person with narrow rights (`doc:admin` unless the body lists other scopes, never `*:admin`). It never changes a person that exists and never marks an email as verified. It answers 404 unless `IDENTITY_UNSAFE_TEST_MINT=1`, and the Worker refuses to run with that flag when `REGION` is not `unknown` or `PUBLIC_URL` is https.
 - A write, a sign-in start, and the anonymous `/access` check each have a budget per IP (read from `CF-Connecting-IP`). A write also has a budget per principal, counted at the root of its chain. Over budget is a 429 with `Retry-After`, and the call does nothing. Defaults: 60 writes per principal, 120 calls per IP, and 20 sign-in starts per IP, each per minute. The counter rows hold a hash of the key, never an IP. A limiter that cannot count answers 503.
 - `GET /auth/login` and `/auth/callback` sign a person in with OpenID Connect

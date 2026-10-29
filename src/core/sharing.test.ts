@@ -51,7 +51,7 @@ describe("denial", () => {
   test("an outsider and an unknown resource are denied, not thrown, and audited", async () => {
     expect(await allowed(bo, "read", "folder")).toBe(false);
     expect(await allowed(ana, "read", "nope")).toBe(false);
-    const entries = await sharing.listAudit(ana, "folder");
+    const { entries } = await sharing.listAudit(ana, "folder");
     expect(entries.map((e) => [e.principalId, e.outcome])).toEqual([["bo", "denied"]]);
   });
 
@@ -251,7 +251,7 @@ describe("audit", () => {
     await sharing.can(bo, "write", "folder");
     const link = await sharing.createLink(ana, "folder", { role: "viewer" });
     await sharing.can(null, "read", "folder", { linkToken: link.token });
-    const entries = await sharing.listAudit(ana, "folder");
+    const { entries } = await sharing.listAudit(ana, "folder");
     const by = (id: string) => entries.find((e) => e.principalId === id)!;
     expect(by("agent-of-ana")).toMatchObject({ outcome: "allowed", machineMade: true, chain: agent.chain });
     expect(by("bo")).toMatchObject({ outcome: "denied", machineMade: false });

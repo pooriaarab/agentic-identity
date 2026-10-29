@@ -297,7 +297,13 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return c.json(await sharing.can(ctx, action as (typeof ACTIONS)[number], id(c), linkToken ? { linkToken } : {}));
   });
 
-  app.get("/resources/:id/audit", authed(async (c, ctx) => c.json({ entries: await sharing.listAudit(ctx, id(c)) })));
+  // Newest first. `limit` and `cursor` page through it, and `nextCursor` shows when more entries exist.
+  app.get("/resources/:id/audit", authed(async (c, ctx) => {
+    const limit = c.req.query("limit");
+    const cursor = c.req.query("cursor");
+    if (limit !== undefined && !/^[0-9]{1,6}$/.test(limit)) return fail(400, "bad limit");
+    return c.json(await sharing.listAudit(ctx, id(c), { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
+  }));
 
   return app;
 }
