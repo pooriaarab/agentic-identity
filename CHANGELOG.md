@@ -11,11 +11,11 @@
 
 ### Added
 
-- `grant` and `revoke` refuse to remove the last owner of a resource.
 - The README shows the test token response in the quick start.
 
 ### Fixed
 
+- `grant` can no longer demote the last owner of a resource. Two demotions at once cannot both pass in `grant` or `revoke`.
 - The root bundle no longer imports `node:module`. Worker apps no longer need `nodejs_compat` to use the root entry.
 - Each end-to-end run gets its own inspector port, so two runs at once do not clash.
 
