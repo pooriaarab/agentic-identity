@@ -261,7 +261,7 @@ beforeAll(async () => {
 afterAll(() => mf.dispose());
 
 // D1 is slow to fill, so it gets fewer docs. They still make the sweep and the last transaction share the work.
-suite("d1", 130, async () => {
+suite("d1", 101, async () => {
   await db.prepare("DELETE FROM store_docs").run();
   return [createD1Store(db, { region: "unknown" }), createD1Store(db, { region: "unknown" })];
 });

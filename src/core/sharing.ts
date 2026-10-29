@@ -18,6 +18,14 @@ export const AUDIT_PAGE = 50;
 export const MAX_AUDIT_PAGE = 200;
 /** `deleteResource` removes the owner grants in one transaction, so it refuses more owners than this. */
 export const MAX_OWNERS_ON_ERASE = 100;
+
+/** `deleteResource` refused: the resource has children, or too many owners. */
+export class EraseRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EraseRefusedError";
+  }
+}
 const linkRoles: readonly Role[] = ROLES.filter((r) => r !== "owner");
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -204,10 +212,10 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
      */
     async deleteResource(ctx: PrincipalContext, resourceId: string): Promise<void> {
       await requireAdmin(ctx, resourceId);
-      if ((await store.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new Error("the resource has children");
-      if ((await store.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 })).items.length > MAX_OWNERS_ON_ERASE) throw new Error("too many owners: revoke some first");
+      if ((await store.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
+      if ((await store.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 })).items.length > MAX_OWNERS_ON_ERASE) throw new EraseRefusedError("too many owners: revoke some first");
       // Every doc of the resource but an owner's grant, in pages by cursor. The owners go in the transaction.
-      for (const collection of ["links", "invites", "audit", "grants"]) {
+      for (const collection of ["links", "invites", "grants", "audit"]) {
         for (let cursor: string | undefined; ; ) {
           const page = await store.query(collection, { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
           await Promise.all(page.items.filter((d) => collection !== "grants" || d.data.role !== "owner").map((d) => store.delete(collection, d.id)));
@@ -216,12 +224,14 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       }
       await store.transaction(async (tx) => {
         await requireResource(tx, resourceId);
-        if ((await tx.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new Error("the resource has children");
+        if ((await tx.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
         // What a write added since the sweep. Each write changed the resource doc, so none can land after this read and commit.
         const rest: [string, string][] = [];
-        for (const collection of ["grants", "links", "invites", "audit"]) {
-          const left = await tx.query(collection, { where: { resourceId }, limit: MAX_OWNERS_ON_ERASE + 1 });
-          if (left.items.length > MAX_OWNERS_ON_ERASE) throw new StoreConflictError("too many docs are left on the resource, try again");
+        // Audit entries are not here: `can` writes them outside a transaction, so reading them guards nothing.
+        for (const collection of ["grants", "links", "invites"]) {
+          const cap = collection === "grants" ? 2 * MAX_OWNERS_ON_ERASE : MAX_OWNERS_ON_ERASE;
+          const left = await tx.query(collection, { where: { resourceId }, limit: cap + 1 });
+          if (left.items.length > cap) throw new StoreConflictError("too many docs are left on the resource, try again");
           rest.push(...left.items.map((d): [string, string] => [collection, d.id]));
         }
         for (const [collection, id] of rest) await tx.delete(collection, id);
