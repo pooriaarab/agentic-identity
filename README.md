@@ -329,28 +329,36 @@ const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.
 
 ## Run on Firebase
 
-`agentic-identity/firestore` has a Firestore `Store`. It calls the Firestore REST API
-through a `fetch` you pass in, so it runs in Workers, Node, and Cloud Functions and
-needs no Firebase SDK. It passes the `Store` contract suite, including the transaction
-guards. The suite runs against the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
-set, and against an in-process fake of the REST surface when it is not. CI uses the fake.
+`agentic-identity/firestore` has a Firestore `Store` and a Firestore `Blobs`. They call the
+Firestore REST API through a `fetch` you pass in, so they run in Workers, Node, and Cloud
+Functions and need no Firebase SDK. They pass the `Store`, audit, and `Blobs` contract suites,
+including the transaction guards. The suites run against the Firestore emulator when
+`FIRESTORE_EMULATOR_HOST` is set, and against an in-process fake of the REST surface when it
+is not. The CI job `firestore-emulator` runs them on the emulator and fails if it is not up.
 The fake locks every doc a transaction reads for that transaction alone, which is stricter
 than Firestore, so it does not exercise the aborts that two readers of one doc cause on
-the real service. Run the suite against the emulator before you rely on retry behavior.
+the real service. On the emulator, twenty writers on one doc need `maxAttempts` of about 40.
 
 ```ts
-import { createFirestoreStore } from "agentic-identity/firestore";
+import { createFirestoreBlobs, createFirestoreStore } from "agentic-identity/firestore";
 
-const store = createFirestoreStore({
+const connection = {
   projectId: "my-project",
   fetch: globalThis.fetch,
   token: () => getAccessToken(), // an OAuth token for the datastore scope
-  region: "eu",
-});
+  region: "eu" as const,
+};
+const store = createFirestoreStore(connection);
+const blobs = createFirestoreBlobs({ ...connection, urlBase: "https://files.example/blob", urlSecret });
 ```
 
-- Only `Store` has a Firestore adapter. `Blobs` and the other ports keep their own
-  adapters, so mix them as you need.
+- `Auth`, `Realtime`, `Mail`, and `Queue` have no Firestore adapter. Mix adapters as you need.
+- `createFirestoreBlobs` keeps an object in chunk docs (512 KiB each, `chunkBytes`) and caps it
+  at 32 MiB (`maxBytes`). A put writes the chunks, then swaps the meta doc in one transaction
+  that checks `ifMatch` or `ifNoneMatch`. A crash in between leaves orphan chunks that no read
+  sees. Use a Cloud Storage adapter for big files. `signedUrl` makes an HMAC URL for your
+  server, as the R2 adapter does. Call `verifySignedBlobUrl(url, { secret })` there. The secret
+  needs 32 bytes or more and has no default.
 - Firestore is a pessimistic backend. A transaction locks the docs it reads, and
   Firestore aborts one that cannot get its locks. The adapter runs it again (`maxAttempts`,
   default 8), then throws `StoreConflictError` and writes nothing.

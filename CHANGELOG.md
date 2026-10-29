@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `createFirestoreBlobs` in `agentic-identity/firestore` is a `Blobs` adapter on Firestore docs. It cuts an object into chunk docs and swaps a meta doc in one transaction, so `ifMatch` and `ifNoneMatch` hold. It passes the `Blobs` contract suite.
+- The CI job `firestore-emulator` runs the `Store`, audit, and `Blobs` contract suites against the Firestore emulator. It fails when the emulator is not up, so it cannot pass on the fake.
+- `verifySignedBlobUrl` is also exported from `agentic-identity/firestore`. Signed URLs share one module with the R2 adapter.
+
+### Fixed
+
+- The Firestore `Store` read a doc inside a transaction with a GET that held the transaction id in the URL. The emulator crashes on that. It now uses `:batchGet` with the id in the body.
+
 ## 0.5.0 - 2026-10-29
 
 ### Added

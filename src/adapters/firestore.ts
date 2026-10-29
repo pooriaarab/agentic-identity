@@ -5,14 +5,19 @@
 // Firestore is a pessimistic backend: a transaction locks the docs it reads, so a rival write
 // waits until the transaction ends. A transaction that cannot get its locks ends with ABORTED.
 // The adapter runs it again, and throws `StoreConflictError` after the last attempt.
+//
+// `createFirestoreBlobs` keeps `Blobs` in Firestore docs, cut into chunks, so one backend holds
+// both ports and the emulator can run the Blobs contract. Use Cloud Storage for big files.
 import {
   DEFAULT_LIMIT,
   StoreConflictError,
   assertCollection,
   assertField,
   assertId,
+  assertBlobPutOptions,
   parseRegion,
   type AdapterOptions,
+  type Blobs,
   type Doc,
   type Json,
   type Page,
@@ -20,6 +25,9 @@ import {
   type Store,
   type StoreOps,
 } from "../ports.js";
+import { assertSecret, signBlobUrl } from "./signedurl.js";
+
+export { verifySignedBlobUrl } from "./signedurl.js";
 
 export interface FirestoreOptions extends AdapterOptions {
   projectId: string;
@@ -177,8 +185,13 @@ export function createFirestoreStore(options: FirestoreOptions): Store {
   async function read<T extends Doc>(collection: string, id: string, transaction?: string): Promise<T | null> {
     assertCollection(collection);
     assertId(id);
-    const query = transaction === undefined ? "" : `?transaction=${encodeURIComponent(transaction)}`;
-    const found = await call<{ fields?: Fields }>("GET", `${encodedPath(collection, id)}${query}`);
+    if (transaction !== undefined) {
+      // The transaction id is a bytes field. The emulator cannot read one from a URL query, so send it in a body.
+      const rows = (await call<{ found?: { fields?: Fields } }[]>("POST", ":batchGet", { documents: [name(collection, id)], transaction })) ?? [];
+      const found = rows.find((row) => row.found)?.found;
+      return found ? (decodeFields(found.fields ?? {}) as T) : null;
+    }
+    const found = await call<{ fields?: Fields }>("GET", encodedPath(collection, id));
     return found ? (decodeFields(found.fields ?? {}) as T) : null;
   }
 
@@ -298,5 +311,136 @@ export function createFirestoreStore(options: FirestoreOptions): Store {
       }
       throw new StoreConflictError();
     },
+  };
+}
+
+export interface FirestoreBlobsOptions extends FirestoreOptions {
+  /** Where your server serves signed blob URLs. Call `verifySignedBlobUrl` there. */
+  urlBase: string;
+  /** At least 32 bytes. There is no default. Use one secret per database. */
+  urlSecret: string;
+  /** The collection that holds one doc per key. Chunks go in `<collection>_chunks`. Defaults to `blobs`. */
+  collection?: string;
+  /** The largest object. Defaults to 32 MiB. */
+  maxBytes?: number;
+  /** The bytes in one chunk doc. A doc holds 1 MiB, and base64 adds a third. Defaults to 512 KiB. */
+  chunkBytes?: number;
+}
+
+type BlobMeta = { key: string; size: number; version: string; chunks: number; contentType?: string };
+
+const toBase64 = (bytes: Uint8Array) => {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};
+const fromBase64 = (text: string) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+const sha256Hex = async (text: string) =>
+  [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+/**
+ * `Blobs` over Firestore docs. A key has one meta doc, and its bytes sit in chunk docs named by
+ * version. A put writes the new chunks first, then swaps the meta doc in one transaction that
+ * checks `ifMatch` or `ifNoneMatch`. A reader sees the old bytes or the new bytes, never a mix.
+ * A crash between the steps leaves orphan chunks, which no reader sees.
+ */
+export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
+  assertSecret(options.urlSecret);
+  const store = createFirestoreStore(options);
+  const metas = options.collection ?? "blobs";
+  const chunksOf = `${metas}_chunks`;
+  const maxBytes = options.maxBytes ?? 32 * 1024 * 1024;
+  const chunkBytes = options.chunkBytes ?? 512 * 1024;
+  for (const [name, value] of [["maxBytes", maxBytes], ["chunkBytes", chunkBytes]] as const) {
+    if (!Number.isInteger(value) || value < 1) throw new RangeError(`${name} must be an integer of 1 or more`);
+  }
+  const now = options.now ?? Date.now;
+  const need = (key: string) => {
+    if (key === "") throw new Error("blob key must not be empty");
+  };
+  const chunkId = (version: string, n: number) => `${version}_${n}`;
+
+  // Eight at a time, so a large object does not open hundreds of requests.
+  async function each(count: number, work: (n: number) => Promise<void>): Promise<void> {
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(8, count) }, async () => {
+        while (next < count) await work(next++);
+      }),
+    );
+  }
+  const dropChunks = (meta: Pick<BlobMeta, "version" | "chunks">) => each(meta.chunks, (n) => store.delete(chunksOf, chunkId(meta.version, n)));
+  const headOf = (meta: BlobMeta) => ({ size: meta.size, version: meta.version, ...(meta.contentType ? { contentType: meta.contentType } : {}) });
+
+  return {
+    region: store.region,
+    async put(key, data, opts) {
+      need(key);
+      assertBlobPutOptions(opts);
+      if (data.length > maxBytes) throw new RangeError(`a blob holds at most ${maxBytes} bytes`);
+      const id = await sha256Hex(key);
+      const version = crypto.randomUUID();
+      const chunks = Math.ceil(data.length / chunkBytes);
+      const meta: BlobMeta = { key, size: data.length, version, chunks, ...(opts?.contentType ? { contentType: opts.contentType } : {}) };
+      try {
+        await each(chunks, (n) => store.put(chunksOf, chunkId(version, n), { data: toBase64(data.subarray(n * chunkBytes, (n + 1) * chunkBytes)) }));
+        const replaced = await store.transaction(async (tx) => {
+          const current = await tx.get<BlobMeta>(metas, id);
+          if ((opts?.ifNoneMatch === "*" && current) || (opts?.ifMatch !== undefined && current?.version !== opts.ifMatch)) return false as const;
+          await tx.put(metas, id, meta);
+          return current;
+        });
+        if (replaced === false) {
+          await dropChunks(meta);
+          return null;
+        }
+        if (replaced) await dropChunks(replaced).catch(() => undefined);
+        return { version };
+      } catch (error) {
+        await dropChunks(meta).catch(() => undefined);
+        throw error;
+      }
+    },
+    async get(key) {
+      need(key);
+      const id = await sha256Hex(key);
+      // A put or delete can drop the chunks after we read the meta. Read the meta again then.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const meta = await store.get<BlobMeta>(metas, id);
+        if (!meta) return null;
+        const parts: Uint8Array[] = new Array(meta.chunks);
+        let missing = false;
+        await each(meta.chunks, async (n) => {
+          const chunk = await store.get<{ data: string }>(chunksOf, chunkId(meta.version, n));
+          if (chunk) parts[n] = fromBase64(chunk.data);
+          else missing = true;
+        });
+        if (missing) continue;
+        const data = new Uint8Array(meta.size);
+        let offset = 0;
+        for (const part of parts) {
+          data.set(part, offset);
+          offset += part.length;
+        }
+        return { data, ...headOf(meta) };
+      }
+      throw new Error("a blob changed while it was read");
+    },
+    async head(key) {
+      need(key);
+      const meta = await store.get<BlobMeta>(metas, await sha256Hex(key));
+      return meta ? headOf(meta) : null;
+    },
+    async delete(key) {
+      need(key);
+      const id = await sha256Hex(key);
+      const gone = await store.transaction(async (tx) => {
+        const current = await tx.get<BlobMeta>(metas, id);
+        if (current) await tx.delete(metas, id);
+        return current;
+      });
+      if (gone) await dropChunks(gone);
+    },
+    signedUrl: (key, opts) => signBlobUrl(key, opts, { urlBase: options.urlBase, urlSecret: options.urlSecret, now }),
   };
 }
