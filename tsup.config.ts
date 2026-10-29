@@ -6,7 +6,7 @@ const pkg = JSON.parse(
 ) as { version: string };
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/testing.ts", "src/adapters/cloudflare.ts", "src/adapters/firestore.ts", "src/worker.ts", "src/sdk.ts", "src/adapters/file.ts", "src/cli-bin.ts"],
+  entry: ["src/index.ts", "src/testing.ts", "src/adapters/cloudflare.ts", "src/adapters/firestore.ts", "src/worker.ts", "src/sdk.ts", "src/http.ts", "src/adapters/file.ts", "src/cli-bin.ts"],
   external: ["vitest"],
   format: ["esm"],
   dts: true,

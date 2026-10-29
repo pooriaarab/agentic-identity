@@ -63,6 +63,10 @@
     "./file": {
       "types": "./dist/adapters/file.d.ts",
       "import": "./dist/adapters/file.js"
+    },
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "import": "./dist/http.js"
     }
   },
   "scripts": {

@@ -8,6 +8,7 @@
 
 ### Added
 
+- `requirePrincipal` in `agentic-identity/http` is one framework-free bearer check for app Workers. It takes a `Request` and the `Auth` port and returns the principal, or a 401 or 403 `Response`. `kinds` and `scope` options narrow who passes. A write on the session cookie needs an `Origin` listed in `origins`, or it is a 403. An `Auth` that throws gives a 503.
 - The README documents `PRINCIPAL_KINDS`, `PrincipalKind`, and `Principal`. Apps import them from `agentic-identity` and keep no local copy.
 - The `agentic-identity` CLI works on a local JSON file: `whoami`, `principals list`, `agents create`, `resources create`, `grants set|revoke|list`, `invites create|accept|list`, `links create|revoke|resolve`, and `audit`. It prints JSON. `createFileStore` (`agentic-identity/file`) is a `Store` on a JSON file and passes the `Store` and audit contract suites. `listInvites(ctx, resourceId)` lists the invites on a resource, an owner only, with no email.
 - `createFirestoreBlobs` in `agentic-identity/firestore` is a `Blobs` adapter on Firestore docs. It cuts an object into chunk docs and swaps a meta doc in one transaction, so `ifMatch` and `ifNoneMatch` hold. It passes the `Blobs` contract suite.
