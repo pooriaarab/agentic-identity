@@ -231,3 +231,5 @@ export function createFileStore(options: AdapterOptions & { path: string }): Sto
     },
   };
 }
+
+export { createFileBlobs, type FileBlobsOptions } from "./fileblobs.js";
