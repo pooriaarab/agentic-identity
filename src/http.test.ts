@@ -3,7 +3,9 @@
 //     WWW-Authenticate. 4. A wrong scheme (Basic, lowercase-only junk) is a 401.
 //  5. An agent principal comes back with its kind, and `kinds` that leave it out give a 403.
 //  6. A scope the principal lacks is a 403. 7. An unknown kind or a bad scope option throws.
-//  8. An Auth that throws gives a 503, never a principal. 9. No body holds the credential.
+//  8. Cookie writes need a listed Origin; a bearer write and a cookie read do not. A bad Authorization header
+//     is a 401 even beside a valid cookie. An expired key and a revoked parent are a 401.
+//  9. An Auth that throws gives a 503, never a principal. 9. No body holds the credential.
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import type { PrincipalContext } from "./core/principals.js";
@@ -76,6 +78,39 @@ describe("requirePrincipal", () => {
     const request = req({ authorization: `Bearer ${await key("p_a")}` });
     expect(((await requirePrincipal(request, auth, { scope: "doc:write" })) as Response).status).toBe(403);
     expect(await requirePrincipal(request, auth, { scope: "doc:read" })).toMatchObject({ principalId: "p_a" });
+  });
+
+  test("a cookie write needs a listed origin", async () => {
+    const { auth, key, req } = await setup();
+    const cookie = `session=${await key("p_h")}`;
+    const post = (headers: Record<string, string>) => new Request("https://app.test/x", { method: "POST", headers });
+    const origins = ["https://app.test"];
+    expect(((await requirePrincipal(post({ cookie }), auth, { origins })) as Response).status).toBe(403);
+    expect(((await requirePrincipal(post({ cookie, origin: "https://evil.test" }), auth, { origins })) as Response).status).toBe(403);
+    expect(((await requirePrincipal(post({ cookie }), auth)) as Response).status).toBe(403);
+    expect(await requirePrincipal(post({ cookie, origin: "https://app.test" }), auth, { origins })).toMatchObject({ principalId: "p_h" });
+    expect(await requirePrincipal(req({ cookie }), auth)).toMatchObject({ principalId: "p_h" });
+    expect(await requirePrincipal(post({ authorization: `Bearer ${await key("p_h")}` }), auth)).toMatchObject({ principalId: "p_h" });
+  });
+
+  test("a bad Authorization header is a 401 even beside a valid cookie", async () => {
+    const { auth, key, req } = await setup();
+    const res = (await requirePrincipal(req({ authorization: "Basic abc", cookie: `session=${await key("p_h")}` }), auth)) as Response;
+    expect(res.status).toBe(401);
+  });
+
+  test("an expired key and a revoked parent are a 401", async () => {
+    const { store, auth, key, req } = await setup();
+    const old = await issueCredential(store, { principalId: "p_h", kind: "api_key", expiresAt: 1 });
+    expect(((await requirePrincipal(req({ authorization: `Bearer ${old}` }), auth)) as Response).status).toBe(401);
+    const child = await key("p_a");
+    await store.put("principals", "p_h", { id: "p_h", kind: "human", scopes: ["*:admin"], revokedAt: 1 });
+    expect(((await requirePrincipal(req({ authorization: `Bearer ${child}` }), auth)) as Response).status).toBe(401);
+  });
+
+  test("an empty kinds list refuses everyone", async () => {
+    const { auth, key, req } = await setup();
+    expect(((await requirePrincipal(req({ authorization: `Bearer ${await key("p_h")}` }), auth, { kinds: [] })) as Response).status).toBe(403);
   });
 
   test("a bad option throws", async () => {
