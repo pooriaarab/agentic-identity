@@ -44,7 +44,8 @@ export type ChainFailure =
   | "expired"
   | "cycle"
   | "depth_exceeded"
-  | "invalid_chain";
+  | "invalid_chain"
+  | "invalid_options";
 
 export type Resolution = ({ ok: true } & PrincipalContext) | { ok: false; reason: ChainFailure; at: string };
 
@@ -115,7 +116,12 @@ export async function resolveChain(
   options: { now: number; maxDepth?: number },
 ): Promise<Resolution> {
   const fail = (reason: ChainFailure, at: string): Resolution => ({ ok: false, reason, at });
-  const maxDepth = options.maxDepth ?? MAX_CHAIN_DEPTH;
+  // The caller's options are input too. A NaN clock makes every `revokedAt <= now` false.
+  const depth = options?.maxDepth === undefined ? MAX_CHAIN_DEPTH : options.maxDepth;
+  if (typeof options?.now !== "number" || !Number.isFinite(options.now) || typeof depth !== "number" || !Number.isSafeInteger(depth) || depth < 1) {
+    return fail("invalid_options", leafId);
+  }
+  const maxDepth = depth;
   const walk: Principal[] = [];
   const seen = new Set<string>();
   for (let id: string | null | undefined = leafId; id != null; id = walk[walk.length - 1]?.parentId) {

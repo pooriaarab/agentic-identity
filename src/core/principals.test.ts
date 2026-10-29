@@ -18,6 +18,10 @@
 // 14. Scopes that are missing or not a list: invalid_chain, no throw.
 // 15. A root stored with parentId null is a root, not an unknown parent.
 // 16. A lookup that returns a record under another id: unknown_principal.
+// The caller's options can break the declared types too:
+// 17. A clock (`now`) that is NaN, infinite, a string, null, or missing: no rights. NaN made every
+//     `revokedAt <= now` false, so a revoked principal kept its rights.
+// 18. A depth cap (`maxDepth`) that is NaN, 0, negative, not whole, infinite, a string, or null: no rights.
 import { describe, expect, test } from "vitest";
 import {
   MAX_CHAIN_DEPTH,
@@ -273,5 +277,36 @@ describe("audit", () => {
     for (const kind of ["agent_of_human", "agent_of_agent", "agent", "user_token"] as const) {
       expect(isMachineMade(kind)).toBe(true);
     }
+  });
+});
+
+describe("bad options", () => {
+  const revoked: Principal = { ...agent1, revokedAt: NOW - 1 };
+  const expired: Principal = { ...agent1, expiresAt: NOW - 1 };
+
+  test.each([[NaN], [Infinity], [-Infinity], ["1000000"], [null], [undefined], [{}], [true]])("a clock of %j gives no rights, even for a live chain", async (now) => {
+    for (const records of [[human, agent1], [human, revoked], [human, expired]]) {
+      const result = await resolveChain("a1", table(...records), { now: now as number });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("invalid_options");
+    }
+  });
+
+  test.each([[NaN], [0], [-1], [1.5], [Infinity], ["5"], [null], [{}]])("a depth cap of %j gives no rights", async (maxDepth) => {
+    const result = await resolveChain("a2", table(human, agent1, agent2), { now: NOW, maxDepth: maxDepth as number });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("invalid_options");
+  });
+
+  test("no options object gives no rights, and a good one still works", async () => {
+    expect((await resolveChain("a1", table(human, agent1), undefined as never)).ok).toBe(false);
+    expect((await resolveChain("a1", table(human, agent1), { now: NOW, maxDepth: 2 })).ok).toBe(true);
+    expect((await resolveChain("a1", table(human, agent1), { now: 0 })).ok).toBe(true);
+  });
+
+  test("the check does not call the lookup", async () => {
+    let calls = 0;
+    await resolveChain("a1", (id) => (calls++, table(human, agent1)(id)), { now: NaN });
+    expect(calls).toBe(0);
   });
 });
