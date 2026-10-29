@@ -151,8 +151,14 @@ export function createClient(options: ClientOptions) {
       const path = `/resources/${part(resourceId, "resourceId")}/access?action=${oneOf(action, ACTIONS, "action")}`;
       return request<Decision>("GET", path, undefined, input.linkToken === undefined ? {} : { "x-link-token": input.linkToken });
     },
-    /** The log of one resource. Needs an owner. */
-    audit: (resourceId: string) => request<{ entries: AuditEntry[] }>("GET", `/resources/${part(resourceId, "resourceId")}/audit`),
+    /** The log of one resource, newest first. Needs an owner. Pass `nextCursor` as `cursor` to read the next page. */
+    audit: (resourceId: string, input: { limit?: number; cursor?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (input.limit !== undefined) query.set("limit", String(input.limit));
+      if (input.cursor !== undefined) query.set("cursor", input.cursor);
+      const text = query.toString();
+      return request<{ entries: AuditEntry[]; nextCursor?: string }>("GET", `/resources/${part(resourceId, "resourceId")}/audit${text ? `?${text}` : ""}`);
+    },
   };
 }
 

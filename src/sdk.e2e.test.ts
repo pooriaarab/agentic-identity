@@ -54,6 +54,11 @@ test("a person, an agent, and a visitor use the whole API through the SDK", asyn
   const log = await ana.audit("plan");
   expect(log.entries.length).toBeGreaterThan(3);
   expect(log.entries.some((e) => e.principalKind === "agent_of_human" && e.machineMade)).toBe(true);
+  const first = await ana.audit("plan", { limit: 2 });
+  expect(first.entries).toHaveLength(2);
+  expect(first.nextCursor).toBeDefined();
+  const second = await ana.audit("plan", { limit: 2, cursor: first.nextCursor! });
+  expect(second.entries.map((e) => e.id)).not.toContain(first.entries[0]!.id);
   expect(await agent.audit("plan").catch((e: unknown) => (e as ApiError).status)).toBe(403);
 
   // Revoking a principal stops its key. A bad key is a 401.

@@ -163,7 +163,55 @@ describe("sharing over HTTP", () => {
     await access(s, "plan", "read", bearer(bo));
     expect((await s.call("GET", "/resources/plan/audit", { token: bo })).status).toBe(403);
     const log = (await (await s.call("GET", "/resources/plan/audit", { token: ana })).json()) as { entries: { principalId: string; outcome: string; chain: unknown[] }[] };
-    expect(log.entries.at(-1)).toMatchObject({ principalId: "bo", outcome: "denied", chain: [{ id: "bo", kind: "human" }] });
+    expect(log.entries.find((e) => e.principalId === "bo")).toMatchObject({ principalId: "bo", outcome: "denied", chain: [{ id: "bo", kind: "human" }] });
+  });
+});
+
+describe("audit paging", () => {
+  type Page = { entries: { id: string; at: number }[]; nextCursor?: string };
+  async function logged() {
+    const s = await setup({ unsafeTestMint: true });
+    const ana = await s.mint("ana");
+    const bo = await s.mint("bo");
+    await s.call("POST", "/resources", { token: ana, body: { id: "plan", type: "doc" } });
+    const start = t;
+    for (let i = 0; i < 7; i++) {
+      t = start + i;
+      await s.call("GET", "/resources/plan/access?action=read", { token: bo });
+    }
+    t = start + 100;
+    const read = async (query: string) => s.call("GET", `/resources/plan/audit${query}`, { token: ana });
+    return { s, ana, bo, read, start };
+  }
+
+  test("lists the newest entry first, and pages never repeat or skip an entry", async () => {
+    const { read } = await logged();
+    const all = (await (await read("")).json()) as Page;
+    expect(all.entries).toHaveLength(7);
+    expect(all.nextCursor).toBeUndefined();
+    expect(all.entries.map((e) => e.at)).toEqual([...all.entries.map((e) => e.at)].sort((a, b) => b - a));
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = (await (await read(`?limit=3${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)).json()) as Page;
+      expect(page.entries.length).toBeLessThanOrEqual(3);
+      seen.push(...page.entries.map((e) => e.id));
+      cursor = page.nextCursor;
+      pages++;
+    } while (cursor);
+    expect(pages).toBe(3);
+    expect(seen).toEqual(all.entries.map((e) => e.id));
+  });
+
+  test.each(["limit=0", "limit=-1", "limit=1.5", "limit=abc", "limit=201", "limit=", "cursor=not-a-cursor"])("%s is a 400", async (query) => {
+    const { read } = await logged();
+    expect((await read(`?${query}`)).status).toBe(400);
+  });
+
+  test("a page by a non-owner is still refused", async () => {
+    const { s, bo } = await logged();
+    expect((await s.call("GET", "/resources/plan/audit?limit=1", { token: bo })).status).toBe(403);
   });
 });
 

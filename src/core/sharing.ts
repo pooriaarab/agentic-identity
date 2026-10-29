@@ -13,6 +13,9 @@ const NEEDS: Record<Action, Role> = { read: "viewer", comment: "commenter", writ
 export const MAX_FOLDER_DEPTH = 16;
 
 const rank = (role: unknown) => ROLES.indexOf(role as Role);
+/** The default and the largest page of `listAudit`. */
+export const AUDIT_PAGE = 50;
+export const MAX_AUDIT_PAGE = 200;
 const linkRoles: readonly Role[] = ROLES.filter((r) => r !== "owner");
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -176,10 +179,14 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       return decision;
     },
 
-    async listAudit(ctx: PrincipalContext, resourceId: string): Promise<AuditEntry[]> {
+    /** Newest first. Pass the `nextCursor` of the last page as `cursor` to read on. */
+    async listAudit(ctx: PrincipalContext, resourceId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ entries: AuditEntry[]; nextCursor?: string }> {
+      const limit = options.limit ?? AUDIT_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
+      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
       await requireAdmin(ctx, resourceId);
-      const page = await store.query("audit", { where: { resourceId }, orderBy: { field: "at" }, limit: 500 });
-      return page.items.map((item) => item.data as unknown as AuditEntry);
+      const page = await store.query("audit", { where: { resourceId }, orderBy: { field: "at", direction: "desc" }, limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
+      return { entries: page.items.map((item) => item.data as unknown as AuditEntry), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
     },
   };
 }
