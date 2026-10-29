@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A `prepack` script now builds `dist/` before `npm pack` and `npm publish`.
+
 ## 0.3.0
 
 ### Breaking
