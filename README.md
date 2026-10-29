@@ -57,8 +57,9 @@ into `wrangler.jsonc`, set `REGION` to `eu`, and set the OIDC settings in
 [Worker API](#worker-api).
 
 To try the API without an identity provider, put `IDENTITY_UNSAFE_TEST_MINT=1` in
-`.dev.vars`. Then sign in a test person. The answer is `{ "token": ... }`. Use that token to read the person back. A `userId` works
-once per local database, so use a new one each time you start again:
+`.dev.vars`. Then sign in a test person. `POST /test/token` returns `{ "token": ... }`.
+Use that token to read the person back. A `userId` works once per local database, so
+use a new one each time you start again:
 
 ```sh
 curl -s -X POST http://localhost:8787/api/v1/test/token -H "content-type: application/json" -d '{"userId":"ana"}'
@@ -136,6 +137,10 @@ const link = await sharing.createLink(ctx, "plan", { role: "viewer", signedInOnl
 const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link.token });
 ```
 
+- `revokeGrant(ctx, resourceId, subject)` removes one grant. `listGrants(ctx, resourceId, { limit, cursor })`
+  lists the honored grants a page at a time, and needs an owner. `deleteResource(ctx, resourceId)` erases
+  a resource with its grants, invites, links, and audit entries. It needs an owner and refuses a resource
+  with children. Run it again if it fails part way.
 - `can` joins two checks: the scopes that `resolveChain` left, and the role of
   the chain root. A delegated agent gets its owner's role, cut down by scopes.
 - An invite is by email for a person, or by handle for an agent. It never makes
@@ -161,8 +166,8 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   token, and a grant. A key is shown once, and the store keeps only its hash.
   Scopes can only narrow, and a grant can expire.
 - `DELETE /principals/:id` revokes it, and every key below it stops at once.
-- `/resources`, `/grants`, `/invites`, `/links`, `/access`, and `/audit` expose sharing.
-  A grant names its subject by kind (`human` or `agent`) and id: `POST /resources/:id/grants` takes
+- `/resources` and the paths under `/resources/:id` expose sharing: grants, invites, links, access, and audit.
+  `/invites/:id/accept` and `/links/:id` act on one invite or link. A grant names its subject by kind (`human` or `agent`) and id: `POST /resources/:id/grants` takes
   `subjectKind` and `subjectId`, and `DELETE /resources/:id/grants/:kind/:subjectId` removes one. `GET /resources/:id/grants?limit=&cursor=` lists them (an owner only).
   `DELETE /resources/:id` erases a resource with its grants, invites, links, and audit entries. It
   answers 409 when the resource has children or too many owners.
