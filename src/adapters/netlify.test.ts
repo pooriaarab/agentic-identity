@@ -247,6 +247,18 @@ describe("Netlify store lock and journal", () => {
     await expect(strongStore(fake, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
   });
 
+  it("keeps a lock whose journal has an id or collection that is not a string as held", async () => {
+    for (const w of [
+      { collection: ["docs"], id: ["a"], doc: { n: 1 }, w: "x" },
+      { collection: "docs", id: ["a"], doc: { n: 1 }, w: "x" },
+      { collection: ["docs"], id: "a", doc: { n: 1 }, w: "x" },
+    ]) {
+      const fake = createFakeNetlifyStore();
+      await fake.set("lock", JSON.stringify({ owner: null, expiresAt: 0, writes: [w] }));
+      await expect(strongStore(fake, { waitMs: 100 }).put("docs", "b", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
+    }
+  });
+
   it("refuses a doc stored under another key", async () => {
     const fake = createFakeNetlifyStore();
     const store = strongStore(fake);

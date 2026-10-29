@@ -179,6 +179,7 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
       if (lock.writes !== undefined) {
         if (!Array.isArray(lock.writes)) return null;
         for (const w of lock.writes) {
+          if (typeof w !== "object" || w === null || typeof w.collection !== "string" || typeof w.id !== "string") return null;
           assertCollection(w.collection);
           assertId(w.id);
           wellFormed(w.id, "an id");
