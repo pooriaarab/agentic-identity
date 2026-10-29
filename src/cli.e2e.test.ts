@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
 import { COMMANDS } from "./commands.js";
 import { bundleEntry } from "./test-bundle.js";
@@ -128,6 +128,32 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     // The file is private and keeps no token, only its hash.
     expect(statSync(store).mode & 0o777).toBe(0o600);
     expect(readFileSync(store, "utf8")).not.toContain(link.token);
+  });
+
+  test("the lifecycle commands work across processes: rotate, revoke, delete, export, erase", () => {
+    const agent = run("agents", "create", "keyed", "--scopes", "doc:read").json();
+    const rotated = run("keys", "rotate", agent.id).json();
+    expect(rotated).toMatchObject({ id: agent.id, apiKey: expect.stringMatching(/^aid_/) });
+    expect(readFileSync(store, "utf8")).not.toContain(rotated.apiKey);
+    expect(run("keys", "rotate", "local").code).toBe(1);
+    expect(run("keys", "rotate").code).toBe(2);
+    expect(run("--as", agent.id, "principals", "revoke", agent.id).code).toBe(1);
+    expect(run("principals", "revoke", agent.id).json()).toEqual({ revoked: agent.id });
+    expect(run("--as", agent.id, "whoami").code).toBe(2);
+    run("resources", "create", "doc", "--id", "gone1");
+    expect(run("resources", "delete", "gone1").json()).toEqual({ deleted: true });
+    expect(run("resources", "delete", "gone1").code).toBe(1);
+
+    const out = join(mkdtempSync(join(tmpdir(), "ai-acct-")), "me.zip");
+    expect(run("account", "export", "--out", out).json()).toMatchObject({ file: out, manifest: { apps: [{ id: "identity" }] } });
+    expect(readFileSync(out).subarray(0, 2).toString()).toBe("PK");
+    expect(run("account", "export", "--out", out).err).toContain("the file exists");
+    expect(run("account", "export").code).toBe(2);
+    expect(run("account", "erase").code).toBe(2);
+    const second = run("agents", "create", "other", "--scopes", "doc:read").json();
+    expect(run("--as", second.id, "account", "erase", "--yes").err).toContain("only the person");
+    expect(run("--as", second.id, "account", "export", "--out", join(dirname(out), "a.zip")).err).toContain("only the person");
+    expect(run("account", "erase", "--yes").json()).toMatchObject({ erased: true });
   });
 
   test("a file that is not a store is refused without showing it", () => {

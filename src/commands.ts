@@ -1,8 +1,13 @@
 // One table of commands. The CLI reads it, and the MCP server will read it too, so both do the same things.
 // A command acts as one principal on one Store, and returns plain JSON. It never returns a secret
 // it did not just make, and it never returns an email address.
+import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { exportAccount, eraseAccount, type AccountApp } from "./account.js";
+import { recordChange } from "./core/audit.js";
+import { deletePerson, exportPerson } from "./gdpr.js";
+import { revokePrincipal, rotateKey } from "./principal-admin.js";
 import { ACTIONS, hasScope, isScope, resolveChain, type Action, type Principal, type PrincipalContext } from "./core/principals.js";
 import { ROLES, SUBJECT_KINDS, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import type { Store } from "./ports.js";
@@ -79,6 +84,20 @@ const checkExpiry = (ms: unknown) => {
 };
 const isPerson = (ctx: PrincipalContext) => ctx.kind === "human" && ctx.chain.length === 1;
 
+/** What this store holds about one person, as an app for `exportAccount` and `eraseAccount`. */
+const identityApp = (store: Store, now: () => number): AccountApp => ({
+  id: "identity",
+  exportFor: async (subject) => [{ path: "identity.json", content: JSON.stringify(await exportPerson(store, subject), null, 2) }],
+  eraseFor: (subject) => deletePerson(store, subject, { now }),
+});
+
+/** The export and the erase need the person at the keyboard, not an agent or a token. */
+async function person(app: App, what: "export" | "erase"): Promise<PrincipalContext> {
+  const ctx = await app.actor();
+  if (!isPerson(ctx)) throw new Error(`only the person can ${what}`);
+  return ctx;
+}
+
 export const COMMANDS: Command[] = [
   {
     path: ["whoami"], tool: "identity_whoami", summary: "Show the principal that acts, its chain, and its scopes.", args: [],
@@ -100,6 +119,16 @@ export const COMMANDS: Command[] = [
       const show = (d: Record<string, unknown>) => ({ ...Object.fromEntries(keep.filter((k) => d[k] !== undefined).map((k) => [k, d[k]])), ...(typeof d.handle === "string" && /^[a-z][a-z0-9_-]{1,31}$/.test(d.handle) ? { handle: d.handle } : {}) });
       return { principals: page.items.map((i) => show(i.data)), ...opt(page.nextCursor, "nextCursor") };
     },
+  },
+  {
+    path: ["principals", "revoke"], tool: "identity_principals_revoke", summary: "Revoke an agent, a delegation, or a token, and everything below it. Needs its owner or a principal above it.",
+    args: [{ name: "principal", type: "string", description: "The principal id.", positional: true, required: true }],
+    run: async (app, args) => ({ revoked: await revokePrincipal(app.store, await app.actor(), str(args, "principal"), app.now) }),
+  },
+  {
+    path: ["keys", "rotate"], tool: "identity_keys_rotate", summary: "Give an agent a new key. Its old keys stop. The new key shows once. Needs its owner or a principal above it.",
+    args: [{ name: "principal", type: "string", description: "The id of the agent.", positional: true, required: true }],
+    run: async (app, args) => rotateKey(app.store, await app.actor(), str(args, "principal"), app.now),
   },
   {
     path: ["agents", "create"], tool: "identity_agents_create", summary: "Make an agent with its own identity. Only a person can.",
@@ -132,6 +161,14 @@ export const COMMANDS: Command[] = [
       { name: "parent", type: "string", description: "The id of the folder that holds it." },
     ],
     run: async (app, args) => createSharing(app.store, { now: app.now }).createResource(await app.actor(), { type: str(args, "type"), ...opt(args.id as string | undefined, "id"), ...opt(args.parent as string | undefined, "parentId") }),
+  },
+  {
+    path: ["resources", "delete"], tool: "identity_resources_delete", summary: "Erase a resource with its grants, invites, links, and audit entries. Needs an owner. A resource with children is refused.",
+    args: [resource],
+    run: async (app, args) => {
+      await createSharing(app.store, { now: app.now }).deleteResource(await app.actor(), str(args, "resource"));
+      return { deleted: true };
+    },
   },
   {
     path: ["grants", "set"], tool: "identity_grants_set", summary: "Give a person or an agent a role on a resource. Needs an owner.",
@@ -235,6 +272,36 @@ export const COMMANDS: Command[] = [
     ],
     // The visitor holds only the token, so the check runs with no principal.
     run: async (app, args) => createSharing(app.store, { now: app.now }).can(null, ((args.action as Action | undefined) ?? "read"), str(args, "resource"), { linkToken: str(args, "token") }),
+  },
+  {
+    path: ["account", "export"], tool: "identity_account_export", summary: "Write the data this store holds about the actor to a zip file with a manifest. The actor must be a person.",
+    args: [{ name: "out", type: "string", description: "The zip file to write. A file that exists is refused.", required: true }],
+    run: async (app, args) => {
+      const ctx = await person(app, "export");
+      const out = str(args, "out");
+      // The entry comes first, so the export holds the record of itself.
+      await recordChange(app.store, ctx, { action: "person.export", targetKind: "person", targetId: ctx.principalId }, app.now());
+      const { zip, manifest } = await exportAccount(ctx.principalId, [identityApp(app.store, app.now)], { now: app.now });
+      try {
+        writeFileSync(out, zip, { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        throw new UsageError((error as { code?: string }).code === "EEXIST" ? "the file exists" : "could not write the file");
+      }
+      return { file: out, bytes: zip.length, manifest };
+    },
+  },
+  {
+    path: ["account", "erase"], tool: "identity_account_erase", summary: "Erase the actor, their agents, keys, grants, and the resources only they own. It cannot be undone. The actor must be a person.",
+    args: [{ name: "yes", type: "boolean", description: "Confirm the erase. Without it nothing is removed.", required: true }],
+    run: async (app, args) => {
+      const ctx = await person(app, "erase");
+      if (args.yes !== true) throw new UsageError("add --yes to confirm the erase");
+      const report = await eraseAccount(ctx.principalId, [identityApp(app.store, app.now)], app.store, { now: app.now, actor: ctx });
+      // The error text of a failed eraser may name data, so the result leaves it out.
+      const results = report.results.map(({ appId, ok, audited }) => ({ appId, ok, audited }));
+      if (!report.ok) throw new Error("the erase did not finish: run it again");
+      return { erased: true, results };
+    },
   },
   {
     path: ["audit"], tool: "identity_audit", summary: "Read the audit log of a resource, newest first. Needs an owner.", args: [resource, limit, cursor],
