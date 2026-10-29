@@ -429,6 +429,32 @@ import { runStoreContract } from "agentic-identity/testing";
 runStoreContract((options) => new MyStore(options));
 ```
 
+## Account export and erase
+
+`agentic-identity/account` runs a person's export and erase across many apps. It uses no Node API, so it runs in a Worker. Each app gives one `AccountApp`:
+
+```ts
+import { eraseAccount, exportAccount, type AccountApp } from "agentic-identity/account";
+
+const docs: AccountApp = {
+  id: "docs", // lower case letters, digits, ".", "_", "-"
+  exportFor: async (subject) => [{ path: "docs.json", content: JSON.stringify(await listDocs(subject)) }],
+  eraseFor: async (subject) => { await removeDocs(subject); }, // safe to run twice
+};
+
+const { zip, manifest } = await exportAccount(userId, [docs, tasks]);
+const report = await eraseAccount(userId, [docs, tasks], store, { actor: ctx });
+```
+
+- `exportAccount` returns one zip and its manifest. The zip holds `manifest.json` and each app's files under `<app id>/`. The manifest lists each file with its size and SHA-256.
+- The zip is deterministic. With the same files and the same `now`, you get the same bytes. Entries are stored without compression, in sorted order, with a fixed date.
+- If one exporter throws, `exportAccount` throws an `AccountExportError` that names the app. It makes no zip, because a partial export looks like a full one.
+- `eraseAccount` runs every eraser in order. If one throws, it goes on with the rest and lists the failure in `report.results`. Run it again to retry. `report.ok` is true only when every eraser and every audit write worked.
+- Each app gets one audit entry: `person.erase` on target `app:<id>`, `allowed` or `denied`. The entry holds no subject id.
+- Erase the sign-in last, and only when `report.ok` is true.
+
+Limits: no zip64, so a zip holds at most 65,535 files and 4 GiB. An eraser error message goes in the report, so do not put personal data in it.
+
 ## Cloudflare adapters
 
 `agentic-identity/cloudflare` has a D1 `Store` and an R2 `Blobs`. Both pass the
