@@ -11,7 +11,7 @@ People, agents, and the access they share: delegation, invites, links, and an au
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
-> personal data export and delete, and the typed SDK. The CLI and the MCP server are not built yet.
+> personal data export and delete, and the typed SDK. The CLI is built. The MCP server is not built yet.
 >
 > Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
 > `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
@@ -86,13 +86,14 @@ await client.createResource({ id: "plan", type: "doc" });
 - Share links with a role, an optional expiry, and a signed-in-only option.
 - An audit trail that shows who acted, and for whom. It records access checks and every change: a grant, a revoke, an invite, a link, a key, an export, and an erase. Each entry keeps the principal kind.
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
+- A CLI (`agentic-identity`) for principals, roles, invites, links, and the audit log, on a local JSON file.
 - Sign in with any OpenID Connect provider (Keycloak, EU Login, Google), and per-user data export and hard delete, served by the HTTP API.
 - API keys and personal access tokens for agents, served by the HTTP API (see Worker API).
 - A region claim on every adapter except `Auth`. `assertRegion` fails at start-up when a claim is missing or wrong.
 
 ## Not built yet
 
-- The CLI (`npx agentic-identity`) and the MCP server.
+- The MCP server.
 
 ## Limits
 
@@ -100,6 +101,44 @@ await client.createResource({ id: "plan", type: "doc" });
 - The per-IP budgets read `CF-Connecting-IP`. Cloudflare sets that header and replaces any value a client sends. Without Cloudflare in front, a client can send any value, and requests without the header share one budget. Serve the Worker through Cloudflare to count per IP.
 - `POST /test/token` is for tests only. Never set `IDENTITY_UNSAFE_TEST_MINT=1` in production.
 - The CLI and the MCP server cannot list the audit log, because they do not exist yet. Use the API or the SDK.
+
+## CLI
+
+The CLI works on a local JSON file. It does not call the Worker. It prints JSON
+on stdout. An error goes to stderr as `error: <message>`. The exit code is 0 for
+success, 1 for a refused or failed action, and 2 for a usage error.
+
+```sh
+npx agentic-identity resources create doc --id plan
+npx agentic-identity agents create helper --scopes doc:read
+npx agentic-identity grants set plan agent <agent-id> viewer
+npx agentic-identity links create plan viewer --expires-in-ms 3600000
+npx agentic-identity audit plan
+```
+
+Every command has `--help`. The commands are:
+
+| Command | What it does |
+|---|---|
+| `whoami` | Shows the acting principal, its chain, and its scopes. |
+| `principals list` | Lists the principals in the file. |
+| `agents create <handle> --scopes a,b` | Makes an agent with its own identity. Only a person can. |
+| `resources create <type> [--id] [--parent]` | Makes a resource. The actor owns it. |
+| `grants set\|revoke\|list` | Gives, removes, and lists roles on a resource. |
+| `invites create\|accept\|list` | Invites a person by `--email` or an agent by `--handle`. |
+| `links create\|revoke\|resolve` | Makes, revokes, and checks a share link. |
+| `audit <resource>` | Reads the audit log, newest first. |
+
+- The file is `~/.agentic-identity/store.json`. Change it with `--store <file>` or
+  `AGENTIC_IDENTITY_STORE`. The file mode is `0600`.
+- The first command makes a person named `local` with all rights. Each command
+  acts as `local`. Use `--as <principal-id>` or `AGENTIC_IDENTITY_AS` to act as
+  an agent, so its scopes and roles apply.
+- `invites accept --email` takes the email as given. The CLI does not verify it,
+  because whoever holds the file is trusted. An agent accepts with its own handle.
+- `invites list` shows no email.
+- Use one process at a time on a file. Two processes do not see each other's writes.
+- The same file store is available as `createFileStore` from `agentic-identity/file`.
 
 ## Principals and scopes
 

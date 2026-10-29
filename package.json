@@ -59,6 +59,10 @@
     "./sdk": {
       "types": "./dist/sdk.d.ts",
       "import": "./dist/sdk.js"
+    },
+    "./file": {
+      "types": "./dist/adapters/file.d.ts",
+      "import": "./dist/adapters/file.js"
     }
   },
   "scripts": {
@@ -88,5 +92,8 @@
   },
   "dependencies": {
     "hono": "^4.13.14"
+  },
+  "bin": {
+    "agentic-identity": "./dist/cli-bin.js"
   }
 }

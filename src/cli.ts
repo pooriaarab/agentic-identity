@@ -1,0 +1,102 @@
+// The `agentic-identity` command line. It works on a local JSON file and shares the command table
+// with the MCP server. Output is JSON on stdout. Errors go to stderr as `error: <message>`.
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { parseArgs, type ParseArgsConfig } from "node:util";
+import { createFileStore } from "./adapters/file.js";
+import { COMMANDS, UsageError, openApp, type Args, type Command } from "./commands.js";
+import { VERSION } from "./version.js";
+
+export interface Io {
+  out(text: string): void;
+  err(text: string): void;
+}
+
+const GLOBAL_OPTIONS = `Options for every command:
+  --store <file>  The store file. Default: $AGENTIC_IDENTITY_STORE, or ~/.agentic-identity/store.json
+  --as <id>       The principal that acts. Default: $AGENTIC_IDENTITY_AS, or "local" (made on first use)
+  -h, --help      Show help
+  --version       Show the version`;
+
+const words = (c: Command) => c.path.join(" ");
+const flagOf = (c: Command) => (c.args.some((a) => a.positional) ? ` ${c.args.filter((a) => a.positional).map((a) => `<${a.name}>`).join(" ")}` : "");
+
+function commandHelp(c: Command): string {
+  const lines = c.args.map((a) => `  ${a.positional ? `<${a.name}>` : `--${a.name}${a.type === "boolean" ? "" : ` <${a.type}>`}`}  ${a.description}${a.choices ? ` One of: ${a.choices.join(", ")}.` : ""}${a.required ? " Required." : ""}`);
+  return [`Usage: agentic-identity ${words(c)}${flagOf(c)}${c.args.some((a) => !a.positional) ? " [options]" : ""}`, "", c.summary, ...(lines.length ? ["", "Arguments:", ...lines] : []), "", GLOBAL_OPTIONS].join("\n");
+}
+
+function mainHelp(): string {
+  return ["Usage: agentic-identity <command> [options]", "", "People, agents, and the access they share. Works on a local file store.", "", "Commands:", ...COMMANDS.map((c) => `  ${(words(c) + flagOf(c)).padEnd(46)}${c.summary}`), "", GLOBAL_OPTIONS].join("\n");
+}
+
+/** The command words come first. A value that follows `--store` or `--as` is not one. */
+function split(argv: string[]): { words: string[]; rest: string[] } {
+  const found: string[] = [];
+  const rest: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === "--store" || token === "--as") {
+      rest.push(token, ...argv.slice(i + 1, i + 2));
+      i++;
+    } else if (token.startsWith("-") || found.length >= 2) rest.push(token);
+    else found.push(token);
+  }
+  return { words: found, rest };
+}
+
+function findCommand(found: string[]): { command?: Command; extra: string[] } {
+  for (const take of [2, 1]) {
+    const command = COMMANDS.find((c) => c.path.length === take && c.path.every((w, i) => found[i] === w));
+    if (command) return { command, extra: found.slice(take) };
+  }
+  return { extra: found };
+}
+
+function parseCommand(command: Command, rest: string[], extra: string[]): { values: Args; globals: { store?: string; as?: string; help?: boolean } } {
+  const options: NonNullable<ParseArgsConfig["options"]> = {
+    store: { type: "string" }, as: { type: "string" }, help: { type: "boolean", short: "h" },
+    ...Object.fromEntries(command.args.filter((a) => !a.positional).map((a) => [a.name, { type: a.type === "boolean" ? "boolean" : "string" } as const])),
+  };
+  const parsed = parseArgs({ args: rest, options, allowPositionals: true, strict: true });
+  const values: Args = {};
+  const positional = command.args.filter((a) => a.positional);
+  const given = [...extra, ...parsed.positionals];
+  if (given.length > positional.length) throw new UsageError(`unexpected argument "${given[positional.length]}"`);
+  positional.forEach((a, i) => (values[a.name] = given[i]));
+  for (const a of command.args.filter((x) => !x.positional)) {
+    const raw = parsed.values[a.name];
+    if (raw === undefined) continue;
+    if (a.type === "number") {
+      const n = Number(raw);
+      if (typeof raw !== "string" || raw.trim() === "" || !Number.isFinite(n)) throw new UsageError(`--${a.name} must be a number`);
+      values[a.name] = n;
+    } else values[a.name] = a.type === "list" ? String(raw).split(",").map((s) => s.trim()).filter(Boolean) : (raw as string | boolean);
+  }
+  return { values, globals: parsed.values as { store?: string; as?: string; help?: boolean } };
+}
+
+export async function runCli(argv: string[], env: Record<string, string | undefined>, io: Io): Promise<number> {
+  try {
+    if (argv.includes("--version")) return io.out(VERSION), 0;
+    const { words: found, rest } = split(argv);
+    const { command, extra } = findCommand(found);
+    const help = rest.includes("--help") || rest.includes("-h");
+    if (!command) {
+      if (found.length === 0 || help) return io.out(mainHelp()), found.length === 0 && !help ? 2 : 0;
+      throw new UsageError(`unknown command "${found.join(" ")}". Run with --help.`);
+    }
+    if (help) return io.out(commandHelp(command)), 0;
+    const { values, globals } = parseCommand(command, rest, extra);
+    for (const a of command.args) if (a.required && values[a.name] === undefined) throw new UsageError(`missing ${a.positional ? `<${a.name}>` : `--${a.name}`}`);
+    for (const a of command.args) if (a.choices && values[a.name] !== undefined && !a.choices.includes(String(values[a.name]))) throw new UsageError(`${a.name} must be one of: ${a.choices.join(", ")}`);
+    const path = globals.store ?? env.AGENTIC_IDENTITY_STORE ?? join(env.AGENTIC_IDENTITY_HOME ?? join(homedir(), ".agentic-identity"), "store.json");
+    const as = globals.as ?? env.AGENTIC_IDENTITY_AS;
+    const app = await openApp(createFileStore({ path }), as === undefined ? {} : { as });
+    io.out(JSON.stringify(await command.run(app, values), null, 2));
+    return 0;
+  } catch (error) {
+    io.err(`error: ${error instanceof Error ? error.message : String(error)}`);
+    return error instanceof UsageError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
+  }
+}

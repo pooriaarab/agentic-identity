@@ -39,6 +39,7 @@ export type Grant = { resourceId: string; subjectKind: SubjectKind; subjectId: s
 
 export type Resource = { id: string; type: string; parentId?: string | null };
 export type Decision = { allowed: boolean; role?: Role };
+export type InviteSummary = { id: string; resourceId: string; role: Role; for: "email" | "handle"; handle?: string; expiresAt?: number; acceptedAt?: number };
 type Identity = { email?: string; handle?: string };
 
 const randomToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -280,6 +281,25 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         await recordChange(tx, ctx, { action: "invite.create", resourceId, targetKind: "invite", targetId: id }, now());
       });
       return { id };
+    },
+
+    /**
+     * The invites on one resource, in id order. Needs an owner. It leaves out the email, so a list
+     * never carries an address: it says whether the invite is for an email or for a handle.
+     */
+    async listInvites(ctx: PrincipalContext, resourceId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ invites: InviteSummary[]; nextCursor?: string }> {
+      const limit = options.limit ?? AUDIT_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
+      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+      await requireAdmin(ctx, resourceId);
+      const page = await store.query("invites", { where: { resourceId }, limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
+      const invites = page.items.map(({ data: d }): InviteSummary => ({
+        id: d.id as string, resourceId, role: d.role as Role, for: d.email !== undefined ? "email" : "handle",
+        ...(typeof d.handle === "string" ? { handle: d.handle } : {}),
+        ...(typeof d.expiresAt === "number" ? { expiresAt: d.expiresAt } : {}),
+        ...(typeof d.acceptedAt === "number" ? { acceptedAt: d.acceptedAt } : {}),
+      }));
+      return { invites, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
     },
 
     /** `identity` comes from the verified sign-in: the email claim, or the agent's handle. */
