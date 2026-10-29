@@ -61,7 +61,12 @@ export interface Page<T extends Doc = Doc> {
 
 export const DEFAULT_LIMIT = 100;
 
-/** A transaction kept conflicting with other writers, so it gave up. Nothing was written. Try again later. */
+/**
+ * A transaction kept conflicting with other writers, so it gave up. Nothing was written. Try
+ * again later. An optimistic backend (memory, D1) throws it. A pessimistic backend (Firestore
+ * server SDKs) holds a rival write until the transaction ends, so it may never throw it. An
+ * adapter for such a backend maps an ABORTED result after its last retry to this error.
+ */
 export class StoreConflictError extends Error {
   constructor(message = "the data changed during the transaction") {
     super(message);
@@ -88,6 +93,11 @@ export interface Store extends StoreOps {
    * Every read must come before the first write. A `get` or `query` after a
    * `put` or `delete` throws. This is the Firestore rule. It is the only rule
    * that every adapter can follow, so an app behaves the same on all of them.
+   *
+   * When a write from another store races the transaction, there are two correct endings.
+   * The transaction runs again, or throws `StoreConflictError` and writes nothing (optimistic).
+   * Or the rival write waits for the lock and lands after the commit (pessimistic). A run that
+   * a landed write overtook never commits, so no update is lost.
    *
    * A `query` guards only the docs it returned. To keep a value unique, use it
    * as the doc id, and do not check for a match with a query.

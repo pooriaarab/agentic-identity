@@ -29,6 +29,30 @@ async function walk(store: Store, collection: string, query: Query): Promise<str
   throw new Error("cursor did not reach the last page in 50 pages");
 }
 
+const HOLD_MS = 100;
+
+/**
+ * A write from another store that starts while a transaction runs. The transaction waits a
+ * short time for it, then goes on, so no backend can hang the test. `landed` says whether the
+ * write took effect in that time.
+ *
+ * An optimistic backend lets the write land, then runs the transaction again or gives up with
+ * `StoreConflictError`. A pessimistic backend (a Firestore server SDK locks every doc a
+ * transaction reads) holds the write until the transaction ends. Both are correct. A lost
+ * update is not: a run that a landed write overtook must never commit.
+ */
+function raceWrite(write: () => Promise<unknown>) {
+  const pending: Promise<unknown>[] = [];
+  return {
+    async start(): Promise<boolean> {
+      const done = write();
+      pending.push(done);
+      return Promise.race([done.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), HOLD_MS))]);
+    },
+    settle: () => Promise.all(pending),
+  };
+}
+
 function regionTests<T extends { region: Region }>(make: Make<T>) {
   it("reports the region it was given and refuses a name that is not a region", async () => {
     for (const region of ["eu", "us", "unknown"] as const) expect((await make({ region })).region).toBe(region);
@@ -183,48 +207,65 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(await two.get("counters", "c")).toEqual({ n: 20 });
     });
 
-    it("runs a transaction again when another store changed a doc it read", async () => {
+    // The next four cases race a write from another store against a transaction. A backend that
+    // retries ends one way, and a backend that locks ends the other way. No update may be lost.
+    it("never commits a run that another store's write overtook, for a doc it read", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("docs", "a", { x: 1 });
+      const race = raceWrite(() => two.put("docs", "a", { x: 10 }));
       let runs = 0;
+      let landed = false;
       await one.transaction(async (tx) => {
+        landed = false;
         const doc = (await tx.get<{ x: number }>("docs", "a"))!;
-        if (++runs === 1) await two.put("docs", "a", { x: 10 });
+        if (++runs === 1) landed = await race.start();
         await tx.put("docs", "b", { x: doc.x + 1 });
       });
-      expect(runs).toBe(2);
-      expect(await one.get("docs", "b")).toEqual({ x: 11 });
+      expect(landed).toBe(false);
+      await race.settle();
+      expect(await one.get("docs", "a")).toEqual({ x: 10 });
+      expect(await one.get("docs", "b")).toEqual(runs === 2 ? { x: 11 } : { x: 2 });
     });
 
-    it("runs a read-only transaction again when another store changed a doc it read", async () => {
+    it("never commits a read-only run that another store's write overtook", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("docs", "a", { x: 1 });
+      const race = raceWrite(() => two.put("docs", "a", { x: 2 }));
       const seen: number[] = [];
+      let landed = false;
       await one.transaction(async (tx) => {
+        landed = false;
         seen.push((await tx.get<{ x: number }>("docs", "a"))!.x);
-        if (seen.length === 1) await two.put("docs", "a", { x: 2 });
+        if (seen.length === 1) landed = await race.start();
       });
-      expect(seen).toEqual([1, 2]);
+      expect(landed).toBe(false);
+      await race.settle();
+      expect(seen).toEqual(seen.length === 2 ? [1, 2] : [1]);
     });
 
     // A doc that was deleted and made again must not look unchanged.
-    it("runs a transaction again when another store deleted and made the doc again", async () => {
+    it("never commits a run that another store's delete and write overtook", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("members", "x", { role: "viewer" });
+      const race = raceWrite(async () => {
+        await two.delete("members", "x");
+        await two.put("members", "x", { role: "owner" });
+      });
       let runs = 0;
+      let landed = false;
       await one.transaction(async (tx) => {
+        landed = false;
         const doc = (await tx.get("members", "x"))!;
-        if (++runs === 1) {
-          await two.delete("members", "x");
-          await two.put("members", "x", { role: "owner" });
-        }
+        if (++runs === 1) landed = await race.start();
         await tx.put("members", "x", { ...doc, note: "n" });
       });
-      expect(runs).toBe(2);
-      expect(await one.get("members", "x")).toEqual({ role: "owner", note: "n" });
+      expect(landed).toBe(false);
+      await race.settle();
+      // The write ends last in both cases. A rerun sees its doc, and the other order loses nothing.
+      expect(await one.get("members", "x")).toEqual(runs === 2 ? { role: "owner", note: "n" } : { role: "owner" });
     });
 
     // The rule Firestore sets, so that one app behaves the same on every adapter.
@@ -283,21 +324,43 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(((await one.get<{ parts: string[] }>("decks", "d"))!.parts).sort()).toEqual(["a", "b", "c", "d", "e", "f"]);
     });
 
-    it("throws StoreConflictError when the data keeps changing, and writes nothing", async () => {
+    // Every run is overtaken, or none is. A transaction ends in one of two ways. It gives up with
+    // StoreConflictError and writes nothing, or it commits before the other write lands.
+    it("gives up with StoreConflictError and writes nothing, or commits before a rival write lands", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("counters", "k", { v: 0 });
       let runs = 0;
-      await expect(
-        one.transaction(async (tx) => {
-          await tx.get("counters", "k");
-          await two.put("counters", "k", { v: ++runs });
+      const rivals: ReturnType<typeof raceWrite>[] = [];
+      let landed = false;
+      const outcome = await one
+        .transaction(async (tx) => {
+          landed = false;
+          const read = (await tx.get<{ v: number }>("counters", "k"))!;
+          const rival = raceWrite(() => two.put("counters", "k", { v: 100 + ++runs }));
+          rivals.push(rival);
+          landed = await rival.start();
+          await tx.put("counters", "k", { v: read.v + 1 });
           await tx.put("counters", "out", { v: 1 });
-        }),
-      ).rejects.toBeInstanceOf(StoreConflictError);
-      expect(await one.get("counters", "out")).toBeNull();
-      expect(runs).toBeGreaterThan(1);
-    });
+        })
+        .then(
+          () => "committed",
+          (error: unknown) => {
+            if (error instanceof StoreConflictError) return "gave up";
+            throw error;
+          },
+        );
+      await Promise.all(rivals.map((r) => r.settle()));
+      // Every rival write lands, and the last one wins. The transaction's write never covers it.
+      expect(await one.get("counters", "k")).toEqual({ v: 100 + runs });
+      if (outcome === "gave up") {
+        expect(await one.get("counters", "out")).toBeNull();
+        expect(runs).toBeGreaterThan(1);
+      } else {
+        expect(landed).toBe(false);
+        expect(await one.get("counters", "out")).toEqual({ v: 1 });
+      }
+    }, 15_000);
 
     it("allows reads before writes, and many writes after the reads", async () => {
       const s = await make({});

@@ -124,7 +124,11 @@ App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
   when the condition failed. A refused put changes nothing. A version is opaque: an R2
   etag, a GCS generation, a counter. `signedUrl` for a GET can sign in
   `responseContentDisposition` and `responseContentType`, so the holder of the link
-  cannot change how the bytes are served.
+  cannot change how the bytes are served. A version covers the bytes only, not the
+  metadata: an R2 etag is a hash, so a rewrite with the same bytes and another
+  `contentType` keeps the version. `Blobs` has no `list`, and no streamed or range read
+  or write. `get` and `put` hold the whole object in memory, and a Worker has 128 MB.
+  Send large uploads and downloads through `signedUrl`.
 - `Auth` reads the credential on a `Request` and returns a principal context, or
   `null`. `Realtime` issues and verifies room tokens. `createHmacRealtime` signs
   with HMAC-SHA256 and takes a list of keys: the first signs, all verify, so you
@@ -142,8 +146,13 @@ App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
   not a query, to keep a value unique: write a claim doc such as `names/<folder>:<name>`
   in the same transaction as the item, and two writers cannot both claim it. To edit one
   doc without losing a concurrent edit (a lock in other stores), read it, change it, and
-  write it back inside one transaction. When other writers keep winning, the transaction
-  throws `StoreConflictError` and writes nothing.
+  write it back inside one transaction. Two kinds of backend exist, and both are correct.
+  An optimistic backend (memory, D1) lets a rival write land, then runs the transaction
+  again. When the rival keeps winning, it throws `StoreConflictError` and writes nothing.
+  A pessimistic backend (a Firestore server SDK) locks the docs a transaction read, so a
+  rival write waits and lands after the commit. Code that calls `transaction` handles
+  both: catch `StoreConflictError`, and never assume a rival write lands first. No backend
+  loses an update. The contract suite accepts either ending and fails a lost update.
 
 `createMemoryStore` and `createMemoryBlobs` are for tests and local work. They
 lose data on exit. To write an adapter, run the contract suites against it. They
