@@ -2,7 +2,7 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
-import { beginLogin, callbackUri, checkCallbackPath, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
+import { DEFAULT_CALLBACK_PATH, beginLogin, callbackUri, checkCallbackPath, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
 import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
@@ -69,7 +69,8 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const app = new Hono().basePath("/api/v1");
   const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
   const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
-  const customPath = config.signIn?.provider.callbackPath;
+  const given = config.signIn?.provider.callbackPath;
+  const customPath = given === DEFAULT_CALLBACK_PATH ? undefined : given;
   if (customPath !== undefined) checkCallbackPath(customPath);
   if (customPath !== undefined && (customPath === "/api/v1" || customPath.startsWith("/api/v1/"))) throw new Error("callbackPath must be outside /api/v1");
   // The flow cookie must reach the callback, so it uses the callback path when that is custom.
