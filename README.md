@@ -392,12 +392,12 @@ const blobs = createFileBlobs({ dir: "./.data", urlBase: "https://files.example/
   allows.
 - A file name is the SHA-256 of the doc id or blob key. Keys with slashes, dots, or non-ASCII
   characters are safe, and `A` and `a` stay apart on a case-insensitive file system.
-- Every write and every transaction commit takes a lock file in `dir`. Stores on one folder, in
+- Every write and every transaction commit takes a lock file (`docs/.lock` or `blobs/.lock` in `dir`). Stores on one folder, in
   one process or in several, share data and keep the transaction and `ifMatch` guarantees. The
   owner of the lock touches it while it works. A lock that nobody touched for 60 seconds is taken
   as left by a dead process. A process that is paused for longer than that can lose its lock.
 - Reads take no lock. A read that runs during a commit can see some of the docs of a transaction
-  changed and others not, and a crash during a commit can leave some of its writes applied. A
+  changed and others not, and a crash or an I/O error during a commit can leave some of its writes applied. A crash can also leave `.tmp` files behind. They are safe to delete when no process is writing. A
   transaction checks what it read at commit and runs again, but a query guards only the docs it
   returned, as in every adapter.
 - A file that is damaged (it does not parse, or it has the wrong shape) makes a read throw. It is

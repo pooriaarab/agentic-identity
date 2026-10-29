@@ -101,7 +101,11 @@ async function breakStale(lock: string): Promise<void> {
   } catch (error) {
     if (!isCode(error, "EEXIST")) throw error;
     // A taker that died holding the guard must not block the lock for good.
-    if ((await stat(guard).then((s) => Date.now() - s.mtimeMs, () => 0)) > LOCK_STALE_MS) await rm(guard, { force: true });
+    if ((await stat(guard).then((s) => Date.now() - s.mtimeMs, () => 0)) > LOCK_STALE_MS) {
+      // Rename first: of the callers that saw the old guard, one wins the rename and the rest find nothing.
+      const gone = `${guard}.${randomUUID()}.gone`;
+      if (await rename(guard, gone).then(() => true, () => false)) await rm(gone, { force: true });
+    }
     return;
   }
   try {
@@ -115,7 +119,8 @@ async function breakStale(lock: string): Promise<void> {
  * One writer at a time per folder, across processes. The lock is a file made with `wx`, so one caller
  * makes it, and it holds the owner's token. The owner touches it while it works, so only a lock that
  * nobody touched for a minute (a dead process) is taken, and `breakStale` takes it one taker at a time.
- * An owner removes the lock only while the token is its own.
+ * An owner removes the lock only while the token is its own. A process that stalls for longer than the
+ * stale time can still lose its lock, and this is the limit of the scheme.
  */
 async function withLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(root, { recursive: true });
@@ -130,9 +135,9 @@ async function withLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
       if (!isCode(error, "EEXIST")) throw error;
     }
     const age = await stat(lock).then((s) => Date.now() - s.mtimeMs, () => 0);
+    if (Date.now() > deadline) throw new Error(`could not take the lock on "${root}" in ${LOCK_WAIT_MS} ms`);
     if (age > LOCK_STALE_MS) await breakStale(lock);
-    else if (Date.now() > deadline) throw new Error(`could not take the lock on "${root}" in ${LOCK_WAIT_MS} ms`);
-    else await sleep(5);
+    await sleep(5);
   }
   const beat = setInterval(() => void utimes(lock, new Date(), new Date()).catch(() => {}), LOCK_BEAT_MS);
   beat.unref();
@@ -198,7 +203,11 @@ export function createFileStore(options: FileOptions): Store {
   };
 
   const stageWrite = async (collection: string, id: string, doc: Doc | null): Promise<Staged> => {
-    if (doc === null) return { commit: () => rm(pathOf(collection, id), { force: true }), discard: async () => {} };
+    if (doc === null) return { commit: async () => {
+        await rm(pathOf(collection, id), { force: true });
+        await syncFolder(folder(collection));
+      },
+      discard: async () => {} };
     await mkdir(folder(collection), { recursive: true });
     return stage(pathOf(collection, id), Buffer.from(JSON.stringify({ id, version: randomUUID(), doc } satisfies DocFile)));
   };
@@ -332,6 +341,21 @@ interface Header {
   size: number;
 }
 
+function parseHeader(text: string): Header {
+  let found: unknown;
+  try {
+    found = JSON.parse(text);
+  } catch {
+    throw new Error("blob file is damaged");
+  }
+  const h = found as Partial<Header> | null;
+  const ok =
+    typeof h === "object" && h !== null && typeof h.key === "string" && typeof h.version === "string" && h.version !== "" &&
+    Number.isInteger(h.size) && (h.contentType === undefined || typeof h.contentType === "string");
+  if (!ok) throw new Error("blob file is damaged");
+  return h as Header;
+}
+
 /**
  * `Blobs` in a folder. An object is one file: a length, a JSON header, then the bytes. One rename
  * swaps all three, and a lock makes `ifMatch` and `ifNoneMatch` hold across stores and processes.
@@ -367,7 +391,7 @@ export function createFileBlobs(options: FileBlobsOptions): Blobs {
       if (length > MAX_HEADER_BYTES || 4 + length > total) throw new Error("blob file is damaged");
       const text = Buffer.alloc(length);
       await handle.read(text, 0, length, 4);
-      const header = JSON.parse(text.toString("utf8")) as Header;
+      const header = parseHeader(text.toString("utf8"));
       if (header.key !== key || header.size !== total - 4 - length) throw new Error("blob file is damaged");
       if (!withData) return { header };
       const data = Buffer.alloc(header.size);
@@ -416,7 +440,10 @@ export function createFileBlobs(options: FileBlobsOptions): Blobs {
     },
     async delete(key) {
       need(key);
-      await withLock(root, () => rm(pathOf(key), { force: true }));
+      await withLock(root, async () => {
+        await rm(pathOf(key), { force: true });
+        await syncFolder(root);
+      });
     },
     async signedUrl(key, opts) {
       if (!signing) throw new Error("signedUrl needs urlBase and urlSecret");

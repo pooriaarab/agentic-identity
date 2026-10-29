@@ -62,7 +62,7 @@ it("lets one of two waiters take a lock that a dead process left", async () => {
   expect(results.filter((r) => r !== null)).toHaveLength(1);
 });
 
-it("does not remove a lock that another owner holds", async () => {
+it("waits on a fresh lock and leaves it alone", async () => {
   const dir = dirFor();
   const blobs = createFileBlobs({ dir });
   await blobs.put("k", Uint8Array.of(0));
@@ -104,4 +104,34 @@ it("leaves no temp file when a transaction or a refused put does not commit", as
   expect(await blobs.put("k", Uint8Array.of(2), { ifNoneMatch: "*" })).toBeNull();
   const names = [...readdirSync(join(dir, "blobs")), ...readdirSync(join(dir, "docs"), { recursive: true }).map(String)];
   expect(names.filter((n) => n.endsWith(".tmp"))).toEqual([]);
+});
+
+it("waits on a lock that another owner holds and leaves it alone", async () => {
+  const dir = dirFor();
+  const store = createFileStore({ dir });
+  await store.put("docs", "a", { x: 1 });
+  const lock = join(dir, "docs", ".lock");
+  await writeFile(lock, "someone-else");
+  const wait = createFileStore({ dir }).put("docs", "b", { y: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(await readFile(lock, "utf8")).toBe("someone-else");
+  expect(await store.get("docs", "b")).toBeNull();
+  await rm(lock);
+  await wait;
+  expect(await store.get("docs", "b")).toEqual({ y: 1 });
+});
+
+it("throws on a blob header of the wrong shape", async () => {
+  const dir = dirFor();
+  const blobs = createFileBlobs({ dir });
+  await blobs.put("k", Uint8Array.of(1));
+  const file = join(dir, "blobs", readdirSync(join(dir, "blobs")).find((n) => n.endsWith(".blob"))!);
+  for (const header of ["null", '{"key":"k","size":1}', '{"key":"k","size":1,"version":"v","contentType":5}']) {
+    const text = Buffer.from(header);
+    const lead = Buffer.alloc(4);
+    lead.writeUInt32BE(text.length);
+    await writeFile(file, Buffer.concat([lead, text, Buffer.from([1])]));
+    await expect(blobs.get("k")).rejects.toThrow(/damaged/);
+    await expect(blobs.head("k")).rejects.toThrow(/damaged/);
+  }
 });
