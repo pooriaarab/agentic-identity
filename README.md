@@ -288,7 +288,7 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   `myAudit({ limit, cursor })`. Each response has an `x-request-id` header, which is the
   `requestId` of the entries that the request wrote.
 - `/resources` and the paths under `/resources/:id` expose sharing: grants, invites, links, access, and audit.
-  `/invites/:id/accept` and `/links/:id` act on one invite or link. A grant names its subject
+  `/invites/:id/accept` and `/links/:id` act on one invite or link. `POST /me/invites/accept` accepts one page (50) of the live invites for the caller's verified email (or an agent's own handle) and answers `{ accepted, nextCursor? }`. Call it again with `?cursor=` while `nextCursor` is set. The SDK call is `acceptMyInvites({ cursor })`, and the core call is `acceptPendingInvites(ctx, identity, { cursor })`. An unverified email, a delegated agent, and an expired or taken invite give none. A person who owns a resource can invite any address, so an app that accepts at sign-in gives the invitee access with no step to refuse it. Show the shared files so the person can leave them. A grant names its subject
   by kind (`human` or `agent`) and id. `POST /resources/:id/grants` takes `subjectKind` and
   `subjectId`, and `DELETE /resources/:id/grants/:kind/:subjectId` removes one.
   `GET /resources/:id/grants?limit=&cursor=` lists them (an owner only).
@@ -299,7 +299,7 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   answers 409 when the resource has children or too many owners.
   `GET /resources/:id/audit?limit=&cursor=` returns `{ entries, nextCursor }`, newest
   first. The SDK call is `audit(resourceId, { limit, cursor })`.
-- `POST /test/token` makes a new person with narrow rights (`doc:admin` unless the body lists other scopes, never `*:admin`). It never changes a person that exists and never marks an email as verified. It answers 404 unless `IDENTITY_UNSAFE_TEST_MINT=1`, and the Worker refuses to run with that flag when `REGION` is not `unknown` or `PUBLIC_URL` is https.
+- `POST /test/token` makes a new person with narrow rights (`doc:admin` unless the body lists other scopes, never `*:admin`). It never changes a person that exists and never marks an email as verified unless the body sets `emailVerified: true` with an `email`. It answers 404 unless `IDENTITY_UNSAFE_TEST_MINT=1`, and the Worker refuses to run with that flag when `REGION` is not `unknown` or `PUBLIC_URL` is https.
 - A write, a sign-in start, and the anonymous `/access` check each have a budget per IP (read from `CF-Connecting-IP`). A write also has a budget per principal, counted at the root of its chain. Over budget is a 429 with `Retry-After`, and the call does nothing. Defaults: 60 writes per principal, 120 calls per IP, and 20 sign-in starts per IP, each per minute. The counter rows hold a hash of the key, never an IP. A limiter that cannot count answers 503.
 - `GET /auth/login` and `/auth/callback` sign a person in with OpenID Connect
   (code flow with PKCE, and state and nonce checks). Set `OIDC_ISSUER`,

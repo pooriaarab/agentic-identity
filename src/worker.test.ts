@@ -209,6 +209,27 @@ describe("sharing over HTTP", () => {
     expect((await s.call("DELETE", `/invites/${other.id}`, { token: ana })).status).toBe(409);
   });
 
+  test("a person accepts every pending invite for their verified email in one call", async () => {
+    const { s, ana, bo } = await world();
+    await s.call("POST", "/resources", { token: ana, body: { id: "plan2", type: "doc" } });
+    for (const id of ["plan", "plan2"]) await s.call("POST", `/resources/${id}/invites`, { token: ana, body: { role: "editor", email: "cy@example.test" } });
+    const minted = async (verified: boolean) => ((await (await s.call("POST", "/test/token", { body: { userId: "cy", email: "cy@example.test", emailVerified: verified } })).json()) as { token: string }).token;
+    expect(await s.store.get("users", "cy")).toBeNull();
+    const cy = await minted(false);
+    expect(await s.store.get("users", "cy")).toMatchObject({ emailVerified: false });
+    expect(await (await s.call("POST", "/me/invites/accept", { token: cy })).json()).toEqual({ accepted: 0 });
+    await s.store.put("users", "cy", { id: "cy", email: "cy@example.test", emailVerified: true });
+    expect(await (await s.call("POST", "/me/invites/accept", { token: cy })).json()).toEqual({ accepted: 2 });
+    expect((await access(s, "plan2", "write", bearer(cy))).allowed).toBe(true);
+    expect(await (await s.call("POST", "/me/invites/accept", { token: bo })).json()).toEqual({ accepted: 0 });
+    // An agent with its own handle takes the handle invite; the delegated one takes nothing.
+    const agent = await json(await s.call("POST", "/agents", { token: bo, body: { handle: "scribe2", scopes: ["doc:read"] } }));
+    await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", handle: "scribe2" } });
+    expect(await (await s.call("POST", "/me/invites/accept", { token: agent.apiKey! })).json()).toEqual({ accepted: 1 });
+    expect((await access(s, "plan", "read", bearer(agent.apiKey!))).allowed).toBe(true);
+    expect((await s.call("POST", "/me/invites/accept")).status).toBe(401);
+  });
+
   test("only an owner reads the audit log, and it holds the chain", async () => {
     const { s, ana, bo } = await world();
     await access(s, "plan", "read", bearer(bo));

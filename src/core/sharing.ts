@@ -44,6 +44,9 @@ export type Decision = { allowed: boolean; role?: Role };
 export type InviteSummary = { id: string; resourceId: string; role: Role; for: "email" | "handle"; handle?: string; expiresAt?: number; acceptedAt?: number; revokedAt?: number };
 type Identity = { email?: string; handle?: string };
 
+/** The invites that one `acceptPendingInvites` call reads. */
+const PENDING_PAGE = 50;
+
 const randomToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const sha256 = async (text: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -156,6 +159,24 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     return found;
   };
   const touch = (tx: StoreOps, found: Resource) => tx.put("resources", found.id, found);
+
+  /** `identity` comes from the verified sign-in: the email claim, or the agent's handle. */
+  const accept = async (ctx: PrincipalContext, inviteId: string, identity: Identity): Promise<void> => {
+    const subject = rootSubject(ctx);
+    if (!subject || ctx.chain.length !== 1) throw forbidden();
+    await store.transaction(async (tx) => {
+      const invite = await tx.get("invites", inviteId);
+      const mine = invite?.email !== undefined ? ctx.kind === "human" && identity.email?.toLowerCase() === invite.email : ctx.kind === "agent" && identity.handle === invite?.handle;
+      const live = invite && invite.acceptedAt === undefined && invite.revokedAt == null && finiteOrAbsent(invite.expiresAt) && (invite.expiresAt == null || (invite.expiresAt as number) > now());
+      if (!invite || !live || !mine) throw forbidden();
+      const target = await requireResource(tx, invite.resourceId as string);
+      const current = rank((await tx.get("grants", grantKey(invite.resourceId as string, subject)))?.role);
+      await touch(tx, target);
+      await tx.put("invites", inviteId, { ...invite, acceptedAt: now() });
+      if (rank(invite.role) > current) await putGrant(tx, invite.resourceId as string, subject, invite.role as Role);
+      await recordChange(tx, ctx, { action: "invite.accept", resourceId: invite.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
+    });
+  };
 
   return {
     async createResource(ctx: PrincipalContext, input: { id?: string; type: string; parentId?: string }): Promise<Resource> {
@@ -308,22 +329,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     },
 
     /** `identity` comes from the verified sign-in: the email claim, or the agent's handle. */
-    async acceptInvite(ctx: PrincipalContext, inviteId: string, identity: Identity): Promise<void> {
-      const subject = rootSubject(ctx);
-      if (!subject || ctx.chain.length !== 1) throw forbidden();
-      await store.transaction(async (tx) => {
-        const invite = await tx.get("invites", inviteId);
-        const mine = invite?.email !== undefined ? ctx.kind === "human" && identity.email?.toLowerCase() === invite.email : ctx.kind === "agent" && identity.handle === invite?.handle;
-        const live = invite && invite.acceptedAt === undefined && invite.revokedAt == null && finiteOrAbsent(invite.expiresAt) && (invite.expiresAt == null || (invite.expiresAt as number) > now());
-        if (!invite || !live || !mine) throw forbidden();
-        const target = await requireResource(tx, invite.resourceId as string);
-        const current = rank((await tx.get("grants", grantKey(invite.resourceId as string, subject)))?.role);
-        await touch(tx, target);
-        await tx.put("invites", inviteId, { ...invite, acceptedAt: now() });
-        if (rank(invite.role) > current) await putGrant(tx, invite.resourceId as string, subject, invite.role as Role);
-        await recordChange(tx, ctx, { action: "invite.accept", resourceId: invite.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
-      });
-    },
+    acceptInvite: accept,
 
     /** Needs an owner of the invite's resource. An accepted invite cannot be revoked: the grant stays, and `revokeGrant` removes it. */
     async revokeInvite(ctx: PrincipalContext, inviteId: string): Promise<void> {
@@ -339,6 +345,33 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         await tx.put("invites", inviteId, { ...current, revokedAt: now() });
         await recordChange(tx, ctx, { action: "invite.revoke", resourceId: current.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
       });
+    },
+
+    /**
+     * Accepts the live invites for the caller's verified email, or for the handle of an agent with its own
+     * identity, and returns how many it took. It reads one page of `PENDING_PAGE` invites, so one call stays
+     * bounded. When `nextCursor` is set, call again with it to read on. An invite that is expired, taken, or
+     * not the caller's is skipped. A delegated agent takes none. Any other failure, such as a store error, is thrown.
+     */
+    async acceptPendingInvites(ctx: PrincipalContext, identity: Identity, options: { cursor?: string } = {}): Promise<{ accepted: number; nextCursor?: string }> {
+      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+      let where: Record<string, string> | null = null;
+      if (ctx.kind === "human" && typeof identity.email === "string") where = { email: identity.email.toLowerCase() };
+      else if (ctx.kind === "agent" && typeof identity.handle === "string") where = { handle: identity.handle };
+      if (!where || ctx.chain.length !== 1) return { accepted: 0 };
+      const page = await store.query("invites", { where, limit: PENDING_PAGE, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
+      let accepted = 0;
+      for (const { id, data } of page.items) {
+        if (data.acceptedAt !== undefined) continue;
+        try {
+          await accept(ctx, id, identity);
+          accepted += 1;
+        } catch (error) {
+          // Expired, taken in a race, or the resource is gone: the next invite still counts. A store failure is not that.
+          if (!(error instanceof Error && error.message === "forbidden")) throw error;
+        }
+      }
+      return { accepted, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
     },
 
     /** The token is returned once. Only its hash is stored. */

@@ -110,6 +110,19 @@ describe("the test mint", () => {
     expect((await s.call("POST", `/invites/${invite.id}/accept`, { token: cy })).status).toBe(403);
   });
 
+  test("marks an email as verified only when the body asks, so a test can accept an email invite", async () => {
+    const s = setup();
+    const ana = await s.mint("ana");
+    const res = await s.call("POST", "/test/token", { body: { userId: "dee", email: "Dee@example.test", emailVerified: true } });
+    const dee = (await s.json(res)).token as string;
+    expect(await s.store.get("users", "dee")).toMatchObject({ email: "dee@example.test", emailVerified: true });
+    expect((await s.call("POST", "/test/token", { body: { userId: "eve", email: "e@example.test", emailVerified: "yes" } })).status).toBe(400);
+    expect((await s.call("POST", "/test/token", { body: { userId: "fay", emailVerified: true } })).status).toBe(400);
+    await s.call("POST", "/resources", { token: ana, body: { id: "plan", type: "doc" } });
+    const invite = await s.json(await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", email: "dee@example.test" } }));
+    expect((await s.call("POST", `/invites/${invite.id}/accept`, { token: dee })).status).toBe(200);
+  });
+
   test("a production config cannot turn it on", () => {
     const on = { IDENTITY_UNSAFE_TEST_MINT: "1" };
     expect(unsafeMintEnvError({ ...on, REGION: "eu" })).toMatch(/UNSAFE/);
