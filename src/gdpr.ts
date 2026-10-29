@@ -97,6 +97,8 @@ export async function deletePerson(store: Store, personId: string, options: { re
   const gone = new Set(ids);
   const invites = await many(store, "invites", "createdBy", ids);
   if (typeof user?.email === "string") invites.push(...(await all(store, "invites", { email: user.email })));
+  // A link that waits for this address would sign the person in again after the erase.
+  if (typeof user?.email === "string") await remove("magic_links", await all(store, "magic_links", { email: user.email }));
   invites.forEach((i) => gone.add(i.id));
   await redactTargets(store, [...gone]);
   await remove("invites", invites);

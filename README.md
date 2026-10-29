@@ -7,7 +7,7 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.8.0 preview. This code has principals and delegation chains,
+> Status: 0.9.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, a Netlify Store and Blobs, a file Store and Blobs, a Store-backed Queue, Mail adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
@@ -319,6 +319,41 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   person, their agents, grants, and keys, and each resource that only they own.
   Both need the person's own session or key, not an agent or a token. A resource
   that someone else owns stays, even when it sits in a deleted folder.
+
+## Sign in with an email link
+
+`POST /api/v1/auth/magic` with `{ "email", "returnTo"? }` mails a sign-in link through the `Mail`
+port. The link opens `GET /api/v1/auth/magic/verify?token=...`, a page with one button. The button
+sends `POST /api/v1/auth/magic/verify`, which needs the Origin of `publicUrl`, sets the session cookie
+(`HttpOnly`, `Secure`, `SameSite=Lax`), and redirects to `returnTo` on your own origin (else `/`).
+
+```ts
+createApp({ store, mail: createHttpMail({ url, fetch, from, token }), config: { magicLink: { publicUrl: "https://app.example", appName: "Docs" }, unsafeTestMint: false } });
+```
+
+The Worker entry turns it on when `PUBLIC_URL` (https, or localhost), `MAIL_FROM`, and a mail transport are set. The
+transport is `MAIL_HTTP_URL` (with `MAIL_HTTP_TOKEN`) for `createHttpMail`, or a `SEND_EMAIL`
+binding for `createCloudflareMail`. A bad mail setting turns this sign-in off and logs a fixed
+line. It is off (404) without them. OIDC is not needed.
+
+- The token is 32 random bytes. The store keeps only its SHA-256 hash, and the row is deleted when
+  it is used. A link works once and ends after 15 minutes. A bad, used, or expired link is a 400.
+- The answer is `202 { "ok": true }` for every valid address, known or not, and also when the mail
+  fails to send. Only a malformed address is a 400.
+- Budgets: 3 requests per address and 10 per IP in 10 minutes, 600 for all callers in 15 minutes,
+  and 30 button presses per IP in 10 minutes (`magicVerify`). An erase of the person removes a pending link.
+  Over budget is a 429 with `Retry-After`. Set `rateLimits.magicEmail`, `magicIp`, `magicAll`, or `magicVerify`.
+- The person is `u_` plus a hash of the address, and the email is marked verified. It is a
+  different person than an OIDC sign-in with the same address: the two methods are not linked.
+- Opening the link (a mail scanner, a HEAD request, a page on another site) does not use the token.
+  Only the button does, and it needs our Origin, so another site cannot press it for the person.
+  A person can still be told to open a link that the attacker asked for, and press the button.
+- The per-address budget is counted for any caller, so a caller can keep an address from getting
+  mail for a while. A failed send logs `magic-link mail failed`, never an address.
+- An address with a trailing dot in the domain is refused. Plus tags and dots are other addresses.
+- The IP comes from `CF-Connecting-IP`. Behind another host, set that header at your proxy.
+- The link carries the token in the URL. The page sends `Referrer-Policy: same-origin` (a browser then sends our Origin with the
+  button). The `POST` answer sends `no-referrer`. Both send `Cache-Control: no-store`. No log line holds an address.
 
 ## SDK
 
