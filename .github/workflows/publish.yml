@@ -30,7 +30,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish to ants.land
         run: |
-          echo "//npm.ants.land/:_authToken=$ANTS_TOKEN" >> "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          printf '\n//npm.ants.land/:_authToken=%s\n' "$ANTS_TOKEN" >> "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
           NAME=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VER" version --registry https://npm.ants.land >/dev/null 2>&1; then
