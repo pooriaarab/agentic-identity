@@ -767,9 +767,10 @@ export function runMailContract(make: (options: AdapterOptions) => MailHarness |
       const h = await make({});
       const bad: Partial<MailMessage>[] = [
         { to: "" }, { to: "no-at-sign" }, { to: "a@b" }, { to: "a b@example.test" }, { to: "a@example.test,b@example.test" },
-        { to: "a@example.test\r\nBcc: x@example.test" }, { to: "<a@example.test>" },
+        { to: "a@example.test\r\nBcc: x@example.test" }, { to: "<a@example.test>" }, { to: "a\x00\x7f@example.test" },
         { subject: "" }, { subject: "Hi\r\nBcc: x@example.test" }, { subject: "x".repeat(999) },
         { text: "" }, { text: "x".repeat(200_001) },
+        { subject: 7 as unknown as string }, { text: 42 as unknown as string }, { text: {} as unknown as string }, { html: null as unknown as string }, { html: {} as unknown as string }, { to: 5 as unknown as string },
       ];
       for (const patch of bad) await expect(h.mail.send({ ...message, ...patch })).rejects.toThrow();
       expect(await h.delivered()).toEqual([]);

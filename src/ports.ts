@@ -232,7 +232,8 @@ export interface Mail {
 }
 
 export function assertMailMessage(m: MailMessage): void {
-  if (!/^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(m.to) || m.to.length > 254) throw new Error("invalid recipient address");
+  if (typeof m.to !== "string" || typeof m.subject !== "string" || typeof m.text !== "string" || (m.html !== undefined && typeof m.html !== "string")) throw new Error("invalid message");
+  if (!/^[^\s\x00-\x1f\x7f@<>,;"]+@[^\s\x00-\x1f\x7f@<>,;"]+\.[^\s\x00-\x1f\x7f@<>,;"]+$/.test(m.to) || m.to.length > 254) throw new Error("invalid recipient address");
   if (m.subject.length === 0 || m.subject.length > 200 || /[\r\n]/.test(m.subject)) throw new Error("invalid subject");
   if (m.text.length === 0 || m.text.length > 200_000 || (m.html?.length ?? 0) > 200_000) throw new Error("invalid body");
 }
