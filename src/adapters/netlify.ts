@@ -6,7 +6,7 @@
 // `onlyIfMatch`), and that check is atomic. Nothing spans two keys.
 //   - `Blobs` maps to it directly. One key holds the bytes, and the metadata holds the size and
 //     content type. The ETag is the version.
-//   - `Store` keeps one key per doc. A transaction takes a lease lock on one key, runs, writes a
+//   - `Store` keeps one key per doc, named by the hash of its id, so a key never passes the 600 byte limit. A transaction takes a lease lock on one key, runs, writes a
 //     journal of its writes, applies them, and drops the journal. A holder that finds a journal
 //     from a crashed holder applies it first, so a transaction lands whole or not at all.
 // Every read asks for `consistency: "strong"`, because the default is eventual.
@@ -46,8 +46,10 @@ export interface NetlifyOptions extends AdapterOptions {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const sha256Hex = async (text: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
-const idToKey = (id: string) => Buffer.from(id).toString("base64url");
-const keyToId = (key: string) => Buffer.from(key, "base64url").toString();
+// A lone surrogate becomes U+FFFD in UTF-8, so two ids could share one hash. Refuse such a string.
+const wellFormed = (text: string, what: string) => {
+  if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)) throw new Error(`${what} must be well-formed Unicode`);
+};
 
 export interface NetlifyStoreOptions extends AdapterOptions {
   /** How long a holder owns the lock before another may take it. Defaults to 30000. */
@@ -78,14 +80,21 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     if (!Number.isInteger(value) || value < 1) throw new RangeError(`${name} must be an integer of 1 or more`);
   }
   const strong = { consistency: "strong" } as const;
-  const docKey = (collection: string, id: string) => `d/${collection}/${idToKey(id)}`;
+  const docKey = async (collection: string, id: string) => {
+    assertCollection(collection);
+    assertId(id);
+    wellFormed(id, "an id");
+    return `d/${collection}/${await sha256Hex(id)}`;
+  };
 
-  const readDoc = async (key: string): Promise<Doc | null> => {
+  /** A key holds `{ id, doc }`, because the key holds only a hash of the id. */
+  const readDoc = async (key: string): Promise<{ id: string; doc: Doc } | null> => {
     const text = (await blobs.get(key, { type: "text", ...strong })) as string | null;
     if (text === null) return null;
-    const doc = JSON.parse(text) as unknown;
-    if (typeof doc !== "object" || doc === null || Array.isArray(doc)) throw new Error("a stored doc is not an object");
-    return doc as Doc;
+    const stored = JSON.parse(text) as { id?: unknown; doc?: unknown };
+    const { id, doc } = stored;
+    if (typeof id !== "string" || typeof doc !== "object" || doc === null || Array.isArray(doc)) throw new Error("a stored doc is not readable");
+    return { id, doc: doc as Doc };
   };
 
   async function readAll(collection: string): Promise<{ id: string; doc: Doc }[]> {
@@ -97,8 +106,8 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
       Array.from({ length: Math.min(8, listed.length) }, async () => {
         while (next < listed.length) {
           const { key } = listed[next++]!;
-          const doc = await readDoc(key);
-          if (doc) rows.push({ id: keyToId(key.slice(prefix.length)), doc });
+          const found = await readDoc(key);
+          if (found) rows.push(found);
         }
       }),
     );
@@ -107,9 +116,7 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
 
   const reads = (): StoreOps => ({
     async get<T extends Doc>(collection: string, id: string) {
-      assertCollection(collection);
-      assertId(id);
-      return (await readDoc(docKey(collection, id))) as T | null;
+      return ((await readDoc(await docKey(collection, id)))?.doc ?? null) as T | null;
     },
     async query<T extends Doc>(collection: string, query: Query = {}): Promise<Page<T>> {
       assertCollection(collection);
@@ -137,11 +144,12 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
       } else {
         const held = parseLock(current.data);
         const free = held !== null && (held.owner === null || (Number.isFinite(held.expiresAt) && held.expiresAt <= now()));
-        if (free && current.etag === undefined) throw new Error("the lock has no ETag");
+        // An empty ETag would turn the next conditional write into an unconditional one.
+        if (free && !current.etag) throw new Error("the lock has no ETag");
         won = free ? await blobs.set("lock", lockBody(owner), { onlyIfMatch: current.etag! }) : { modified: false };
       }
       if (won.modified) {
-        if (won.etag === undefined) throw new Error("the lock write returned no ETag");
+        if (!won.etag) throw new Error("the lock write returned no ETag");
         return won.etag;
       }
       if (Date.now() >= deadline) throw new StoreConflictError("could not get the store lock in time");
@@ -158,15 +166,21 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     }
   };
 
-  async function applyWrites(writes: JournalWrite[]): Promise<void> {
+  // Each write renews the lease first, with a check that the lock is still ours. A holder that stalled past
+  // its lease finds the lock taken, and stops before it writes over a rival.
+  async function applyWrites(writes: JournalWrite[], renew: () => Promise<void>): Promise<void> {
     for (const w of writes) {
-      if (w.doc === null) await blobs.delete(docKey(w.collection, w.id));
-      else await blobs.set(docKey(w.collection, w.id), JSON.stringify(w.doc));
+      await renew();
+      const key = await docKey(w.collection, w.id);
+      if (w.doc === null) await blobs.delete(key);
+      else await blobs.set(key, JSON.stringify({ id: w.id, doc: w.doc }));
     }
+    await renew();
+    await blobs.delete("journal");
   }
 
   /** Finishes the writes of a holder that stopped after it wrote the journal. */
-  async function replayJournal(): Promise<void> {
+  async function replayJournal(renew: () => Promise<void>): Promise<void> {
     const text = (await blobs.get("journal", { type: "text", ...strong })) as string | null;
     if (text === null) return;
     let writes: JournalWrite[];
@@ -175,71 +189,84 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
       for (const w of writes) {
         assertCollection(w.collection);
         assertId(w.id);
+        wellFormed(w.id, "an id");
         if (w.doc !== null && (typeof w.doc !== "object" || Array.isArray(w.doc))) throw new Error();
       }
     } catch {
       throw new Error("the store journal is not readable");
     }
-    await applyWrites(writes);
-    await blobs.delete("journal");
+    await applyWrites(writes, renew);
   }
 
   // One transaction at a time per adapter object, so its own callers do not poll against each other.
+  // A call that waits longer than `waitMs` for its turn (a write made inside a transaction does) gives up.
   let queue: Promise<unknown> = Promise.resolve();
 
-  async function locked<R>(work: (renew: () => Promise<void>) => Promise<R>): Promise<R> {
-    const turn = queue.then(
-      async () => {
-        const owner = crypto.randomUUID();
-        let etag = await acquire(owner);
-        try {
-          await replayJournal();
-          return await work(async () => {
-            // A write that conditions on the lock ETag fails when another holder took the lease.
-            const renewed = await blobs.set("lock", lockBody(owner), { onlyIfMatch: etag });
-            if (!renewed.modified || renewed.etag === undefined) throw new StoreConflictError("the store lock was lost");
-            etag = renewed.etag;
-          });
-        } finally {
-          // Free the lock only if it is still ours. A lost lease makes this a no-op.
-          await blobs.set("lock", lockBody(null), { onlyIfMatch: etag }).catch(() => undefined);
-        }
-      },
-    );
-    queue = turn.catch(() => undefined);
-    return turn;
+  async function locked<R>(work: (renew: () => Promise<void>, replay: () => Promise<void>) => Promise<R>): Promise<R> {
+    const previous = queue;
+    let release!: () => void;
+    queue = new Promise<void>((resolve) => (release = resolve));
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          previous.catch(() => undefined),
+          new Promise((_, reject) => (timer = setTimeout(() => reject(new StoreConflictError("waited too long for an earlier transaction")), waitMs))),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      const owner = crypto.randomUUID();
+      let etag = await acquire(owner);
+      const renew = async () => {
+        // A write that conditions on the lock ETag fails when another holder took the lease.
+        const renewed = await blobs.set("lock", lockBody(owner), { onlyIfMatch: etag });
+        if (!renewed.modified || !renewed.etag) throw new StoreConflictError("the store lock was lost");
+        etag = renewed.etag;
+      };
+      try {
+        await replayJournal(renew);
+        return await work(renew, () => replayJournal(renew));
+      } finally {
+        // Free the lock only if it is still ours. A lost lease makes this a no-op.
+        await blobs.set("lock", lockBody(null), { onlyIfMatch: etag }).catch(() => undefined);
+      }
+    } finally {
+      release();
+    }
   }
 
   async function transaction<R>(fn: (tx: StoreOps) => Promise<R>): Promise<R> {
-    return locked(async (renew) => {
+    return locked(async (renew, replay) => {
       const writes = new Map<string, JournalWrite>();
       const noReadAfterWrite = () => {
         if (writes.size > 0) throw new Error("a transaction must read before it writes");
       };
       const read = reads();
-      const stage = (collection: string, id: string, doc: Doc | null) => {
-        assertCollection(collection);
-        assertId(id);
+      const stage = async (collection: string, id: string, doc: Doc | null) => {
+        await docKey(collection, id); // checks the names before anything is written
         writes.set(`${collection}/${id}`, { collection, id, doc: doc === null ? null : (JSON.parse(JSON.stringify(doc)) as Doc) });
       };
       const tx: StoreOps = {
         get: (collection, id) => (noReadAfterWrite(), read.get(collection, id)),
         query: (collection, q) => (noReadAfterWrite(), read.query(collection, q)),
-        async put(collection, id, doc) {
-          stage(collection, id, doc);
-        },
-        async delete(collection, id) {
-          stage(collection, id, null);
-        },
+        put: (collection, id, doc) => stage(collection, id, doc),
+        delete: (collection, id) => stage(collection, id, null),
       };
       const result = await fn(tx);
       if (writes.size > 0) {
-        // The lease may have run out while `fn` ran. Renew it now, so a rival cannot hold it as we write.
         await renew();
-        const list = [...writes.values()];
-        await blobs.set("journal", JSON.stringify({ writes: list }));
-        await applyWrites(list);
-        await blobs.delete("journal");
+        await blobs.set("journal", JSON.stringify({ writes: [...writes.values()] }));
+        try {
+          await applyWrites([...writes.values()], renew);
+        } catch (error) {
+          // Finish the journal now if we can, so no reader keeps seeing half of it. If that works, the
+          // transaction did commit, and its caller gets the result. If not, the next holder finishes it.
+          if (error instanceof StoreConflictError) throw error;
+          await replay().catch(() => {
+            throw error;
+          });
+        }
       }
       return result;
     });
@@ -286,6 +313,7 @@ export function createNetlifyBlobs(blobs: NetlifyStoreLike, options: NetlifyBlob
   // The key is hashed, so any key is a valid Netlify key and the key length has no limit.
   const entry = async (key: string) => {
     if (key === "") throw new Error("blob key must not be empty");
+    wellFormed(key, "a blob key");
     return `b/${await sha256Hex(key)}`;
   };
   return {
@@ -299,20 +327,20 @@ export function createNetlifyBlobs(blobs: NetlifyStoreLike, options: NetlifyBlob
       // Netlify checks the condition and writes in one step. `modified: false` means it did not hold.
       const written = await blobs.set(id, data.slice().buffer, { metadata: { ...metadata }, ...condition });
       if (!written.modified) return null;
-      if (written.etag === undefined) throw new Error("the blob write returned no ETag");
+      if (!written.etag) throw new Error("the blob write returned no ETag");
       return { version: written.etag };
     },
     async get(key) {
       const found = await blobs.getWithMetadata(await entry(key), { type: "arrayBuffer", ...strong });
       if (!found) return null;
-      if (found.etag === undefined) throw new Error("a blob has no ETag");
+      if (!found.etag) throw new Error("a blob has no ETag");
       const { contentType } = metadataOf(found.metadata);
       return { data: new Uint8Array(found.data as ArrayBuffer), version: found.etag, ...(contentType ? { contentType } : {}) };
     },
     async head(key) {
       const found = await blobs.getMetadata(await entry(key), strong);
       if (!found) return null;
-      if (found.etag === undefined) throw new Error("a blob has no ETag");
+      if (!found.etag) throw new Error("a blob has no ETag");
       const { size, contentType } = metadataOf(found.metadata);
       return { size, version: found.etag, ...(contentType ? { contentType } : {}) };
     },

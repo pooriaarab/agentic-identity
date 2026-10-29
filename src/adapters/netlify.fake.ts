@@ -5,6 +5,9 @@
 //   - Every write gives the key a new ETag, even for equal bytes. (The local `BlobsServer` of
 //     `@netlify/blobs` builds an ETag from the file mtime, so two writes in one millisecond share one.)
 //   - A read of a missing key returns null. `list` returns the keys under a prefix.
+//   - A key must pass the client's `validateKey`: not empty, not starting with `/` or `%2F`, at most 600 bytes of UTF-8.
+// One thing no test here proves: that the live service returns, on a read, the ETag string that it takes in
+// `If-Match`. The adapters depend on it. The real client reads the `etag` header, and the local server sends none.
 // `netlify.test.ts` runs one script against this fake and against the real client on the local
 // `BlobsServer`, and compares the results, so the fake cannot drift from the client.
 import type { NetlifyStoreLike } from "./netlify.js";
@@ -13,6 +16,12 @@ interface Entry {
   data: ArrayBuffer;
   etag: string;
   metadata: Record<string, unknown>;
+}
+
+function validateKey(key: string): void {
+  if (key === "") throw new Error("Blob key must not be empty.");
+  if (key.startsWith("/") || key.startsWith("%2F")) throw new Error("Blob key must not start with forward slash (/).");
+  if (new TextEncoder().encode(key).length > 600) throw new Error("Blob key must be at most 600 bytes of UTF-8.");
 }
 
 const copy = (data: string | ArrayBuffer): ArrayBuffer => (typeof data === "string" ? new TextEncoder().encode(data).buffer : data.slice(0)) as ArrayBuffer;
@@ -25,18 +34,22 @@ export function createFakeNetlifyStore(): NetlifyStoreLike {
   const asType = (data: ArrayBuffer, type: string) => (type === "text" ? new TextDecoder().decode(data) : data.slice(0));
   return {
     async get(key, options) {
+      validateKey(key);
       const found = present(key);
       return found ? asType(found.data, options.type) : null;
     },
     async getWithMetadata(key, options) {
+      validateKey(key);
       const found = present(key);
       return found ? { data: asType(found.data, options.type), etag: found.etag, metadata: structuredClone(found.metadata) } : null;
     },
     async getMetadata(key) {
+      validateKey(key);
       const found = present(key);
       return found ? { etag: found.etag, metadata: structuredClone(found.metadata) } : null;
     },
     async set(key, data, options = {}) {
+      validateKey(key);
       const current = present(key);
       if (options.onlyIfNew && current) return { modified: false };
       if (options.onlyIfMatch !== undefined && (!current || current.etag !== options.onlyIfMatch)) return { modified: false };
@@ -45,6 +58,7 @@ export function createFakeNetlifyStore(): NetlifyStoreLike {
       return { modified: true, etag };
     },
     async delete(key) {
+      validateKey(key);
       entries.delete(key);
     },
     async list({ prefix }) {
