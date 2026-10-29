@@ -7,11 +7,11 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.9.0 preview. This code has principals and delegation chains,
+> Status: 0.10.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, a Netlify Store and Blobs, a file Store and Blobs, a Store-backed Queue, Mail adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
-> personal data export and delete, account export and erase across apps, and the typed SDK. The CLI and the MCP server are built. They work on a local file.
+> personal data export and delete, account export and erase across apps with `createAccountRegistry`, and the typed SDK. The CLI and the MCP server are built. They work on a local file.
 >
 > Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
 > `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
@@ -88,6 +88,7 @@ await client.createResource({ id: "plan", type: "doc" });
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
 - A CLI (`agentic-identity`) and an MCP server (`agentic-identity-mcp`) for principals, roles, invites, links, and the audit log, on a local JSON file.
 - Sign in with any OpenID Connect provider (Keycloak, EU Login, Google), and per-user data export and hard delete, served by the HTTP API.
+- Account export and erase helpers, including a registry so each package exports and erases its own records.
 - API keys and personal access tokens for agents, served by the HTTP API (see Worker API).
 - A region claim on every adapter except `Auth`. `assertRegion` fails at start-up when a claim is missing or wrong.
 

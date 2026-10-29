@@ -4,13 +4,14 @@ People, agents, and the access they share: delegation, invites, links, and an au
 
 ## Status
 
-Release 0.9.0 is a preview. It has principals and delegation chains, the
+Release 0.10.0 is a preview. It has principals and delegation chains, the
 sharing model (roles, invites, links, audit), the `Store`, `Blobs`, `Auth`,
 `Realtime`, `Mail`, and `Queue` ports with memory adapters (and an HMAC
 `Realtime`), Cloudflare D1 and R2 adapters, and the port contract suites
 (`agentic-identity/testing`). It has the HTTP API (`agentic-identity/worker`),
-OIDC sign-in, and the typed SDK (`agentic-identity/sdk`). It has account export and erase across apps
-(`agentic-identity/account`). The CLI (`agentic-identity`)
+OIDC sign-in, and the typed SDK (`agentic-identity/sdk`). It has account export
+and erase across apps, plus the account registry (`createAccountRegistry`,
+`AccountPackage`) (`agentic-identity/account`). The CLI (`agentic-identity`)
 and the MCP server (`agentic-identity-mcp`) exist, on a local file. Do not call a tool that is not here.
 
 ## Rules
