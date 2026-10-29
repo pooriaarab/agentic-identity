@@ -323,11 +323,11 @@ export interface FirestoreBlobsOptions extends FirestoreOptions {
   collection?: string;
   /** The largest object. Defaults to 32 MiB. */
   maxBytes?: number;
-  /** The bytes in one chunk doc. A doc holds 1 MiB, and base64 adds a third. Defaults to 512 KiB. */
+  /** The bytes in one chunk doc, up to 768 KiB. A doc holds 1 MiB, and base64 adds a third. Defaults to 512 KiB. */
   chunkBytes?: number;
 }
 
-type BlobMeta = { key: string; size: number; version: string; chunks: number; contentType?: string };
+type BlobMeta = { key: string; size: number; version: string; chunks: number; chunkBytes: number; contentType?: string };
 
 const toBase64 = (bytes: Uint8Array) => {
   let binary = "";
@@ -354,6 +354,7 @@ export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
   for (const [name, value] of [["maxBytes", maxBytes], ["chunkBytes", chunkBytes]] as const) {
     if (!Number.isInteger(value) || value < 1) throw new RangeError(`${name} must be an integer of 1 or more`);
   }
+  if (chunkBytes > 768 * 1024) throw new RangeError("chunkBytes must be 786432 or less, so a chunk fits in a 1 MiB doc");
   const now = options.now ?? Date.now;
   const need = (key: string) => {
     if (key === "") throw new Error("blob key must not be empty");
@@ -381,9 +382,11 @@ export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
       const id = await sha256Hex(key);
       const version = crypto.randomUUID();
       const chunks = Math.ceil(data.length / chunkBytes);
-      const meta: BlobMeta = { key, size: data.length, version, chunks, ...(opts?.contentType ? { contentType: opts.contentType } : {}) };
+      const meta: BlobMeta = { key, size: data.length, version, chunks, chunkBytes, ...(opts?.contentType ? { contentType: opts.contentType } : {}) };
+      let committing = false;
       try {
         await each(chunks, (n) => store.put(chunksOf, chunkId(version, n), { data: toBase64(data.subarray(n * chunkBytes, (n + 1) * chunkBytes)) }));
+        committing = true;
         const replaced = await store.transaction(async (tx) => {
           const current = await tx.get<BlobMeta>(metas, id);
           if ((opts?.ifNoneMatch === "*" && current) || (opts?.ifMatch !== undefined && current?.version !== opts.ifMatch)) return false as const;
@@ -397,7 +400,9 @@ export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
         if (replaced) await dropChunks(replaced).catch(() => undefined);
         return { version };
       } catch (error) {
-        await dropChunks(meta).catch(() => undefined);
+        // After a commit that failed in a way we cannot read (a dropped connection, a 5xx), the write may
+        // have landed and the meta doc may point at these chunks. Keep them then. An orphan costs space only.
+        if (!committing || error instanceof StoreConflictError) await dropChunks(meta).catch(() => undefined);
         throw error;
       }
     },
@@ -405,9 +410,13 @@ export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
       need(key);
       const id = await sha256Hex(key);
       // A put or delete can drop the chunks after we read the meta. Read the meta again then.
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 5; attempt++) {
         const meta = await store.get<BlobMeta>(metas, id);
         if (!meta) return null;
+        // The meta doc names its own chunk size, so an instance with another `chunkBytes` still reads it.
+        if (!Number.isInteger(meta.size) || !Number.isInteger(meta.chunkBytes) || meta.size < 0 || meta.chunkBytes < 1 || meta.chunks !== Math.ceil(meta.size / meta.chunkBytes)) {
+          throw new Error("a blob has a bad meta doc");
+        }
         const parts: Uint8Array[] = new Array(meta.chunks);
         let missing = false;
         await each(meta.chunks, async (n) => {
@@ -419,9 +428,11 @@ export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
         const data = new Uint8Array(meta.size);
         let offset = 0;
         for (const part of parts) {
+          if (offset + part.length > meta.size) throw new Error("a blob has more bytes than its meta doc says");
           data.set(part, offset);
           offset += part.length;
         }
+        if (offset !== meta.size) throw new Error("a blob has fewer bytes than its meta doc says");
         return { data, ...headOf(meta) };
       }
       throw new Error("a blob changed while it was read");
@@ -439,7 +450,8 @@ export function createFirestoreBlobs(options: FirestoreBlobsOptions): Blobs {
         if (current) await tx.delete(metas, id);
         return current;
       });
-      if (gone) await dropChunks(gone);
+      // The key is gone. A chunk that stays is an orphan that no read sees.
+      if (gone) await dropChunks(gone).catch(() => undefined);
     },
     signedUrl: (key, opts) => signBlobUrl(key, opts, { urlBase: options.urlBase, urlSecret: options.urlSecret, now }),
   };

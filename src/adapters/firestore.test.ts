@@ -65,6 +65,36 @@ describe("Firestore blobs", () => {
     expect(await chunkDocs(shared)).toBe(0);
   });
 
+  it("keeps the chunks when a commit lands but the answer is lost", async () => {
+    const fake = createFakeFirestore();
+    let lose = false;
+    const lossy = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fake.fetch(input, init);
+      if (lose && String(input).endsWith(":commit") && String(init?.body).includes("version")) throw new TypeError("connection dropped");
+      return response;
+    }) as typeof fetch;
+    const blobs = createFirestoreBlobs({ projectId: "p", fetch: lossy, urlBase: "https://files.example/blob", urlSecret: URL_SECRET, chunkBytes: 100 });
+    lose = true;
+    await expect(blobs.put("k", Uint8Array.from({ length: 250 }, (_, i) => i % 256))).rejects.toThrow("connection dropped");
+    lose = false;
+    expect([...(await blobs.get("k"))!.data]).toEqual(Array.from({ length: 250 }, (_, i) => i % 256));
+  });
+
+  it("refuses a blob whose chunks do not add up, and one whose meta doc is bad", async () => {
+    const shared = crypto.randomUUID();
+    const blobs = makeBlobs({ shared });
+    const store = make({ shared });
+    await blobs.put("k", new Uint8Array(250));
+    const [{ id, data: meta }] = (await store.query("blobs", {})).items;
+    const chunk = (await store.query("blobs_chunks", { limit: 10 })).items[0]!;
+    await store.put("blobs_chunks", chunk.id, { data: btoa("x") });
+    await expect(blobs.get("k")).rejects.toThrow("fewer bytes");
+    for (const bad of <Record<string, string | number>[]>[{ size: "250" }, { chunks: 9 }, { chunkBytes: 0 }, { size: -1 }]) {
+      await store.put("blobs", id, { ...meta, ...bad });
+      await expect(blobs.get("k")).rejects.toThrow("bad meta doc");
+    }
+  });
+
   it("keeps keys with slashes and long keys apart", async () => {
     const blobs = makeBlobs();
     const long = "k".repeat(2000);
@@ -79,6 +109,7 @@ describe("Firestore blobs", () => {
     await expect(blobs.put("k", new Uint8Array(11))).rejects.toThrow(RangeError);
     expect(await blobs.get("k")).toBeNull();
     expect(() => makeBlobs({}, { chunkBytes: 0 })).toThrow(RangeError);
+    expect(() => makeBlobs({}, { chunkBytes: 1024 * 1024 })).toThrow(RangeError);
     for (const urlSecret of [undefined, "", "short"]) {
       expect(() => createFirestoreBlobs({ ...connection({}), urlBase: "https://x.example", urlSecret: urlSecret as never })).toThrow();
     }
