@@ -429,6 +429,35 @@ import { runStoreContract } from "agentic-identity/testing";
 runStoreContract((options) => new MyStore(options));
 ```
 
+## Account export and erase
+
+`agentic-identity/account` runs a person's export and erase across many apps. It uses no Node API, so it runs in a Worker. Each app gives one `AccountApp`:
+
+```ts
+import { eraseAccount, exportAccount, type AccountApp } from "agentic-identity/account";
+
+const docs: AccountApp = {
+  id: "docs", // lower case letters, digits, ".", "_", "-"
+  exportFor: async (subject) => [{ path: "docs.json", content: JSON.stringify(await listDocs(subject)) }],
+  eraseFor: async (subject) => { await removeDocs(subject); }, // safe to run twice
+};
+
+const { zip, manifest } = await exportAccount(userId, [docs, tasks]);
+const report = await eraseAccount(userId, [docs, tasks], store, { actor: ctx });
+```
+
+- `exportAccount` returns one zip and its manifest. The zip holds `manifest.json` and each app's files under `<app id>/`. The manifest lists each file with its size and SHA-256.
+- The zip is deterministic. With the same files and the same `now`, you get the same bytes. Entries are stored without compression, in sorted order, with a fixed date.
+- If one exporter throws, `exportAccount` throws an `AccountExportError` that names the app. It makes no zip, because a partial export looks like a full one.
+- `eraseAccount` does not check who may erase the subject. It only records the actor. Check that the caller may erase this account before you call it. `actor` is required: pass `null` for an anonymous request, or the call throws.
+- `eraseAccount` runs every eraser in order. If one throws, it goes on with the rest and lists the failure in `report.results`. Run it again to retry. `report.ok` is true only when every eraser and every audit write worked.
+- Each app gets one audit entry: `person.erase` with `targetKind` `app` and `targetId` the app id, `allowed` or `denied`. The entry holds no subject id. When the actor is the subject, acts for them, or is an agent they own, the entry names no actor either, so `deletePerson` keeps it. `denied` here means the eraser failed. A failed self erase blanks the actor too, so the log of a person who still exists does not point to them. If the actor lookup fails, the actor is blanked.
+- Both functions refuse an empty app list: a list that is wired wrong must not look like a finished erase.
+- Pass an id as the subject, not an email: the manifest holds it.
+- Erase the sign-in last, and only when `report.ok` is true.
+
+Limits: a zip over the size limits throws a plain `Error`. Some names (such as `con`, `aux`, or a name with `:`) do not unzip on Windows, and the module does not check for them. No zip64, so a zip holds at most 65,535 files and 4 GiB. An eraser error message goes in the report, so do not put personal data in it.
+
 ## Cloudflare adapters
 
 `agentic-identity/cloudflare` has a D1 `Store` and an R2 `Blobs`. Both pass the
