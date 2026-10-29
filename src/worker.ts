@@ -1,7 +1,7 @@
 // The HTTP API, a Cloudflare Worker built on Hono. Routes live under /api/v1.
 import { Hono, type Context } from "hono";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
-import { ACTIONS, hasScope, parseScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
+import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
 import { createSharing, type Role } from "./core/sharing.js";
 import { createStoreAuth, issueCredential, randomToken } from "./credentials.js";
 import { parseRegion, type Store } from "./ports.js";
@@ -25,6 +25,8 @@ class HttpError extends Error {
     super(message);
   }
 }
+const MAX_SCOPES = 32;
+
 const fail = (status: HttpError["status"], message: string): never => {
   throw new HttpError(status, message);
 };
@@ -66,9 +68,9 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   };
   const body = async (c: Context) => (await c.req.json().catch(() => fail(400, "body must be JSON"))) as Record<string, unknown>;
   const scopesOf = (value: unknown): Scope[] => {
-    if (!Array.isArray(value)) return fail(400, "scopes must be a list");
-    for (const scope of value) parseScope(String(scope));
-    return value as Scope[];
+    if (!Array.isArray(value) || value.length > MAX_SCOPES) return fail(400, "scopes must be a short list");
+    if (!value.every(isScope)) return fail(400, "scopes must be strings in the scope format");
+    return value;
   };
   const expiryOf = (value: unknown): number | undefined =>
     value === undefined ? undefined : Number.isInteger(value) && (value as number) > 0 ? now() + (value as number) : fail(400, "expiresInMs must be a positive integer");
