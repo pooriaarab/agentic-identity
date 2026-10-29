@@ -50,6 +50,13 @@ export type Resolution = ({ ok: true } & PrincipalContext) | { ok: false; reason
 
 const SCOPE_PATTERN = /^(\*|[a-z][a-z0-9_-]*):(read|comment|write|admin)$/;
 
+const MAX_SCOPE_LENGTH = 64;
+
+/** True only for a string in the exact scope grammar. Anything else, even a value that prints as a scope, is false. */
+export function isScope(value: unknown): value is Scope {
+  return typeof value === "string" && value.length <= MAX_SCOPE_LENGTH && SCOPE_PATTERN.test(value);
+}
+
 export function parseScope(scope: Scope): { resource: string; action: Action } {
   const match = SCOPE_PATTERN.exec(scope);
   if (!match) throw new Error(`invalid scope "${scope}"`);
@@ -125,7 +132,7 @@ export async function resolveChain(
   const timeOk = (t: unknown) => t === undefined || t === null || (typeof t === "number" && Number.isFinite(t));
   for (const [i, p] of chain.entries()) {
     const shapeOk =
-      Object.hasOwn(PARENT_KINDS, p.kind) && Array.isArray(p.scopes) && p.scopes.every((scope) => SCOPE_PATTERN.test(scope)) && timeOk(p.revokedAt) && timeOk(p.expiresAt);
+      Object.hasOwn(PARENT_KINDS, p.kind) && Array.isArray(p.scopes) && p.scopes.every(isScope) && timeOk(p.revokedAt) && timeOk(p.expiresAt);
     const allowed = PARENT_KINDS[p.kind];
     const parent = chain[i - 1];
     const parentOk = shapeOk && (allowed.length === 0 ? parent === undefined : parent !== undefined && allowed.includes(parent.kind));

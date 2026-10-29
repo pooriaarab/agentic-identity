@@ -21,7 +21,7 @@
   "type": "module",
   "private": false,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "files": [
     "dist",
@@ -46,6 +46,10 @@
     "./cloudflare": {
       "types": "./dist/adapters/cloudflare.d.ts",
       "import": "./dist/adapters/cloudflare.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
     }
   },
   "scripts": {
@@ -68,6 +72,10 @@
     "miniflare": "^4.20260730.0",
     "tsup": "^8.0.0",
     "typescript": "^5.6.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "wrangler": "^4.155.0"
+  },
+  "dependencies": {
+    "hono": "^4.13.14"
   }
 }

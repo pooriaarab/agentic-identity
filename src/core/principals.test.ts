@@ -225,6 +225,10 @@ describe("resolveChain", () => {
     ["a prototype key as kind", { id: "p", kind: "__proto__", parentId: "h1", scopes: [] }],
     ["missing scopes", { id: "p", kind: "agent_of_human", parentId: "h1" }],
     ["scopes that are a string", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: "docs:read" }],
+    ["a nested scope list", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: [["*:admin"]] }],
+    ["a scope that is an object", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: [{ toString: (): string => "*:admin" }] }],
+    ["a scope that is a number", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: [1] }],
+    ["a scope that is too long", { id: "p", kind: "agent_of_human", parentId: "h1", scopes: [`${"a".repeat(80)}:read`] }],
   ] as unknown as [string, Principal][])("returns invalid_chain, and does not throw, for %s", async (_name, bad) => {
     expect(await resolveChain("p", table(human, bad), { now: NOW })).toMatchObject({ ok: false, reason: "invalid_chain", at: "p" });
   });
