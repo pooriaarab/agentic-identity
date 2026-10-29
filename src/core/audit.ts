@@ -9,6 +9,7 @@ export const CHANGE_ACTIONS = [
   "grant.revoke",
   "invite.create",
   "invite.accept",
+  "invite.revoke",
   "link.create",
   "link.revoke",
   "key.create",

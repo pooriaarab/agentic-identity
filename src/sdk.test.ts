@@ -127,6 +127,17 @@ describe("ids and inputs", () => {
     expect(JSON.parse(s.seen[2]!.body)).toEqual({ role: "viewer" });
   });
 
+  test("invites are listed and revoked on the right routes, with encoded ids", async () => {
+    const s = await server();
+    const client = createClient({ baseUrl: s.origin, token: TOKEN });
+    await client.listInvites("a/b", { limit: 5, cursor: "c" });
+    await client.revokeInvite("x?y");
+    expect(s.seen[0]).toMatchObject({ method: "GET", url: "/api/v1/resources/a%2Fb/invites?limit=5&cursor=c" });
+    expect(s.seen[1]).toMatchObject({ method: "DELETE", url: "/api/v1/invites/x%3Fy" });
+    expect(() => client.revokeInvite("..")).toThrow(TypeError);
+    expect(() => client.listInvites("")).toThrow(TypeError);
+  });
+
   test("withToken makes a second client and leaves the first alone", async () => {
     const s = await server();
     const first = createClient({ baseUrl: s.origin, token: TOKEN });

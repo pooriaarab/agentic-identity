@@ -96,6 +96,11 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     expect(run("--as", agent.id, "invites", "accept", invite.id).code).toBe(1);
     expect(run("invites", "list", "doc1").json().invites[0].acceptedAt).toBeTypeOf("number");
 
+    expect(run("invites", "revoke", invite.id).code).toBe(1);
+    const stale = run("invites", "create", "doc1", "viewer", "--handle", "later").json();
+    expect(run("invites", "revoke", stale.id).json()).toEqual({ ok: true });
+    expect(run("invites", "revoke").code).toBe(2);
+    expect(run("invites", "list", "doc1").json().invites.find((i: { id: string }) => i.id === stale.id).revokedAt).toBeTypeOf("number");
     const person = run("invites", "create", "doc1", "viewer", "--email", "Ann@Example.com").json();
     expect(run("invites", "accept", person.id, "--email", "other@example.com").code).toBe(1);
     expect(run("invites", "list", "doc1").out.toLowerCase()).not.toContain("example.com");

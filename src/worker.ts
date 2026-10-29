@@ -344,6 +344,20 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return c.json(await sharing.createInvite(ctx, id(c), { role: input.role as Role, ...pick(input, "email", "handle"), ...expiresInMs }), 201);
   }));
 
+  // Needs an owner. The list holds no email: each invite says whether it is for an email or a handle.
+  app.get("/resources/:id/invites", authed(async (c, ctx) => {
+    const limit = c.req.query("limit");
+    const cursor = c.req.query("cursor");
+    if (limit !== undefined && !/^[0-9]{1,6}$/.test(limit)) return fail(400, "bad limit");
+    return c.json(await sharing.listInvites(ctx, id(c), { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
+  }));
+
+  // Needs an owner. An accepted invite is 409: remove the grant instead.
+  app.delete("/invites/:id", authed(async (c, ctx) => {
+    await sharing.revokeInvite(ctx, id(c)).catch((e: Error) => (e.message === "invite already accepted" ? fail(409, e.message) : Promise.reject(e)));
+    return c.json({ ok: true });
+  }));
+
   // The email comes from a verified sign-in. The handle comes from the agent's own record.
   app.post("/invites/:id/accept", authed(async (c, ctx) => {
     const user = await store.get("users", ctx.principalId);

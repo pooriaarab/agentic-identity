@@ -126,7 +126,7 @@ Every command has `--help`. The commands are:
 | `agents create <handle> --scopes a,b` | Makes an agent with its own identity. Only a person can. |
 | `resources create <type> [--id] [--parent]` | Makes a resource. The actor owns it. |
 | `grants set\|revoke\|list` | Gives, removes, and lists roles on a resource. |
-| `invites create\|accept\|list` | Invites a person by `--email` or an agent by `--handle`. |
+| `invites create\|accept\|list\|revoke` | Invites a person by `--email` or an agent by `--handle`. |
 | `links create\|revoke\|resolve` | Makes, revokes, and checks a share link. |
 | `audit <resource>` | Reads the audit log, newest first. |
 
@@ -160,7 +160,7 @@ works on the same store file as the CLI, with the same options (`--store`,
 - There is one tool for each CLI command: `identity_whoami`, `identity_principals_list`,
   `identity_agents_create`, `identity_resources_create`, `identity_grants_set`,
   `identity_grants_revoke`, `identity_grants_list`, `identity_invites_create`,
-  `identity_invites_accept`, `identity_invites_list`, `identity_links_create`,
+  `identity_invites_accept`, `identity_invites_list`, `identity_invites_revoke`, `identity_links_create`,
   `identity_links_revoke`, `identity_links_resolve`, and `identity_audit`.
 - A tool takes the CLI arguments, with `_` in a name for `-` (`expires_in_ms`).
   A result holds the JSON as text, and as `structuredContent` when it is an object.
@@ -284,6 +284,9 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   by kind (`human` or `agent`) and id. `POST /resources/:id/grants` takes `subjectKind` and
   `subjectId`, and `DELETE /resources/:id/grants/:kind/:subjectId` removes one.
   `GET /resources/:id/grants?limit=&cursor=` lists them (an owner only).
+  `GET /resources/:id/invites?limit=&cursor=` lists the invites of a resource, with no email (an owner only).
+  `DELETE /invites/:id` revokes an invite, and answers 409 when it was accepted. The SDK calls are
+  `listInvites(resourceId, { limit, cursor })` and `revokeInvite(inviteId)`.
   `DELETE /resources/:id` erases a resource with its grants, invites, links, and audit entries. It
   answers 409 when the resource has children or too many owners.
   `GET /resources/:id/audit?limit=&cursor=` returns `{ entries, nextCursor }`, newest
