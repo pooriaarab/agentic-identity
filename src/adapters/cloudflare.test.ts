@@ -13,6 +13,9 @@
 //  7. A doc deleted and made again must not look unchanged to a stale transaction.
 //  8. A region is required. A database that reports another region than the one declared is refused.
 //  9. A long text sort value must not break the cursor.
+//  9b. A declared eu or us region is confirmed on every read (get, query, and the reads in a
+//     transaction). A database that reports no region, a region that is not a text, or a code outside
+//     the allowlist is refused. Codes compare without case.
 // The Blobs port has conditional puts and signed response headers:
 // 10. A put with ifMatch or ifNoneMatch uses the bucket's own precondition, so two isolates
 //     cannot both win. A refused put returns null and changes nothing.
@@ -51,7 +54,7 @@ runStoreContract(async (options) => {
 
 it("loses no update when two store instances share one database", async () => {
   await db.prepare("DELETE FROM store_docs").run();
-  const [one, two] = [createD1Store(db, { region: "eu" }), createD1Store(db, { region: "eu" })];
+  const [one, two] = [createD1Store(db, { region: "unknown" }), createD1Store(db, { region: "unknown" })];
   await one.put("counters", "c", { n: 0 });
   const bump = (store: typeof one) =>
     store.transaction(async (tx) => {
@@ -168,7 +171,7 @@ describe("signed blob URLs", () => {
 describe("the D1 store", () => {
   it("gives a doc a new version on every write, including after a delete", async () => {
     await db.prepare("DELETE FROM store_docs").run();
-    const [one, two] = [createD1Store(db, { region: "eu" }), createD1Store(db, { region: "eu" })];
+    const [one, two] = [createD1Store(db, { region: "unknown" }), createD1Store(db, { region: "unknown" })];
     await one.put("members", "x", { role: "viewer" });
     const versions = new Set<number>();
     for (let i = 0; i < 20; i++) {
@@ -199,12 +202,33 @@ describe("the D1 store", () => {
     await expect(createD1Store(serving("WNAM"), { region: "eu" }).query("docs")).rejects.toThrow();
     await expect(createD1Store(serving("WEUR"), { region: "us" }).query("docs")).rejects.toThrow();
     expect((await createD1Store(serving("EEUR"), { region: "eu" }).query("docs")).items).toEqual([]);
-    expect((await createD1Store(serving(undefined), { region: "eu" }).query("docs")).items).toEqual([]);
+    expect((await createD1Store(serving("eeur"), { region: "eu" }).query("docs")).items).toEqual([]);
+  });
+
+  it("fails closed when the database reports no region, on every read", async () => {
+    for (const region of ["eu", "us"] as const) {
+      const store = createD1Store(serving(undefined), { region });
+      await expect(store.get("docs", "x")).rejects.toThrow(/did not report/);
+      await expect(store.query("docs")).rejects.toThrow(/did not report/);
+      await expect(store.transaction((tx) => tx.get("docs", "x"))).rejects.toThrow(/did not report/);
+      await expect(store.transaction((tx) => tx.query("docs"))).rejects.toThrow(/did not report/);
+    }
+    const open = createD1Store(serving(undefined), { region: "unknown" });
+    expect(await open.get("docs", "x")).toBeNull();
+    expect((await open.query("docs")).items).toEqual([]);
+  });
+
+  it("reads a doc only when the served region is in the allowlist, and compares without case", async () => {
+    const reads = (served: unknown, region: "eu" | "us") => createD1Store(serving(served as string), { region }).get("docs", "x");
+    for (const code of ["WEUR", "weur", "Eeur", "EEUR"]) expect(await reads(code, "eu")).toBeNull();
+    for (const code of ["WNAM", "enam", "Enam"]) expect(await reads(code, "us")).toBeNull();
+    for (const code of ["WNAM", "wnam", "ENAM", "APAC", "oc", "", "XXXX", " WEUR", "WEUR\n", 5, null, {}]) await expect(reads(code, "eu")).rejects.toThrow();
+    for (const code of ["WEUR", "weur", "EEUR", "APAC", "oc", "", "XXXX", 5]) await expect(reads(code, "us")).rejects.toThrow();
   });
 
   it("pages by a text value too long to spread into call arguments", async () => {
     await db.prepare("DELETE FROM store_docs").run();
-    const store = createD1Store(db, { region: "eu" });
+    const store = createD1Store(db, { region: "unknown" });
     await store.put("long", "a", { t: "a".repeat(300_000) });
     await store.put("long", "b", { t: "b".repeat(300_000) });
     const first = await store.query("long", { orderBy: { field: "t" }, limit: 1 });
