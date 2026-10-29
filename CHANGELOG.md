@@ -12,7 +12,7 @@
 
 ### Internal
 
-- Publish runs for one ref wait for each other, so two runs cannot both publish the same version. A running publish is not cancelled.
+- Publish runs on one ref wait for each other. A running publish is not cancelled.
 
 ## 0.7.0 - 2026-10-29
 
