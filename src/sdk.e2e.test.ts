@@ -64,13 +64,25 @@ test("a person, an agent, and a visitor use the whole API through the SDK", asyn
   expect(second.entries.map((e) => e.id)).not.toContain(first.entries[0]!.id);
   expect(await agent.audit("plan").catch((e: unknown) => (e as ApiError).status)).toBe(403);
 
+  // The person reads their own log: changes, newest first, with the agents' actions included.
+  const mine = await ana.myAudit({ limit: 200 });
+  expect(mine.entries.map((e) => e.at)).toEqual([...mine.entries.map((e) => e.at)].sort((a, b) => b - a));
+  expect(mine.entries.map((e) => e.action)).toEqual(expect.arrayContaining(["key.create", "invite.create", "link.revoke"]));
+  expect(mine.entries.some((e) => e.principalKind === "agent_of_human")).toBe(true);
+  expect(await agent.myAudit().catch((e: unknown) => (e as ApiError).status)).toBe(403);
+
+  // A rotated key replaces the old one.
+  const fresh = await ana.rotateKey(scribe.id);
+  expect(await agent.me().catch((e: unknown) => (e as ApiError).status)).toBe(401);
+  expect(await ana.withToken(fresh.apiKey).me()).toMatchObject({ principalId: scribe.id });
+
   // Revoking a principal stops its key. A bad key is a 401.
   await ana.revokePrincipal(grant.id);
   expect(await helper.me().catch((e: unknown) => (e as ApiError).status)).toBe(401);
   expect(await createClient({ baseUrl: worker.origin, token: "aid_nope" }).me().catch((e: unknown) => (e as ApiError).status)).toBe(401);
 
   // Export and delete need the person, and a delete ends the session.
-  expect(await agent.exportMe().catch((e: unknown) => (e as ApiError).status)).toBe(403);
+  expect(await ana.withToken(fresh.apiKey).exportMe().catch((e: unknown) => (e as ApiError).status)).toBe(403);
   const exported = (await ana.exportMe()) as { user: unknown; principals: unknown[] };
   expect(exported.principals.length).toBeGreaterThan(1);
   expect(await ana.deleteMe()).toEqual({ deleted: true });

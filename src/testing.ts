@@ -941,6 +941,23 @@ export function runAuditContract(make: Make<Store, StoreOptions>): void {
       expect(seen).toEqual(["u4", "u3", "u2", "u1", "u0"]);
     });
 
+    it("lists what a person and their agents did, newest first, in pages", async () => {
+      const { sharing, ana } = await setup();
+      const agent: PrincipalContext = { principalId: "p1", kind: "agent_of_human", chain: [{ id: "ana", kind: "human" }, { id: "p1", kind: "agent_of_human" }], scopes: ["doc:admin"] };
+      await sharing.grant(ana, "doc1", { kind: "human", id: "bo" }, "viewer");
+      await sharing.createLink(agent, "doc1", { role: "viewer" });
+      await sharing.grant(person("zed"), "doc1", { kind: "human", id: "bo" }, "viewer").catch(() => undefined);
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let pages = 0; pages < 10; pages++) {
+        const page = await sharing.listPersonAudit(ana, { limit: 2, ...(cursor === undefined ? {} : { cursor }) });
+        seen.push(...page.entries.map((e) => e.action));
+        if ((cursor = page.nextCursor) === undefined) break;
+      }
+      expect(seen).toEqual(["link.create", "grant.set"]);
+      await expect(sharing.listPersonAudit(agent)).rejects.toThrow("forbidden");
+    });
+
     it("labels a delegated agent and keeps its chain", async () => {
       const { sharing, ana } = await setup();
       const agent: PrincipalContext = { principalId: "p1", kind: "agent_of_human", chain: [{ id: "ana", kind: "human" }, { id: "p1", kind: "agent_of_human" }], scopes: ["doc:admin"] };
