@@ -117,6 +117,7 @@ export async function runCli(args: string[], env: Record<string, string | undefi
     }
     if (help) return io.out(commandHelp(command)), 0;
     const { values, globals } = parseCommand(command, rest, extra);
+    for (const key of ["store", "as"] as const) if (globals[key] !== undefined && held.has(globals[key]!)) globals[key] = held.get(globals[key]!);
     for (const [name, value] of Object.entries(values)) if (typeof value === "string" && held.has(value)) values[name] = held.get(value);
     for (const a of command.args) if (a.required && values[a.name] === undefined) throw new UsageError(`missing ${a.positional ? `<${a.name}>` : `--${a.name}`}`);
     for (const a of command.args) if (a.choices && values[a.name] !== undefined && !a.choices.includes(String(values[a.name]))) throw new UsageError(`${a.name} must be one of: ${a.choices.join(", ")}`);
@@ -129,6 +130,6 @@ export async function runCli(args: string[], env: Record<string, string | undefi
     const code = (error as { code?: string }).code;
     // A parse error repeats the text of the flag, and a mistyped flag can be an address.
     io.err(`error: ${code?.startsWith("ERR_PARSE_ARGS") ? "bad option or value. Run with --help." : error instanceof Error ? error.message.replace(/^invalid id ".*"$/s, "invalid id") : String(error)}`);
-    return error instanceof UsageError || error instanceof RangeError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
+    return error instanceof UsageError || (error instanceof RangeError && error.message.startsWith("limit must")) || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
   }
 }

@@ -28,6 +28,8 @@ export class EraseRefusedError extends Error {
   }
 }
 const linkRoles: readonly Role[] = ROLES.filter((r) => r !== "owner");
+/** The handle of an agent, as `agents create` and the Worker make it. */
+const HANDLE = /^[a-z][a-z0-9_-]{1,31}$/;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** The kinds of principal that sit at the root of a chain, so the kinds that hold a role. */
@@ -267,6 +269,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     async createInvite(ctx: PrincipalContext, resourceId: string, input: { role: Role; email?: string; handle?: string; expiresInMs?: number }) {
       assertRole(input.role, linkRoles);
       if ((input.email === undefined) === (input.handle === undefined)) throw new Error("give an email or a handle");
+      if (input.handle !== undefined && (typeof input.handle !== "string" || !HANDLE.test(input.handle))) throw new Error("invalid handle");
       if (input.email !== undefined && !/^[^\s@]+@[^\s@]+$/.test(input.email)) throw new Error("invalid email");
       const expiresAt = input.expiresInMs === undefined ? undefined : lifetime(input.expiresInMs);
       await requireAdmin(ctx, resourceId);
@@ -291,9 +294,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const paging = pageOf(options);
       await requireAdmin(ctx, resourceId);
       const page = await store.query("invites", { where: { resourceId }, ...paging });
-      const invites = page.items.map(({ data: d }): InviteSummary => ({
-        id: d.id as string, resourceId, role: d.role as Role, for: d.email !== undefined ? "email" : "handle",
-        ...(typeof d.handle === "string" ? { handle: d.handle } : {}),
+      // An invite with neither an email nor a valid handle is not honored, so it is not listed. A
+      // handle that is not valid could be an address that an older version stored.
+      const listed = page.items.filter(({ data: d }) => typeof d.email === "string" || (typeof d.handle === "string" && HANDLE.test(d.handle)));
+      const invites = listed.map(({ data: d }): InviteSummary => ({
+        id: d.id as string, resourceId, role: d.role as Role, for: typeof d.email === "string" ? "email" : "handle",
+        ...(typeof d.email !== "string" ? { handle: d.handle as string } : {}),
         ...(typeof d.expiresAt === "number" ? { expiresAt: d.expiresAt } : {}),
         ...(typeof d.acceptedAt === "number" ? { acceptedAt: d.acceptedAt } : {}),
       }));

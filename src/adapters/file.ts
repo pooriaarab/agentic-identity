@@ -9,7 +9,8 @@ import { StoreConflictError, parseRegion, type AdapterOptions, type Doc, type St
 import { createMemoryStore } from "./memory.js";
 
 const FORMAT = 1;
-// A write holds the lock for a moment. A writer waits longer than a lock takes to count as stale,
+// The wait blocks the process (a synchronous sleep), so a long-lived process that shares the file
+// stalls for at most this long. A write holds the lock for a moment. A writer waits longer than a lock takes to count as stale,
 // so one command after a crash still gets through.
 const LOCK_WAIT_MS = 5_000;
 const LOCK_STALE_MS = 3_000;
@@ -162,7 +163,8 @@ function commit(shared: Shared, writes: Write[]): void {
         closeSync(fd);
       }
       chmodSync(temp, 0o600);
-      if (!owned()) {
+      // The last look before the rename: a holder that stalled past the stale time may have lost the lock.
+      if (!owned() || shared.seen !== signature(shared.path)) {
         unlinkQuietly(temp);
         throw new StoreConflictError("the store file lock was taken over");
       }

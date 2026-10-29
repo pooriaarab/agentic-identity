@@ -40,6 +40,19 @@ test("the list holds no email and no other resource's invite", async () => {
   expect(invites.find((i) => i.for === "handle")?.handle).toBe("bot");
 });
 
+test("a handle that is not a handle is refused, and a stored one that is not valid is not listed", async () => {
+  const store = createMemoryStore();
+  const sharing = createSharing(store);
+  await sharing.createResource(ana, { id: "doc", type: "doc" });
+  for (const handle of ["ann@example.com", "", "A", "has space", "-lead"]) await expect(sharing.createInvite(ana, "doc", { role: "viewer", handle })).rejects.toThrow("invalid handle");
+  // Docs that an older version, or a bad write, could leave.
+  await store.put("invites", "old1", { id: "old1", resourceId: "doc", role: "viewer", handle: "ann@example.com" });
+  await store.put("invites", "old2", { id: "old2", resourceId: "doc", role: "viewer" });
+  await sharing.createInvite(ana, "doc", { role: "viewer", handle: "good-bot" });
+  const { invites } = await sharing.listInvites(ana, "doc");
+  expect(invites.map((i) => i.handle)).toEqual(["good-bot"]);
+});
+
 test("bad paging input is refused and pages cover each invite once", async () => {
   const sharing = await setup();
   for (let i = 0; i < 3; i++) await sharing.createInvite(ana, "doc", { role: "viewer", handle: `bot${i}` });

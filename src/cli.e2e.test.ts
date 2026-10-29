@@ -117,6 +117,7 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     const link = run("links", "create", "doc2", "viewer", "--signed-in-only").json();
     expect(run("links", "resolve", "doc2", link.token).json()).toEqual({ allowed: false });
     expect(run("invites", "create", "doc2", "viewer").code).toBe(2);
+    expect(run("invites", "create", "doc2", "viewer", "--handle", "ann@example.com").code).toBe(1);
     expect(run("invites", "create", "doc2", "viewer", "--handle", "bot", "--expires-in-ms", "0").code).toBe(2);
     expect(run("audit", "doc2", "--limit", "0").code).toBe(2);
     // The file is private and keeps no token, only its hash.

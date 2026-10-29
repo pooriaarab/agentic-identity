@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- `createInvite` refuses a handle that is not in the form of an agent handle (2 to 32 lowercase letters, digits, `-`, `_`), so an invite by handle can hold no address.
+
 ### Added
 
 - The `agentic-identity` CLI works on a local JSON file: `whoami`, `principals list`, `agents create`, `resources create`, `grants set|revoke|list`, `invites create|accept|list`, `links create|revoke|resolve`, and `audit`. It prints JSON. `createFileStore` (`agentic-identity/file`) is a `Store` on a JSON file and passes the `Store` and audit contract suites. `listInvites(ctx, resourceId)` lists the invites on a resource, an owner only, with no email.
