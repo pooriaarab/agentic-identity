@@ -39,7 +39,7 @@ export interface AccountOptions {
   actor?: PrincipalContext | null;
 }
 
-/** An app failed to export. No zip is made: a partial export would pass for a full one. */
+/** An app failed to export, or gave a bad file. No zip is made: a partial export would pass for a full one. */
 export class AccountExportError extends Error {
   constructor(readonly appId: string, options?: { cause?: unknown }) {
     super(`export failed for app "${appId}"`, options);
@@ -47,11 +47,14 @@ export class AccountExportError extends Error {
   }
 }
 
+// Same marker as the `deletePerson` tombstone. `SAFE_ID` rejects the parentheses, so no real id equals it.
+const ERASED = "(erased)";
 const APP_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const FILE_LIMIT = 65_535;
 const BYTE_LIMIT = 0xffff_ffff;
 const encoder = new TextEncoder();
 const bytesOf = (content: string | Uint8Array) => (typeof content === "string" ? encoder.encode(content) : content);
+const NAME_LIMIT = 0xffff;
 
 function checkApps(apps: AccountApp[]): void {
   const seen = new Set<string>();
@@ -99,6 +102,7 @@ export function writeZip(entries: { name: string; data: Uint8Array }[]): Uint8Ar
   const DOS_DATE = (0 << 9) | (1 << 5) | 1; // 1980-01-01
   for (const { name, data } of sorted) {
     const nameBytes = encoder.encode(name);
+    if (nameBytes.length > NAME_LIMIT) throw new Error("file name too long for a zip");
     const crc = crc32(data);
     const local = new DataView(new ArrayBuffer(30));
     local.setUint32(0, 0x04034b50, true);
@@ -157,27 +161,43 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
   const entries: { name: string; data: Uint8Array }[] = [];
   const manifest: AccountManifest = { version: 1, subject, generatedAt: (options.now ?? Date.now)(), apps: [] };
   for (const app of [...apps].sort((a, b) => (a.id < b.id ? -1 : 1))) {
-    let files: AccountFile[];
+    const listed: ManifestFile[] = [];
     try {
-      files = await app.exportFor(subject);
+      const files = await app.exportFor(subject);
+      const paths = new Set<string>();
+      for (const file of files) {
+        checkPath(file.path);
+        if (paths.has(file.path)) throw new Error("duplicate file path");
+        for (let cut = file.path.indexOf("/"); cut !== -1; cut = file.path.indexOf("/", cut + 1)) {
+          if (paths.has(file.path.slice(0, cut))) throw new Error("file path under a file");
+        }
+        paths.add(file.path);
+        const data = bytesOf(file.content);
+        if (!(data instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
+        entries.push({ name: `${app.id}/${file.path}`, data });
+        listed.push({ path: file.path, bytes: data.length, sha256: await sha256(data) });
+      }
+      const sorted = [...paths];
+      if (sorted.some((p) => sorted.some((q) => q.startsWith(`${p}/`)))) throw new Error("file path over a file");
     } catch (cause) {
       throw new AccountExportError(app.id, { cause });
-    }
-    const listed: ManifestFile[] = [];
-    const paths = new Set<string>();
-    for (const file of files) {
-      checkPath(file.path);
-      if (paths.has(file.path)) throw new Error(`duplicate file path in app "${app.id}"`);
-      paths.add(file.path);
-      const data = bytesOf(file.content);
-      entries.push({ name: `${app.id}/${file.path}`, data });
-      listed.push({ path: file.path, bytes: data.length, sha256: await sha256(data) });
     }
     listed.sort((a, b) => (a.path < b.path ? -1 : 1));
     manifest.apps.push({ id: app.id, files: listed });
   }
   entries.push({ name: "manifest.json", data: encoder.encode(JSON.stringify(manifest, null, 2)) });
   return { zip: writeZip(entries), manifest };
+}
+
+/**
+ * `deletePerson` removes every audit entry that names the person or their agents, so an entry that
+ * kept those ids would vanish. When the actor is the subject, or acts for the subject, the entry is
+ * written like the `deletePerson` tombstone: it names no one. Any other actor (an admin) stays.
+ */
+function actorFor(subject: string, actor: PrincipalContext | null): PrincipalContext | null {
+  if (actor === null) return null;
+  if (actor.principalId !== subject && !actor.chain.some((step) => step.id === subject)) return actor;
+  return { principalId: ERASED, kind: "human", chain: [], ...(actor.requestId === undefined ? {} : { requestId: actor.requestId }) } as unknown as PrincipalContext;
 }
 
 export interface EraseResult {
@@ -214,7 +234,7 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
       error = cause instanceof Error ? cause.message : "erase failed";
     }
     const id = crypto.randomUUID();
-    const entry = auditEntry(options.actor ?? null, { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
+    const entry = auditEntry(actorFor(subject, options.actor ?? null), { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
     let audited = true;
     try {
       await store.put("audit", id, entry as unknown as Doc);

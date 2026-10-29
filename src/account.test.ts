@@ -10,12 +10,17 @@
 //  8. Each app gets one audit entry, `denied` for a failure. The entry holds no subject id.
 //  9. A failing audit write is reported, and the erase goes on.
 // 10. An empty subject is refused.
+// 11. A path under a file ("x" and "x/y"), a bad content type, and a name over 65,535 bytes fail as
+//     an AccountExportError (or an error) and make no zip.
+// 12. When the actor is the subject or acts for them, the entries name no one, and they survive
+//     `deletePerson`. An admin actor stays in the entry.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
+import { deletePerson } from "./gdpr.js";
 import { AccountExportError, eraseAccount, exportAccount, type AccountApp, type AccountFile } from "./account.js";
 
 const app = (id: string, files: AccountFile[] = [], erased: string[] = [], fail = false): AccountApp => ({
@@ -35,8 +40,8 @@ describe("exportAccount", () => {
   });
 
   test("refuses bad file paths and repeats", async () => {
-    for (const path of ["", "/etc/x", "../x", "a//b", "a\\b", "./x"]) await expect(exportAccount("ana", [app("a", [{ path, content: "x" }])], { now })).rejects.toThrow("invalid file path");
-    await expect(exportAccount("ana", [app("a", [{ path: "x", content: "1" }, { path: "x", content: "2" }])], { now })).rejects.toThrow("duplicate file path");
+    for (const path of ["", "/etc/x", "../x", "a//b", "a\\b", "./x"]) await expect(exportAccount("ana", [app("a", [{ path, content: "x" }])], { now })).rejects.toMatchObject({ appId: "a", cause: { message: "invalid file path" } });
+    await expect(exportAccount("ana", [app("a", [{ path: "x", content: "1" }, { path: "x", content: "2" }])], { now })).rejects.toMatchObject({ appId: "a", cause: { message: "duplicate file path" } });
   });
 
   test("a failing exporter aborts and names the app", async () => {
@@ -75,6 +80,15 @@ describe("exportAccount", () => {
     expect(readFileSync(file).length).toBe(zip.length);
   });
 
+  test("refuses a file under a file, bad content, and a long name", async () => {
+    const bad = (files: unknown) => exportAccount("ana", [app("a", files as AccountFile[])], { now });
+    await expect(bad([{ path: "x", content: "1" }, { path: "x/y", content: "2" }])).rejects.toBeInstanceOf(AccountExportError);
+    await expect(bad([{ path: "x/y", content: "2" }, { path: "x", content: "1" }])).rejects.toBeInstanceOf(AccountExportError);
+    await expect(bad([{ path: "x", content: 5 }])).rejects.toBeInstanceOf(AccountExportError);
+    await expect(bad("nope")).rejects.toBeInstanceOf(AccountExportError);
+    await expect(bad([{ path: "n".repeat(70_000), content: "1" }])).rejects.toThrow("too long");
+  });
+
   test("refuses an empty subject", async () => {
     await expect(exportAccount("", [], { now })).rejects.toThrow("subject is required");
   });
@@ -95,6 +109,27 @@ describe("eraseAccount", () => {
       ["person.erase", "app", "tasks", "allowed"],
     ]);
     expect(JSON.stringify(log)).not.toContain("ana");
+  });
+
+  test("entries of a self erase name no one and survive deletePerson", async () => {
+    const store = createMemoryStore();
+    await store.put("principals", "ana", { id: "ana", kind: "human" });
+    await store.put("users", "ana", { id: "ana" });
+    const self = { principalId: "ana", kind: "human", chain: [{ id: "ana", kind: "human" }], scopes: [] } as never;
+    const viaAgent = { principalId: "bot", kind: "agent_of_human", chain: [{ id: "ana", kind: "human" }, { id: "bot", kind: "agent_of_human" }], scopes: [] } as never;
+    const admin = { principalId: "root", kind: "human", chain: [{ id: "root", kind: "human" }], scopes: [] } as never;
+    await eraseAccount("ana", [app("docs")], store, { now, actor: self });
+    await eraseAccount("ana", [app("tasks")], store, { now, actor: viaAgent });
+    await eraseAccount("ana", [app("forms")], store, { now, actor: admin });
+    await deletePerson(store, "ana", { now });
+    const log = (await entries(store)).filter((e) => e.targetKind === "app");
+    expect(log.map((e) => [e.targetId, e.principalId, e.rootId]).sort()).toEqual([
+      ["docs", "(erased)", "(erased)"],
+      ["forms", "root", "root"],
+      ["tasks", "(erased)", "(erased)"],
+    ]);
+    expect(JSON.stringify(log)).not.toContain("ana");
+    expect(JSON.stringify(log)).not.toContain("bot");
   });
 
   test("a failing eraser is reported and the rest still run", async () => {

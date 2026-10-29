@@ -450,7 +450,8 @@ const report = await eraseAccount(userId, [docs, tasks], store, { actor: ctx });
 - The zip is deterministic. With the same files and the same `now`, you get the same bytes. Entries are stored without compression, in sorted order, with a fixed date.
 - If one exporter throws, `exportAccount` throws an `AccountExportError` that names the app. It makes no zip, because a partial export looks like a full one.
 - `eraseAccount` runs every eraser in order. If one throws, it goes on with the rest and lists the failure in `report.results`. Run it again to retry. `report.ok` is true only when every eraser and every audit write worked.
-- Each app gets one audit entry: `person.erase` on target `app:<id>`, `allowed` or `denied`. The entry holds no subject id.
+- Each app gets one audit entry: `person.erase` on target `app:<id>`, `allowed` or `denied`. The entry holds no subject id. When the actor is the subject, or acts for them, the entry names no actor either, so `deletePerson` keeps it. `denied` here means the eraser failed.
+- Pass an id as the subject, not an email: the manifest holds it.
 - Erase the sign-in last, and only when `report.ok` is true.
 
 Limits: no zip64, so a zip holds at most 65,535 files and 4 GiB. An eraser error message goes in the report, so do not put personal data in it.
