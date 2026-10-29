@@ -7,4 +7,5 @@ export * from "./ports.js";
 export { createHmacRealtime } from "./adapters/hmac.js";
 export { createMemoryAuth, createMemoryBlobs, createMemoryMail, createMemoryQueue, createMemoryStore } from "./adapters/memory.js";
 export { createStoreQueue, type StoreQueueOptions } from "./adapters/storequeue.js";
+export { MailError, buildMime, createCloudflareMail, createHttpMail, type CloudflareMailOptions, type EmailBindingLike, type HttpMailOptions } from "./adapters/mail.js";
 export { createStoreAuth, issueCredential, revokeCredential } from "./credentials.js";
