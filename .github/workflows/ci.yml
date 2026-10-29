@@ -38,3 +38,16 @@ jobs:
       - run: npm ci
       - name: Run the contract suites on the Firestore emulator
         run: npx --yes firebase-tools@14.27.0 emulators:exec --only firestore --project demo-contract "npx vitest run src/adapters/firestore.test.ts src/adapters/storequeue.test.ts"
+
+  netlify-real-client:
+    runs-on: ubuntu-latest
+    env:
+      REQUIRE_NETLIFY_REAL_CLIENT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - name: Run the real Netlify Blobs client on its local server
+        run: npx vitest run src/adapters/netlify.real.test.ts
