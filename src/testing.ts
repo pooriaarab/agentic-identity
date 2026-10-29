@@ -2,7 +2,8 @@
 //   runStoreContract((options) => new MyStore(options));
 // The suites use vitest, an optional peer dependency.
 import { describe, expect, it } from "vitest";
-import type { PrincipalContext } from "./core/principals.js";
+import { createSharing } from "./core/sharing.js";
+import type { AuditEntry, PrincipalContext } from "./core/principals.js";
 import { StoreConflictError, type AdapterOptions, type Auth, type Blobs, type Doc, type Json, type Mail, type MailMessage, type Page, type Query, type Queue, type Realtime, type Region, type RoomKey, type Store, type StoreOps } from "./ports.js";
 
 type Make<T, O = AdapterOptions> = (options: O) => T | Promise<T>;
@@ -849,6 +850,91 @@ export function runQueueContract(make: (options: AdapterOptions) => QueueHarness
       loop.self = loop;
       await expect(h.queue.send("a", loop)).rejects.toThrow();
       expect(h.queue.region).toBe("unknown");
+    });
+  });
+}
+
+// Failure-mode list for the change log. Each case is a way a change could go unrecorded or leak.
+//  1. A grant, a revoke, an invite, an accept, a link, and a link revoke each write one entry
+//     with the actor, its kind and chain, the target, the action, the time, and the request id.
+//  2. A change that fails (a caller who is not an owner, the last owner) writes no entry.
+//  3. An entry holds no email, no handle, no link token, and no hash of one.
+//  4. The log lists newest first, and a cursor reaches every entry once.
+//  5. An agent's change is labeled with the agent kind and keeps the chain.
+export function runAuditContract(make: Make<Store, StoreOptions>): void {
+  describe("Audit contract", () => {
+    const person = (id: string, requestId = `req-${id}`): PrincipalContext => ({ principalId: id, kind: "human", chain: [{ id, kind: "human" }], scopes: ["*:admin"], requestId });
+    const setup = async () => {
+      let t = 1_000;
+      const store = await make({});
+      const sharing = createSharing(store, { now: () => ++t });
+      await sharing.createResource(person("ana"), { id: "doc1", type: "doc" });
+      return { sharing, ana: person("ana", "req-1") };
+    };
+    const log = async (sharing: Awaited<ReturnType<typeof setup>>["sharing"], ctx: PrincipalContext) =>
+      (await sharing.listAudit(ctx, "doc1", { limit: 200 })).entries.filter((e) => e.targetKind !== undefined);
+
+    it("writes one entry for each change, with actor, target, action, time, and request id", async () => {
+      const { sharing, ana } = await setup();
+      await sharing.grant(ana, "doc1", { kind: "human", id: "bo" }, "editor");
+      await sharing.revokeGrant(ana, "doc1", { kind: "human", id: "bo" });
+      const invite = await sharing.createInvite(ana, "doc1", { role: "viewer", email: "cy@example.test" });
+      await sharing.acceptInvite(person("cy"), invite.id, { email: "cy@example.test" });
+      const link = await sharing.createLink(ana, "doc1", { role: "viewer" });
+      await sharing.revokeLink(ana, link.id);
+      const entries = await log(sharing, ana);
+      expect(entries.map((e) => [e.action, e.targetKind, e.targetId]).reverse()).toEqual([
+        ["grant.set", "human", "bo"],
+        ["grant.revoke", "human", "bo"],
+        ["invite.create", "invite", invite.id],
+        ["invite.accept", "invite", invite.id],
+        ["link.create", "link", link.id],
+        ["link.revoke", "link", link.id],
+      ]);
+      const [first] = entries.slice(-1) as [AuditEntry];
+      expect(first).toMatchObject({ principalId: "ana", principalKind: "human", rootId: "ana", resourceId: "doc1", requestId: "req-1", outcome: "allowed", chain: [{ id: "ana", kind: "human" }] });
+      expect(typeof first.at).toBe("number");
+      expect(entries.find((e) => e.action === "invite.accept")).toMatchObject({ principalId: "cy", requestId: "req-cy" });
+    });
+
+    it("writes no entry for a change that fails", async () => {
+      const { sharing, ana } = await setup();
+      await expect(sharing.grant(person("bo"), "doc1", { kind: "human", id: "bo" }, "owner")).rejects.toThrow();
+      await expect(sharing.revokeGrant(ana, "doc1", { kind: "human", id: "ana" })).rejects.toThrow("last owner");
+      await expect(sharing.createInvite(ana, "doc1", { role: "viewer" })).rejects.toThrow();
+      expect(await log(sharing, ana)).toEqual([]);
+    });
+
+    it("keeps emails, handles, and link tokens out of the log", async () => {
+      const { sharing, ana } = await setup();
+      await sharing.createInvite(ana, "doc1", { role: "viewer", email: "cy@example.test" });
+      await sharing.createInvite(ana, "doc1", { role: "viewer", handle: "scribe" });
+      const link = await sharing.createLink(ana, "doc1", { role: "viewer" });
+      const text = JSON.stringify((await sharing.listAudit(ana, "doc1", { limit: 200 })).entries);
+      expect(text).not.toContain("example.test");
+      expect(text).not.toContain("scribe");
+      expect(text).not.toContain(link.token);
+    });
+
+    it("lists newest first and pages with a cursor", async () => {
+      const { sharing, ana } = await setup();
+      for (let i = 0; i < 5; i++) await sharing.grant(ana, "doc1", { kind: "human", id: `u${i}` }, "viewer");
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let pages = 0; pages < 10; pages++) {
+        const page = await sharing.listAudit(ana, "doc1", { limit: 2, ...(cursor === undefined ? {} : { cursor }) });
+        seen.push(...page.entries.filter((e) => e.targetId !== undefined).map((e) => e.targetId as string));
+        if ((cursor = page.nextCursor) === undefined) break;
+      }
+      expect(seen).toEqual(["u4", "u3", "u2", "u1", "u0"]);
+    });
+
+    it("labels a delegated agent and keeps its chain", async () => {
+      const { sharing, ana } = await setup();
+      const agent: PrincipalContext = { principalId: "p1", kind: "agent_of_human", chain: [{ id: "ana", kind: "human" }, { id: "p1", kind: "agent_of_human" }], scopes: ["doc:admin"] };
+      await sharing.createLink(agent, "doc1", { role: "viewer" });
+      const [entry] = await log(sharing, ana);
+      expect(entry).toMatchObject({ action: "link.create", principalId: "p1", principalKind: "agent_of_human", machineMade: true, rootId: "ana", chain: [{ id: "ana", kind: "human" }, { id: "p1", kind: "agent_of_human" }] });
     });
   });
 }

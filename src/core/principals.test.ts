@@ -268,7 +268,7 @@ describe("audit", () => {
     ]);
     expect(entry.machineMade).toBe(true);
     expect(Object.keys(entry).sort()).toEqual(
-      ["action", "at", "chain", "id", "machineMade", "outcome", "principalId", "principalKind", "resourceId"],
+      ["action", "at", "chain", "id", "machineMade", "outcome", "principalId", "principalKind", "resourceId", "rootId"],
     );
   });
 

@@ -95,9 +95,19 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     await next();
   });
 
+  // One id for each request, made here and never taken from the caller. It names the request in the audit log.
+  const requestId = (c: Context) => {
+    const known = c.get("requestId") as string | undefined;
+    if (known) return known;
+    const made = crypto.randomUUID();
+    c.set("requestId", made);
+    c.header("x-request-id", made);
+    return made;
+  };
   const authed = (handler: (c: Context, ctx: PrincipalContext) => Promise<Response>) => async (c: Context) => {
-    const ctx = await auth.authenticate(c.req.raw);
-    if (!ctx) return fail(401, "unauthorized");
+    const found = await auth.authenticate(c.req.raw);
+    if (!found) return fail(401, "unauthorized");
+    const ctx = { ...found, requestId: requestId(c) };
     // A page on another site can make the browser send the session cookie. It cannot set Origin
     // to ours, and it cannot add an Authorization header.
     const viaCookie = !/^Bearer [A-Za-z0-9_-]{1,512}$/.test(c.req.header("authorization") ?? "");

@@ -2,6 +2,7 @@
 // Roles belong to the root of a chain (the person, or an agent with its own
 // identity). A delegated agent gets that role, cut down by its scopes.
 import { StoreConflictError, type Doc, type Store, type StoreOps } from "../ports.js";
+import { recordChange } from "./audit.js";
 import { auditEntry, hasScope, type Action, type AuditEntry, type PrincipalContext } from "./principals.js";
 
 export const ROLES = ["viewer", "commenter", "editor", "owner"] as const;
@@ -174,6 +175,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         await touch(tx, found);
         if (legacy) await tx.delete("grants", legacy);
         await putGrant(tx, resourceId, who, role);
+        await recordChange(tx, ctx, { action: "grant.set", resourceId, targetKind: who.kind, targetId: who.id }, now());
       });
     },
 
@@ -185,6 +187,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         if ((await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
         if (legacy) await tx.delete("grants", legacy);
         await tx.delete("grants", grantKey(resourceId, who));
+        await recordChange(tx, ctx, { action: "grant.revoke", resourceId, targetKind: who.kind, targetId: who.id }, now());
       });
     },
 
@@ -227,8 +230,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         if ((await tx.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
         // What a write added since the sweep. Each write changed the resource doc, so none can land after this read and commit.
         const rest: [string, string][] = [];
-        // Audit entries are not here: `can` writes them outside a transaction, so reading them guards nothing.
-        for (const collection of ["grants", "links", "invites"]) {
+        // A change writes its audit entry in its transaction, so an entry here is guarded too. `can`
+        // writes outside a transaction: its entry can land after this read and stay.
+        for (const collection of ["grants", "links", "invites", "audit"]) {
           const cap = collection === "grants" ? 2 * MAX_OWNERS_ON_ERASE : MAX_OWNERS_ON_ERASE;
           const left = await tx.query(collection, { where: { resourceId }, limit: cap + 1 });
           if (left.items.length > cap) throw new StoreConflictError("too many docs are left on the resource, try again");
@@ -253,6 +257,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
           ...(input.email === undefined ? { handle: input.handle as string } : { email: input.email.toLowerCase() }),
           ...(expiresAt === undefined ? {} : { expiresAt }),
         });
+        await recordChange(tx, ctx, { action: "invite.create", resourceId, targetKind: "invite", targetId: id }, now());
       });
       return { id };
     },
@@ -271,6 +276,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         await touch(tx, target);
         await tx.put("invites", inviteId, { ...invite, acceptedAt: now() });
         if (rank(invite.role) > current) await putGrant(tx, invite.resourceId as string, subject, invite.role as Role);
+        await recordChange(tx, ctx, { action: "invite.accept", resourceId: invite.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
       });
     },
 
@@ -287,6 +293,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
           id, resourceId, role: input.role, tokenHash, signedInOnly: input.signedInOnly === true,
           ...(expiresAt === undefined ? {} : { expiresAt }),
         });
+        await recordChange(tx, ctx, { action: "link.create", resourceId, targetKind: "link", targetId: id }, now());
       });
       return { id, token };
     },
@@ -300,6 +307,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         const current = await tx.get("links", linkId);
         if (!current) throw forbidden();
         await tx.put("links", linkId, { ...current, revokedAt: now() });
+        await recordChange(tx, ctx, { action: "link.revoke", resourceId: link.resourceId as string, targetKind: "link", targetId: linkId }, now());
       });
     },
 

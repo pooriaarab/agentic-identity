@@ -36,6 +36,8 @@ export interface PrincipalContext {
   /** Root first, the acting principal last. */
   chain: ChainStep[];
   scopes: Scope[];
+  /** Set by the Worker for each request. It ties audit entries to the request that made them. */
+  requestId?: string;
 }
 
 export type ChainFailure =
@@ -172,18 +174,26 @@ export interface AuditEntry {
   principalKind: PrincipalKind | "anonymous";
   chain: ChainStep[];
   machineMade: boolean;
+  /** The root of the chain: the person, or the agent with its own identity. */
+  rootId: string;
+  /** What a change touched. Entries of access checks have none. */
+  targetKind?: string;
+  targetId?: string;
+  requestId?: string;
 }
 
 export function auditEntry(
   context: PrincipalContext | null,
-  event: { id: string; at: number; action: string; resourceId?: string; outcome: "allowed" | "denied" },
+  event: { id: string; at: number; action: string; resourceId?: string; outcome: "allowed" | "denied"; targetKind?: string; targetId?: string },
 ): AuditEntry {
-  if (context === null) return { ...event, principalId: "anonymous", principalKind: "anonymous", chain: [], machineMade: false };
+  if (context === null) return { ...event, principalId: "anonymous", principalKind: "anonymous", chain: [], machineMade: false, rootId: "anonymous" };
   return {
     ...event,
     principalId: context.principalId,
     principalKind: context.kind,
     chain: context.chain.map(({ id, kind }) => ({ id, kind })),
     machineMade: isMachineMade(context.kind),
+    rootId: context.chain[0]?.id ?? context.principalId,
+    ...(context.requestId === undefined ? {} : { requestId: context.requestId }),
   };
 }
