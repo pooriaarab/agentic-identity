@@ -7,10 +7,11 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.1.0 preview. This code has principals and delegation chains,
+> Status: 0.2.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
-> and the HTTP API (a Cloudflare Worker) with OIDC sign-in, personal data export and delete, and the typed SDK. The CLI and the MCP server are not built yet.
+> and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
+> personal data export and delete, and the typed SDK. The CLI and the MCP server are not built yet.
 >
 > Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
 > `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
@@ -19,6 +20,59 @@ People, agents, and the access they share: delegation, invites, links, and an au
 
 ```sh
 npm install agentic-identity
+```
+
+## Quick start
+
+### Run the Worker
+
+1. Make `wrangler.jsonc`:
+
+   ```jsonc
+   {
+     "name": "my-identity",
+     "main": "src/index.ts",
+     "compatibility_date": "2026-06-01",
+     "compatibility_flags": ["nodejs_compat"],
+     "d1_databases": [{ "binding": "DB", "database_name": "my-identity", "database_id": "00000000-0000-0000-0000-000000000000" }],
+     "vars": { "REGION": "unknown" }
+   }
+   ```
+
+2. Export the Worker from `src/index.ts`:
+
+   ```ts
+   export { default } from "agentic-identity/worker";
+   ```
+
+3. Start it:
+
+   ```sh
+   npx wrangler dev
+   ```
+
+Local D1 reports no region, so keep `REGION` at `unknown`. For production, run
+`wrangler d1 create my-identity --location weur`, copy the `database_id` it prints
+into `wrangler.jsonc`, set `REGION` to `eu`, and set the OIDC settings in
+[Worker API](#worker-api).
+
+To try the API without an identity provider, put `IDENTITY_UNSAFE_TEST_MINT=1` in
+`.dev.vars`. Then sign in a test person and read the person back. A `userId` works
+once per local database, so use a new one each time you start again:
+
+```sh
+curl -s -X POST http://localhost:8787/api/v1/test/token -H "content-type: application/json" -d '{"userId":"ana"}'
+curl -s http://localhost:8787/api/v1/me -H "Authorization: Bearer <token>"
+```
+
+### Use the SDK
+
+```ts
+import { createClient } from "agentic-identity/sdk";
+
+const client = createClient({ baseUrl: "http://localhost:8787", token: "<token>" });
+const me = await client.me();
+await client.createResource({ id: "plan", type: "doc" });
 ```
 
 ## Features
@@ -37,6 +91,13 @@ npm install agentic-identity
 ## Not built yet
 
 - The CLI (`npx agentic-identity`) and the MCP server.
+
+## Limits
+
+- OIDC discovery and the JWKS load on every sign-in. There is no cache yet. Only RS256 id tokens are accepted.
+- The per-IP budgets read `CF-Connecting-IP`. Cloudflare sets that header and replaces any value a client sends. Without Cloudflare in front, a client can send any value, and requests without the header share one budget. Serve the Worker through Cloudflare to count per IP.
+- `POST /test/token` is for tests only. Never set `IDENTITY_UNSAFE_TEST_MINT=1` in production.
+- A grant, an invite, or a link does not write an audit entry yet.
 
 ## Principals and scopes
 
