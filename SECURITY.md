@@ -16,7 +16,7 @@ data in a report.
 
 ## Supported versions
 
-Only the latest 0.1.x release gets fixes.
+Only the latest 0.3.x release gets fixes.
 
 ## Secure defaults
 

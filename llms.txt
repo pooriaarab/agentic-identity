@@ -2,7 +2,7 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-Status: 0.2.0 preview. Principals and delegation, sharing (roles, invites, links, audit), six ports (Store, Blobs, Auth, Realtime, Mail, Queue), memory and Cloudflare D1/R2 adapters, contract suites at agentic-identity/testing. HTTP API (agentic-identity/worker) with OIDC sign-in, API keys, personal access tokens, and data export and delete. Typed SDK at agentic-identity/sdk. No CLI or MCP server yet.
+Status: 0.3.0 preview. Principals and delegation, sharing (roles, invites, links, audit), six ports (Store, Blobs, Auth, Realtime, Mail, Queue), memory and Cloudflare D1/R2 adapters, contract suites at agentic-identity/testing. HTTP API (agentic-identity/worker) with OIDC sign-in, API keys, personal access tokens, and data export and delete. Typed SDK at agentic-identity/sdk. No CLI or MCP server yet.
 
 ## Docs
 
