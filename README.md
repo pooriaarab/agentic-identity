@@ -313,6 +313,41 @@ const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.
   and `verifySignedBlobUrl` both throw when it is missing or short. Use one
   secret per bucket.
 
+## Run on Firebase
+
+`agentic-identity/firestore` has a Firestore `Store`. It calls the Firestore REST API
+through a `fetch` you pass in, so it runs in Workers, Node, and Cloud Functions and
+needs no Firebase SDK. It passes the `Store` contract suite, including the transaction
+guards. The suite runs against the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
+set, and against an in-process fake of the REST surface when it is not. CI uses the fake.
+The fake locks every doc a transaction reads for that transaction alone, which is stricter
+than Firestore, so it does not exercise the aborts that two readers of one doc cause on
+the real service. Run the suite against the emulator before you rely on retry behavior.
+
+```ts
+import { createFirestoreStore } from "agentic-identity/firestore";
+
+const store = createFirestoreStore({
+  projectId: "my-project",
+  fetch: globalThis.fetch,
+  token: () => getAccessToken(), // an OAuth token for the datastore scope
+  region: "eu",
+});
+```
+
+- Only `Store` has a Firestore adapter. `Blobs` and the other ports keep their own
+  adapters, so mix them as you need.
+- Firestore is a pessimistic backend. A transaction locks the docs it reads, and
+  Firestore aborts one that cannot get its locks. The adapter runs it again (`maxAttempts`,
+  default 8), then throws `StoreConflictError` and writes nothing.
+- A query with `orderBy` needs a composite index for each equality filter you combine
+  with it. Firestore tells you which when it refuses the query.
+- Firestore cannot store an array inside an array, or a field named like `__name__`.
+  The adapter refuses such a doc before it sends a request.
+- `region` is a claim, as for the other adapters. Create the database in the region
+  you claim. For the emulator, pass `baseUrl: "http://" + process.env.FIRESTORE_EMULATOR_HOST`
+  and leave `token` out.
+
 ## Develop
 
 ```sh

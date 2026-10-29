@@ -10,7 +10,8 @@
     "sharing",
     "invites",
     "audit-log",
-    "cloudflare"
+    "cloudflare",
+    "firestore"
   ],
   "license": "MIT",
   "author": "Pooria Arab",
@@ -46,6 +47,10 @@
     "./cloudflare": {
       "types": "./dist/adapters/cloudflare.d.ts",
       "import": "./dist/adapters/cloudflare.js"
+    },
+    "./firestore": {
+      "types": "./dist/adapters/firestore.d.ts",
+      "import": "./dist/adapters/firestore.js"
     },
     "./worker": {
       "types": "./dist/worker.d.ts",
