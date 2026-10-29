@@ -16,7 +16,8 @@ const freePort = () =>
 
 export async function startWorker(): Promise<{ origin: string; stop(): void }> {
   const port = await freePort();
-  const args = ["wrangler", "dev", "--port", String(port), "--persist-to", mkdtempSync(join(tmpdir(), "ai-")), "--var", "IDENTITY_UNSAFE_TEST_MINT:1", "--var", "REGION:unknown"];
+  const inspectorPort = await freePort();
+  const args = ["wrangler", "dev", "--port", String(port), "--inspector-port", String(inspectorPort), "--persist-to", mkdtempSync(join(tmpdir(), "ai-")), "--var", "IDENTITY_UNSAFE_TEST_MINT:1", "--var", "REGION:unknown"];
   const wrangler: ChildProcess = spawn("npx", args, { stdio: "pipe", detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: "false" } });
   let log = "";
   wrangler.stdout?.on("data", (d) => (log += d));
