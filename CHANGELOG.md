@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `agentic-identity/firestore` has a Firestore `Store` over the REST API with an injected `fetch`. It passes the `Store` contract suite against the emulator (when `FIRESTORE_EMULATOR_HOST` is set) or an in-process fake of the REST surface.
+
 ## 0.4.0 - 2026-10-29
 
 ### Changed
