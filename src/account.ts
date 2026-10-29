@@ -173,13 +173,16 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
       const folders = new Set<string>();
       for (const file of files) {
         checkPath(file.path);
-        if (paths.has(file.path)) throw new Error("duplicate file path");
-        for (let cut = file.path.indexOf("/"); cut !== -1; cut = file.path.indexOf("/", cut + 1)) {
-          if (paths.has(file.path.slice(0, cut))) throw new Error("file path under a file");
+        // Compared without case: a Windows or macOS unzip would let one file overwrite the other.
+        const key = file.path.toLowerCase();
+        if (paths.has(key)) throw new Error("duplicate file path");
+        for (let cut = key.indexOf("/"); cut !== -1; cut = key.indexOf("/", cut + 1)) {
+          if (paths.has(key.slice(0, cut))) throw new Error("file path under a file");
         }
-        paths.add(file.path);
-        for (let cut = file.path.indexOf("/"); cut !== -1; cut = file.path.indexOf("/", cut + 1)) folders.add(file.path.slice(0, cut));
-        if (folders.has(file.path)) throw new Error("file path over a file");
+        paths.add(key);
+        for (let cut = key.indexOf("/"); cut !== -1; cut = key.indexOf("/", cut + 1)) folders.add(key.slice(0, cut));
+        if (folders.has(key)) throw new Error("file path over a file");
+        if (typeof file.content === "string" && decoder.decode(encoder.encode(file.content)) !== file.content) throw new Error("file content is not valid text");
         const given = bytesOf(file.content);
         if (!(given instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
         const data = typeof file.content === "string" ? given : new Uint8Array(given); // a later change to the exporter's buffer must not split the hash from the zip
@@ -205,7 +208,7 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
  */
 async function actorFor(store: Pick<Store, "get">, subject: string, actor: PrincipalContext | null): Promise<PrincipalContext | null> {
   if (actor === null) return null;
-  const blank = { principalId: ERASED, kind: "human", chain: [], ...(actor.requestId === undefined ? {} : { requestId: actor.requestId }) } as unknown as PrincipalContext;
+  const blank = { principalId: ERASED, kind: actor.kind, chain: [], ...(actor.requestId === undefined ? {} : { requestId: actor.requestId }) } as unknown as PrincipalContext;
   // A lookup that fails blanks the actor: that is the safe failure for privacy.
   try {
     return (await isMine(store, subject, actor)) ? blank : actor;
@@ -274,7 +277,12 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
       error = cause instanceof Error ? cause.message : "erase failed";
     }
     const id = crypto.randomUUID();
-    const later = now();
+    let later = first;
+    try {
+      later = now();
+    } catch {
+      // The entry keeps the first time: the erase has run and must not go without its entry.
+    }
     const entry = auditEntry(actor, { id, at: typeof later === "number" && Number.isFinite(later) ? later : first, action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
     let audited = true;
     try {

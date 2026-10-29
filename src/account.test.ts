@@ -153,6 +153,7 @@ describe("eraseAccount", () => {
       ["sheets", "(erased)", "(erased)"],
       ["tasks", "(erased)", "(erased)"],
     ]);
+    expect(log.find((e) => e.targetId === "mail")).toMatchObject({ principalKind: "agent", machineMade: true });
     expect(JSON.stringify(log)).not.toContain("ana");
     expect(JSON.stringify(log)).not.toContain("bot");
     expect(JSON.stringify(log)).not.toContain("p_sub");
@@ -204,6 +205,25 @@ describe("eraseAccount", () => {
     await expect(eraseAccount("", [app("docs", [], erased)], createMemoryStore(), { now })).rejects.toThrow("subject is required");
     await expect(eraseAccount("ana", [app("docs", [], erased), app("Bad", [], erased)], createMemoryStore(), { now })).rejects.toThrow("invalid app id");
     expect(erased).toEqual([]);
+  });
+});
+
+describe("case, content text, and a clock that throws", () => {
+  test("refuses paths that differ only by case, and content with a lone surrogate", async () => {
+    const f = (path: string, content = "x"): AccountFile => ({ path, content });
+    await expect(exportAccount("ana", [app("docs", [f("Notes.json"), f("notes.json")])], { now })).rejects.toThrow("docs");
+    await expect(exportAccount("ana", [app("docs", [f("A"), f("a/b")])], { now })).rejects.toThrow("docs");
+    await expect(exportAccount("ana", [app("docs", [f("a", "\ud800")])], { now })).rejects.toThrow("docs");
+  });
+  test("a clock that throws after the first call still leaves an entry for each erase", async () => {
+    const store = createMemoryStore();
+    let calls = 0;
+    const clock = () => {
+      if (++calls > 1) throw new Error("clock");
+      return 1_700_000_000_000;
+    };
+    const report = await eraseAccount("ana", [app("docs"), app("tasks")], store, { now: clock });
+    expect(report.results.map((r) => r.audited)).toEqual([true, true]);
   });
 });
 
