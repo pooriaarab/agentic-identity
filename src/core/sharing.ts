@@ -197,32 +197,29 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
      * The erase is not one step. It removes links, invites, audit entries, and the other grants
      * first, then the owner grants and the resource in one transaction. A failed erase leaves the
      * resource with fewer shares, and running it again finishes the job. A grant, link, invite, or
-     * child that races the erase is refused or erased. The audit entry that `can` writes for a
-     * missing resource is not part of the erase.
+     * child that races the erase is refused or erased. `can` writes its audit entry without a
+     * transaction, so an entry written in the last moments before the commit, or after it, can
+     * stay. A later `deleteResource` removes it, and the entries of a missing resource are not
+     * part of the erase.
      */
     async deleteResource(ctx: PrincipalContext, resourceId: string): Promise<void> {
       await requireAdmin(ctx, resourceId);
       if ((await store.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new Error("the resource has children");
       if ((await store.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 })).items.length > MAX_OWNERS_ON_ERASE) throw new Error("too many owners: revoke some first");
-      for (const collection of ["links", "invites", "audit"]) {
-        for (;;) {
-          const page = await store.query(collection, { where: { resourceId }, limit: 100 });
-          if (page.items.length === 0) break;
-          await Promise.all(page.items.map((d) => store.delete(collection, d.id)));
+      // Every doc of the resource but an owner's grant, in pages by cursor. The owners go in the transaction.
+      for (const collection of ["links", "invites", "audit", "grants"]) {
+        for (let cursor: string | undefined; ; ) {
+          const page = await store.query(collection, { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+          await Promise.all(page.items.filter((d) => collection !== "grants" || d.data.role !== "owner").map((d) => store.delete(collection, d.id)));
+          if ((cursor = page.nextCursor) === undefined) break;
         }
-      }
-      // Every grant but an owner's, whatever its role field holds. The owners go in the transaction.
-      for (let cursor: string | undefined; ; ) {
-        const page = await store.query("grants", { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
-        await Promise.all(page.items.filter((g) => g.data.role !== "owner").map((g) => store.delete("grants", g.id)));
-        if ((cursor = page.nextCursor) === undefined) break;
       }
       await store.transaction(async (tx) => {
         await requireResource(tx, resourceId);
         if ((await tx.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new Error("the resource has children");
         // What a write added since the sweep. Each write changed the resource doc, so none can land after this read and commit.
         const rest: [string, string][] = [];
-        for (const collection of ["grants", "links", "invites"]) {
+        for (const collection of ["grants", "links", "invites", "audit"]) {
           const left = await tx.query(collection, { where: { resourceId }, limit: MAX_OWNERS_ON_ERASE + 1 });
           if (left.items.length > MAX_OWNERS_ON_ERASE) throw new StoreConflictError("too many docs are left on the resource, try again");
           rest.push(...left.items.map((d): [string, string] => [collection, d.id]));
@@ -288,7 +285,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const link = await store.get("links", linkId);
       if (!link) throw forbidden();
       await requireAdmin(ctx, link.resourceId as string);
-      await store.put("links", linkId, { ...link, revokedAt: now() });
+      // In a transaction, so a link that an erase removed in between is not put back.
+      await store.transaction(async (tx) => {
+        const current = await tx.get("links", linkId);
+        if (!current) throw forbidden();
+        await tx.put("links", linkId, { ...current, revokedAt: now() });
+      });
     },
 
     /** Decide, and write the audit entry for an allow and for a deny. `ctx` is null for a link visitor. */

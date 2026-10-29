@@ -26,7 +26,7 @@ const narrow: PrincipalContext = { principalId: "ana-agent", kind: "agent_of_hum
 const person = (id: string) => ({ kind: "human", id }) as const;
 
 /** Runs `hook` once, inside the first transaction, when it first deletes the resource doc "doc": after every read, before the commit. */
-function afterFirstRead(store: Store, hook: () => Promise<void>): Store {
+function afterFirstDelete(store: Store, hook: () => Promise<void>): Store {
   let fired = false;
   return {
     ...store,
@@ -94,7 +94,7 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
     test("removes more than one page of grants, links, invites, and audit", async () => {
       const { store, sharing } = await setup();
       await Promise.all(
-        Array.from({ length: 130 }, (_, i) =>
+        Array.from({ length: 250 }, (_, i) =>
           Promise.all([
             store.put("grants", `doc:human:u${i}`, { resourceId: "doc", subjectKind: "human", subjectId: `u${i}`, role: "viewer" }),
             store.put("links", `l${i}`, { id: `l${i}`, resourceId: "doc", role: "viewer", tokenHash: `h${i}` }),
@@ -173,14 +173,33 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
       ["createInvite", (s: ReturnType<typeof createSharing>) => s.createInvite(ana, "doc", { role: "viewer", handle: "scribe" })],
     ])("%s that lands while the erase runs is erased too", async (_name, write) => {
       const { store, rival } = await setup();
-      const erasing = createSharing(afterFirstRead(store, async () => void (await write(rival).catch(() => undefined))));
+      const erasing = createSharing(afterFirstDelete(store, async () => void (await write(rival).catch(() => undefined))));
       await erasing.deleteResource(ana, "doc");
       expect(await left(store, "doc")).toEqual({ resources: 0, grants: 0, links: 0, invites: 0, audit: 0 });
     });
 
+    test("an invite accepted while the erase runs is erased too", async () => {
+      const { store, rival } = await setup();
+      const scribe: PrincipalContext = { principalId: "scribe-id", kind: "agent", chain: [{ id: "scribe-id", kind: "agent" }], scopes: ["*:admin"] };
+      const erasing = createSharing(afterFirstDelete(store, async () => {
+        const invite = await rival.createInvite(ana, "doc", { role: "viewer", handle: "scribe" });
+        await rival.acceptInvite(scribe, invite.id, { handle: "scribe" });
+      }));
+      await erasing.deleteResource(ana, "doc");
+      expect(await left(store, "doc")).toEqual({ resources: 0, grants: 0, links: 0, invites: 0, audit: 0 });
+    });
+
+    test("a link revoked after the erase does not come back", async () => {
+      const { store, sharing } = await setup();
+      const link = await sharing.createLink(ana, "doc", { role: "viewer" });
+      const late = createSharing({ ...store, get: async (c: string, id: string) => { const found = await store.get(c, id); if (c === "links") await sharing.deleteResource(ana, "doc"); return found; } } as Store);
+      await expect(late.revokeLink(ana, link.id)).rejects.toThrow("forbidden");
+      expect(await store.get("links", link.id)).toBeNull();
+    });
+
     test("a child that lands while the erase runs stops the erase", async () => {
       const { store, rival } = await setup();
-      const erasing = createSharing(afterFirstRead(store, async () => void (await rival.createResource(ana, { id: "late", type: "doc", parentId: "doc" }))));
+      const erasing = createSharing(afterFirstDelete(store, async () => void (await rival.createResource(ana, { id: "late", type: "doc", parentId: "doc" }))));
       await expect(erasing.deleteResource(ana, "doc")).rejects.toThrow("children");
       expect((await left(store, "doc")).resources).toBe(1);
     });
