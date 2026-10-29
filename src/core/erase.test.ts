@@ -47,8 +47,8 @@ function afterFirstDelete(store: Store, hook: () => Promise<void>): Store {
 }
 
 /** Two stores on one backing dataset, as two isolates have. A store runs its own transactions one at a time. */
-function suite(name: string, make: () => Promise<[Store, Store]>) {
-  describe(name, () => {
+function suite(name: string, size: number, make: () => Promise<[Store, Store]>) {
+  describe(name, { timeout: 120_000 }, () => {
     const setup = async () => {
       const [store, other] = await make();
       const sharing = createSharing(store);
@@ -94,7 +94,7 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
     test("removes more than one page of grants, links, invites, and audit", async () => {
       const { store, sharing } = await setup();
       await Promise.all(
-        Array.from({ length: 250 }, (_, i) =>
+        Array.from({ length: size }, (_, i) =>
           Promise.all([
             store.put("grants", `doc:human:u${i}`, { resourceId: "doc", subjectKind: "human", subjectId: `u${i}`, role: "viewer" }),
             store.put("links", `l${i}`, { id: `l${i}`, resourceId: "doc", role: "viewer", tokenHash: `h${i}` }),
@@ -105,7 +105,7 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
       );
       await sharing.deleteResource(ana, "doc");
       expect(await left(store, "doc")).toEqual({ resources: 0, grants: 0, links: 0, invites: 0, audit: 0 });
-    }, 60_000);
+    });
 
     test.each([["an editor", bo], ["an outsider", cy], ["a narrow agent", narrow]])("%s cannot erase, and nothing is removed", async (_who, ctx) => {
       const { store, sharing } = await setup();
@@ -148,7 +148,7 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
       const before = await left(store, "doc");
       await expect(sharing.deleteResource(ana, "doc")).rejects.toThrow("too many owners");
       expect(await left(store, "doc")).toEqual(before);
-    }, 30_000);
+    });
 
     test.each([
       ["grant", (s: ReturnType<typeof createSharing>) => s.grant(ana, "doc", person("mallory"), "owner")],
@@ -234,7 +234,7 @@ function suite(name: string, make: () => Promise<[Store, Store]>) {
   });
 }
 
-suite("memory", async () => {
+suite("memory", 250, async () => {
   const shared = crypto.randomUUID();
   return [createMemoryStore({ shared }), createMemoryStore({ shared })];
 });
@@ -248,7 +248,8 @@ beforeAll(async () => {
 });
 afterAll(() => mf.dispose());
 
-suite("d1", async () => {
+// D1 is slow to fill, so it gets fewer docs. They still make the sweep and the last transaction share the work.
+suite("d1", 130, async () => {
   await db.prepare("DELETE FROM store_docs").run();
   return [createD1Store(db, { region: "unknown" }), createD1Store(db, { region: "unknown" })];
 });
