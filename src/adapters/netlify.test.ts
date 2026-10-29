@@ -141,7 +141,8 @@ describe("Netlify store lock and journal", () => {
         return fake.set(key, data, opts);
       },
     };
-    await expect(twoDocs(strongStore(slow, options))).rejects.toBeInstanceOf(StoreConflictError);
+    // The write ran past the lease, so it may have landed. The caller is told that, not "nothing written".
+    await expect(twoDocs(strongStore(slow, options))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
     const reader = strongStore(fake, options);
     await reader.put("docs", "z", { n: 0 }); // the next transaction would replay a journal, if one landed
     expect([await reader.get("docs", "a"), await reader.get("docs", "b")]).toEqual([{ who: "rival" }, null]);
@@ -178,6 +179,33 @@ describe("Netlify store lock and journal", () => {
       expect(await rival.get("docs", "x")).toEqual({ v: 2 });
     });
   }
+
+  it("refuses a late write even when equal bytes give an equal ETag", async () => {
+    const fake = createFakeNetlifyStore({ contentEtags: true });
+    let clock = 0;
+    const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
+    const rival = strongStore(fake, options);
+    await rival.put("docs", "x", { v: 0 });
+    await rival.delete("docs", "x"); // a tombstone
+    let delayed = false;
+    const slow: NetlifyStoreLike = {
+      ...fake,
+      set: async (key, data, opts) => {
+        if (key.startsWith("d/docs/") && !delayed && String(data).includes('"v":1')) {
+          delayed = true;
+          clock = 500; // the put of v=1 is delayed past the lease; a rival replays it, then deletes x again
+          await rival.delete("docs", "x");
+        }
+        return fake.set(key, data, opts);
+      },
+    };
+    const late = strongStore(slow, options).transaction(async (tx) => {
+      await tx.get("docs", "x");
+      await tx.put("docs", "x", { v: 1 });
+    });
+    await expect(late).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
+    expect(await rival.get("docs", "x")).toBeNull();
+  });
 
   it("hides a deleted doc from get and query, and lets a later put bring it back", async () => {
     const store = strongStore(createFakeNetlifyStore());

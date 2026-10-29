@@ -540,8 +540,9 @@ conditional write). The `Blobs` version and the lock both depend on it.
   once. When that works, the transaction has committed and its caller gets the result. When it
   does not, the caller gets `NetlifyCommitUncertainError`, and the transaction may still land
   when the next transaction runs. The same error means the lease was lost after the journal was
-  sent. Do not retry such a transaction as if nothing was written. `StoreConflictError` is only
-  for a failure before the journal is stored, and then nothing is written. Outside a
+  sent, or that a journal write ran past the lease and may have landed. Do not retry such a
+  transaction as if nothing was written. `StoreConflictError` means that nothing was written: the
+  lock was lost before the journal could land. Outside a
   transaction, a `get` or `query` can see part of a transaction while it applies, and until the
   next transaction applies a journal that a crash left. A read-only transaction checks the lease
   once, when `fn` ends.
@@ -550,15 +551,19 @@ conditional write). The `Blobs` version and the lock both depend on it.
   not readable, or that holds a bad journal, counts as held. To recover, find out why, then
   delete the `lock` key by hand. A write made inside a transaction on the same adapter object
   waits for its own transaction, so it throws after `waitMs`. Use `tx`.
-- All writes take the same lock, so they run one at a time. A write costs about six requests
-  and four more per doc. Each renew sends the journal again, so keep a transaction to a few
+- All writes take the same lock, so they run one at a time. A write costs about five requests
+  and three more per doc. Each renew sends the journal again, so keep a transaction to a few
   docs. A hot app needs a different `Store`. The lease compares the clocks of the instances, so
   keep them within a few seconds of each other.
 - A doc write is conditional on the ETag that the holder read just before it renewed the lease.
   The client retries a request for a long time, and has no timeout. A write that is delayed past
   the lease then fails, because the rival that took over changed the ETag, and the holder gets
-  `NetlifyCommitUncertainError`. Netlify has no conditional delete, so a delete writes a
-  tombstone (a doc that holds `null`). Tombstones stay, so a `query` still reads them.
+  `NetlifyCommitUncertainError`. Each stored body holds a random write id, so two writes never
+  give equal bytes, and the fence does not depend on how the service makes an ETag. Netlify has
+  no conditional delete, so a delete writes a tombstone (a doc that holds `null`). Tombstones stay, so a `query` still reads them.
+- A `Blobs` put that the client retried can report a refusal for a write that landed, if a rival
+  overwrites the blob before the adapter checks. The adapter sees its own write id only while
+  the blob is still the one it wrote.
 - A `query` reads every doc of the collection, then filters in memory. Use it for small
   collections.
 - `region` is a claim. Netlify Blobs does not let you pick a region per store. Check where

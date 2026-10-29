@@ -30,9 +30,10 @@ const copy = (data: string | ArrayBuffer): ArrayBuffer => (typeof data === "stri
 /**
  * One fake store. Two adapters that get the same fake share data. With `retryAfterLanding`, a
  * conditional write lands and then reports `modified: false`, as the real client does when it
- * retries a request that had landed and gets a 412.
+ * retries a request that had landed and gets a 412. With `contentEtags`, the ETag is a hash of the
+ * bytes, as in stores that use an MD5, so equal bytes give an equal ETag.
  */
-export function createFakeNetlifyStore(opts: { retryAfterLanding?: boolean } = {}): NetlifyStoreLike {
+export function createFakeNetlifyStore(opts: { retryAfterLanding?: boolean; contentEtags?: boolean } = {}): NetlifyStoreLike {
   const entries = new Map<string, Entry>();
   let clock = 0;
   const present = (key: string) => entries.get(key) ?? null;
@@ -59,7 +60,8 @@ export function createFakeNetlifyStore(opts: { retryAfterLanding?: boolean } = {
       const current = present(key);
       if (options.onlyIfNew && current) return { modified: false };
       if (options.onlyIfMatch !== undefined && (!current || current.etag !== options.onlyIfMatch)) return { modified: false };
-      const etag = `"${++clock}"`;
+      const bytes = new Uint8Array(copy(data));
+      const etag = opts.contentEtags ? `"c${bytes.reduce((h, b) => (Math.imul(h, 31) + b) | 0, bytes.length)}"` : `"${++clock}"`;
       entries.set(key, { data: copy(data), etag, metadata: structuredClone(options.metadata ?? {}) });
       return (options.onlyIfNew || options.onlyIfMatch !== undefined) && opts.retryAfterLanding ? { modified: false } : { modified: true, etag };
     },
