@@ -75,7 +75,7 @@ async function setup(extra: Partial<WorkerConfig> = {}) {
     return { params, state: params.get("state")!, flow: res.headers.get("set-cookie")!.split(";")[0]!, res };
   };
   const callback = (state: string, code: string, cookie?: string) => call("GET", `/auth/callback?state=${state}&code=${code}`, cookie ? { cookie } : {});
-  return { store, server, call, login, callback };
+  return { app, store, server, call, login, callback };
 }
 
 describe("sign-in", () => {
@@ -102,8 +102,20 @@ describe("sign-in", () => {
     const s = await setup({ signIn: { provider: custom, publicUrl: "https://app.test" } });
     const { params, state, flow } = await s.login();
     expect(params.get("redirect_uri")).toBe("https://app.test/auth/done");
-    expect((await s.callback(state, await s.server.approve(params), flow)).status).toBe(302);
+    // Follow the redirect_uri itself, with the cookie the Worker set. The path must match that cookie.
+    expect(flow).toMatch(/^oidc_flow=/);
+    const done = await s.app.request(`${new URL(params.get("redirect_uri")!).pathname}?state=${state}&code=${await s.server.approve(params)}`, { headers: { cookie: flow } });
+    expect(done.status).toBe(302);
+    expect(done.headers.get("set-cookie")).toMatch(/session=/);
     expect(s.server.tokenRedirects).toEqual(["https://app.test/auth/done"]);
+  });
+
+  test("the flow cookie covers a custom callback path, and a path inside /api/v1 is refused", async () => {
+    const custom = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/auth/done" });
+    const s = await setup({ signIn: { provider: custom, publicUrl: "https://app.test" } });
+    expect((await s.login()).res.headers.get("set-cookie")).toMatch(/Path=\/(;|$)/);
+    const inside = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/api/v1/me" });
+    expect(() => createApp({ store: createMemoryStore(), config: { signIn: { provider: inside, publicUrl: "https://app.test" }, unsafeTestMint: false } })).toThrow("outside /api/v1");
   });
 
   test("with no callbackPath the token exchange uses the default redirect_uri", async () => {

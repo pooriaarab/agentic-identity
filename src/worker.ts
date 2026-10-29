@@ -69,6 +69,10 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const app = new Hono().basePath("/api/v1");
   const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
   const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
+  const customPath = config.signIn?.provider.callbackPath;
+  if (customPath !== undefined && (customPath === "/api/v1" || customPath.startsWith("/api/v1/"))) throw new Error("callbackPath must be outside /api/v1");
+  // The flow cookie must reach the callback, so a path outside /api/v1/auth needs the cookie on /.
+  const flowCookiePath = customPath === undefined ? "/api/v1/auth" : "/";
   const redirectUri = config.signIn ? callbackUri(config.signIn.provider, config.signIn.publicUrl) : "";
 
   app.onError((error, c) => {
@@ -142,7 +146,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("auth_flows", f.id)));
     const login = await beginLogin(config.signIn.provider, redirectUri, deps.fetch).catch(() => fail(502, "the sign-in provider is not reachable"));
     await store.put("auth_flows", login.state, { nonce: login.nonce, verifier: login.verifier, returnTo, expiresAt: now() + FLOW_TTL_MS });
-    setCookie(c, "oidc_flow", login.state, { ...cookieFlags, path: "/api/v1/auth", maxAge: FLOW_TTL_MS / 1000 });
+    setCookie(c, "oidc_flow", login.state, { ...cookieFlags, path: flowCookiePath, maxAge: FLOW_TTL_MS / 1000 });
     return c.redirect(login.url, 302);
   });
 
@@ -164,7 +168,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     await store.put("users", id, { id, issuer: provider.issuer, subject: who.subject, emailVerified: who.emailVerified, ...(who.email ? { email: who.email } : {}) });
     const ttl = config.sessionTtlMs ?? 28_800_000;
     setCookie(c, "session", await issueCredential(store, { principalId: id, kind: "session", expiresAt: now() + ttl }), { ...cookieFlags, path: "/", maxAge: ttl / 1000 });
-    deleteCookie(c, "oidc_flow", { path: "/api/v1/auth" });
+    deleteCookie(c, "oidc_flow", { path: flowCookiePath });
     return c.redirect(flow.returnTo as string, 302);
   });
 
@@ -378,7 +382,16 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return c.json(await sharing.listPersonAudit(ctx, { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
   }));
 
-  return app;
+  if (customPath === undefined) return app;
+  // The provider sends the person to the custom path. It answers as the standard callback, with the same checks and budgets.
+  const root = new Hono();
+  root.get(customPath, (c) => {
+    const url = new URL(c.req.url);
+    url.pathname = "/api/v1/auth/callback";
+    return app.fetch(new Request(url, c.req.raw));
+  });
+  root.route("/", app);
+  return root;
 }
 
 interface Env {
@@ -422,7 +435,7 @@ export default {
       throw error;
     });
     await schema;
-    const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "", ...(env.OIDC_CALLBACK_PATH ? { callbackPath: env.OIDC_CALLBACK_PATH } : {}) }) : undefined;
+    const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "", ...(env.OIDC_CALLBACK_PATH !== undefined ? { callbackPath: env.OIDC_CALLBACK_PATH } : {}) }) : undefined;
     const config = { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1", ...(provider && env.PUBLIC_URL ? { signIn: { provider, publicUrl: env.PUBLIC_URL } } : {}) };
     return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config }).fetch(request);
   },

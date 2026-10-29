@@ -306,7 +306,7 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
 - `GET /auth/login` and `/auth/callback` sign a person in with OpenID Connect
   (code flow with PKCE, and state and nonce checks). Set `OIDC_ISSUER`,
   `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `PUBLIC_URL`. Keycloak, EU Login, and
-  Google all work: `issuer` is the only setting that differs. The redirect URI is `PUBLIC_URL` plus `/api/v1/auth/callback`. Set `OIDC_CALLBACK_PATH` to use another path. The session cookie is
+  Google all work: `issuer` is the only setting that differs. The redirect URI is `PUBLIC_URL` plus `/api/v1/auth/callback`. Set `OIDC_CALLBACK_PATH` to use another path outside `/api/v1`. The Worker then answers there as well. The session cookie is
   `HttpOnly`, `Secure`, and `SameSite=Lax`. An id token must be RS256.
 - The sign-in code is also a library. Import it from `agentic-identity`. `oidcProvider({ issuer, clientId, clientSecret, scopes?, callbackPath? })`
   checks the settings and returns a provider config (an https issuer, or http on `localhost` or `127.0.0.1`).
