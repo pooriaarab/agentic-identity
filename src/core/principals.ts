@@ -101,6 +101,36 @@ const PARENT_KINDS: Record<PrincipalKind, PrincipalKind[]> = {
   user_token: ["human"],
 };
 
+const PRINCIPAL_ID_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+
+export class PrincipalParseError extends Error {
+  override name = "PrincipalParseError";
+}
+
+/**
+ * Check untrusted input for a principal reference: a known `kind` and a safe `id`.
+ * It never defaults a kind. The result holds only `kind` and `id`.
+ */
+export function parsePrincipal(input: unknown): ChainStep {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new PrincipalParseError("principal must be an object");
+  }
+  const { kind, id } = input as Record<string, unknown>;
+  if (typeof kind !== "string" || !(PRINCIPAL_KINDS as readonly string[]).includes(kind)) {
+    throw new PrincipalParseError("principal kind is missing or unknown");
+  }
+  if (typeof id !== "string" || !PRINCIPAL_ID_PATTERN.test(id)) {
+    throw new PrincipalParseError("principal id is missing or has characters outside A-Z a-z 0-9 . _ -");
+  }
+  return { kind: kind as PrincipalKind, id };
+}
+
+/** A stable `kind:id` string for a principal. Kind names hold no colon, so it is unambiguous. */
+export function subjectOf(principal: ChainStep): string {
+  const { kind, id } = parsePrincipal(principal);
+  return `${kind}:${id}`;
+}
+
 /** Machine-made content and edits carry this label (EU AI Act transparency). */
 export function isMachineMade(kind: PrincipalKind): boolean {
   return kind !== "human";

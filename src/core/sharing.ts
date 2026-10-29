@@ -70,7 +70,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
   const now = options.now ?? Date.now;
   const forbidden = () => new Error("forbidden");
   /** The root of the chain. A root of another kind holds no role. */
-  const subjectOf = (ctx: PrincipalContext): Subject | undefined => {
+  const rootSubject = (ctx: PrincipalContext): Subject | undefined => {
     const root = ctx.chain[0];
     return root && SUBJECT_KINDS.includes(root.kind as SubjectKind) ? { kind: root.kind as SubjectKind, id: root.id } : undefined;
   };
@@ -104,7 +104,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     const found = await pathOf(id);
     if (!found || (ctx && !hasScope(ctx.scopes, `${found.type}:${action}`))) return { allowed: false };
     let best = -1;
-    const subject = ctx ? subjectOf(ctx) : undefined;
+    const subject = ctx ? rootSubject(ctx) : undefined;
     for (const folder of subject ? found.path : []) {
       best = Math.max(best, rank((await store.get("grants", grantKey(folder, subject!)))?.role));
     }
@@ -158,7 +158,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     async createResource(ctx: PrincipalContext, input: { id?: string; type: string; parentId?: string }): Promise<Resource> {
       const resource: Resource = { id: input.id ?? crypto.randomUUID(), type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}) };
       if (!/^[a-z][a-z0-9_-]*$/.test(resource.type) || !SAFE_ID.test(resource.id)) throw new Error("invalid resource");
-      const subject = subjectOf(ctx);
+      const subject = rootSubject(ctx);
       if (!subject || !hasScope(ctx.scopes, `${resource.type}:write`)) throw forbidden();
       if (input.parentId && (!(await store.get("resources", input.parentId)) || !(await decide(ctx, "write", input.parentId)).allowed)) throw forbidden();
       await store.transaction(async (tx) => {
@@ -284,7 +284,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
 
     /** `identity` comes from the verified sign-in: the email claim, or the agent's handle. */
     async acceptInvite(ctx: PrincipalContext, inviteId: string, identity: Identity): Promise<void> {
-      const subject = subjectOf(ctx);
+      const subject = rootSubject(ctx);
       if (!subject || ctx.chain.length !== 1) throw forbidden();
       await store.transaction(async (tx) => {
         const invite = await tx.get("invites", inviteId);

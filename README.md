@@ -126,6 +126,19 @@ const isKind = (kind: unknown): kind is PrincipalKind => PRINCIPAL_KINDS.include
 const isPrincipal = (p: Principal) => isKind(p.kind);
 ```
 
+To check a principal that comes from outside, call `parsePrincipal`. It throws
+`PrincipalParseError` when `kind` is missing or unknown (it never defaults to
+`human`), or when `id` is not 1 to 128 characters of `A-Z a-z 0-9 . _ -` that
+start with a letter, digit, `_` or `-`. It returns only `{ kind, id }`.
+`subjectOf` gives the stable string `kind:id`.
+
+```ts
+import { parsePrincipal, subjectOf } from "agentic-identity";
+
+const who = parsePrincipal(JSON.parse(body)); // { kind: "agent", id: "bot-1" }
+subjectOf(who); // "agent:bot-1"
+```
+
 `resolveChain` walks from the acting principal to its root. Each step can only
 narrow the rights. It returns no rights when a principal is revoked or expired,
 when the chain has a cycle or is deeper than `MAX_CHAIN_DEPTH` (5), when a
