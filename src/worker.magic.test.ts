@@ -174,7 +174,8 @@ describe("magic-link sign-in", () => {
     const { ask, tokenFrom, verify, store } = setup();
     await ask("ana@example.test");
     const token = tokenFrom();
-    for (const bad of ["", "short", "x".repeat(43), `${token}x`, `${token.slice(0, -1)}A`, "a b", "../x"]) {
+    const edited = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
+    for (const bad of ["", "short", "x".repeat(43), `${token}x`, edited, "a b", "../x"]) {
       const res = await verify(bad);
       expect(res.status).toBe(400);
       expect(res.headers.get("set-cookie")).toBeNull();
