@@ -49,6 +49,8 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     expect(swallowed.out).toBe("");
     expect(run("--as", "--help", "whoami").code).toBe(2);
     expect(run("whoami", "--", "--help").code).toBe(2);
+    // A link token is base64url, so it may start with a dash. It is still a plain argument.
+    expect(run("links", "resolve", "d9", `-${"A".repeat(42)}`).json()).toEqual({ allowed: false });
     expect(run("--as", "ghost", "--as", "local", "whoami").code).toBe(2);
     expect(run("--as", "ghost", "whoami").err).toContain("cannot act as");
   });
@@ -61,7 +63,7 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
   });
 
   test("an error does not echo an email that was mistyped", () => {
-    for (const args of [["invites", "accept", "abc", "ann@example.com"], ["ann@example.com"], ["--as", "ann@example.com", "whoami"], ["invites", "create", "d9", "viewer", "--ann@example.com"]]) {
+    for (const args of [["invites", "accept", "abc", "ann@example.com"], ["ann@example.com"], ["--as", "ann@example.com", "whoami"], ["invites", "create", "d9", "viewer", "--ann@example.com"], ["audit", "x/ann@example.com"]]) {
       const r = run(...args);
       expect(r.code, args.join(" ")).toBeGreaterThan(0);
       expect(r.err).not.toContain("example.com");

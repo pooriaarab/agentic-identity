@@ -96,7 +96,16 @@ function parseCommand(command: Command, rest: string[], extra: string[]): { valu
   return { values, globals: parsed.values as { store?: string; as?: string; help?: boolean } };
 }
 
-export async function runCli(argv: string[], env: Record<string, string | undefined>, io: Io): Promise<number> {
+/**
+ * A share-link token is base64url, so it can start with `-`. A long word that starts with one dash
+ * is no flag (flags are `--name` or one letter), so it is held back as plain text while the
+ * arguments are parsed.
+ */
+const LOOSE = /^-[A-Za-z0-9_-]{20,}$/;
+
+export async function runCli(args: string[], env: Record<string, string | undefined>, io: Io): Promise<number> {
+  const held = new Map<string, string>();
+  const argv = args.map((t) => (LOOSE.test(t) ? (held.set(`\u0000${held.size}`, t), `\u0000${held.size - 1}`) : t));
   try {
     const { words: found, rest, flags } = split(argv);
     if (flags.includes("--version")) return io.out(VERSION), 0;
@@ -108,6 +117,7 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
     }
     if (help) return io.out(commandHelp(command)), 0;
     const { values, globals } = parseCommand(command, rest, extra);
+    for (const [name, value] of Object.entries(values)) if (typeof value === "string" && held.has(value)) values[name] = held.get(value);
     for (const a of command.args) if (a.required && values[a.name] === undefined) throw new UsageError(`missing ${a.positional ? `<${a.name}>` : `--${a.name}`}`);
     for (const a of command.args) if (a.choices && values[a.name] !== undefined && !a.choices.includes(String(values[a.name]))) throw new UsageError(`${a.name} must be one of: ${a.choices.join(", ")}`);
     const path = globals.store ?? env.AGENTIC_IDENTITY_STORE ?? join(env.AGENTIC_IDENTITY_HOME ?? join(homedir(), ".agentic-identity"), "store.json");
@@ -118,7 +128,7 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
   } catch (error) {
     const code = (error as { code?: string }).code;
     // A parse error repeats the text of the flag, and a mistyped flag can be an address.
-    io.err(`error: ${code?.startsWith("ERR_PARSE_ARGS") ? "bad option or value. Run with --help." : error instanceof Error ? error.message : String(error)}`);
+    io.err(`error: ${code?.startsWith("ERR_PARSE_ARGS") ? "bad option or value. Run with --help." : error instanceof Error ? error.message.replace(/^invalid id ".*"$/s, "invalid id") : String(error)}`);
     return error instanceof UsageError || error instanceof RangeError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
   }
 }

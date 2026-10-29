@@ -21,7 +21,9 @@ async function setup() {
 test("only an owner lists invites", async () => {
   const sharing = await setup();
   await sharing.grant(ana, "doc", { kind: "human", id: "bo" }, "editor");
+  await sharing.grant(ana, "doc", { kind: "human", id: "vic" }, "viewer");
   await expect(sharing.listInvites(bo, "doc")).rejects.toThrow("forbidden");
+  await expect(sharing.listInvites(root("vic"), "doc")).rejects.toThrow("forbidden");
   await expect(sharing.listInvites(eve, "doc")).rejects.toThrow("forbidden");
   await expect(sharing.listInvites(ana, "missing")).rejects.toThrow("forbidden");
 });
