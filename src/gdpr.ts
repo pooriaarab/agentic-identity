@@ -1,6 +1,7 @@
 // A person's data: export it as JSON, or delete it for good. A person owns their
 // agents, grants, and tokens (every principal below them), and the resources only
 // they own. Each step reads what the earlier steps found, so nothing is guessed.
+import { sha256Hex } from "./credentials.js";
 import type { Doc, Store } from "./ports.js";
 
 type Docs = { id: string; data: Doc }[];
@@ -73,7 +74,8 @@ export async function exportPerson(store: Store, personId: string) {
   };
 }
 
-const ERASED = "erased";
+// `SAFE_ID` rejects the parentheses, so no real id equals it.
+const ERASED = "(erased)";
 
 /** Blanks the target of every audit entry that names one of these ids. */
 async function redactTargets(store: Store, targetIds: string[]): Promise<void> {
@@ -81,7 +83,7 @@ async function redactTargets(store: Store, targetIds: string[]): Promise<void> {
 }
 
 /** Removes the data first and the sign-in last, so a failed delete can run again. */
-export async function deletePerson(store: Store, personId: string): Promise<void> {
+export async function deletePerson(store: Store, personId: string, options: { requestId?: string; now?: () => number } = {}): Promise<void> {
   const principals = await principalsOf(store, personId);
   const ids = principals.map((p) => p.id);
   const user = await store.get("users", personId);
@@ -107,6 +109,21 @@ export async function deletePerson(store: Store, personId: string): Promise<void
   await redactTargets(store, handleInvites.map((i) => i.id));
   await remove("invites", handleInvites);
   await Promise.all(handles.map((handle) => store.delete("handles", handle)));
+  // The tombstone keeps the fact of the erase, its time, and its request. The person is only a digest.
+  const tombstoneId = crypto.randomUUID();
+  await store.put("audit", tombstoneId, {
+    id: tombstoneId,
+    at: (options.now ?? Date.now)(),
+    action: "person.erase",
+    outcome: "allowed",
+    principalId: ERASED,
+    principalKind: "human",
+    chain: [],
+    machineMade: false,
+    targetKind: "person",
+    targetId: (await sha256Hex(personId)).slice(0, 24),
+    ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+  });
   await Promise.all(principals.map((p) => store.delete("principals", p.id)));
   await store.delete("users", personId);
 }

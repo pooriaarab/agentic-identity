@@ -7,6 +7,15 @@
 //     no access. 5. A bad credential on the access check is a 401, never a visitor. 6. A narrow
 //     agent cannot write, a revoked link fails, an invite goes to its own handle or verified
 //     email only, and only an owner reads the audit log.
+// Change log of keys, export, and erase:
+//  7. Making an agent, a token, or a delegation, rotating, and revoking each write one entry with
+//     the actor and the target, and none holds a key. A refused call writes none.
+//  8. A rotate stops every old key of the agent and gives one new key. Only the owner or a parent
+//     rotates. A person, a token, a missing principal, and a revoked agent cannot be rotated.
+//  9. An export writes an entry that the export holds. An erase leaves one tombstone with no id of
+//     the person, and no other entry of theirs.
+// 10. The person lists their own log, newest first, in pages. An agent and a token cannot.
+// 11. A resource id with a left-over allowed entry cannot be made again.
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import type { Principal } from "./core/principals.js";
@@ -269,5 +278,96 @@ describe("change log over HTTP", () => {
     const ana = await s.mint("ana");
     const res = await s.app.request("/api/v1/me", { headers: { authorization: `Bearer ${ana}`, "x-request-id": "forged" } });
     expect(res.headers.get("x-request-id")).not.toBe("forged");
+  });
+});
+
+describe("change log of keys, export, and erase", () => {
+  async function world() {
+    const s = await setup({ unsafeTestMint: true });
+    const ana = await s.mint("ana");
+    const bo = await s.mint("bo");
+    const json = async (res: Response) => (await res.json()) as Record<string, any>;
+    const agent = await json(await s.call("POST", "/agents", { token: ana, body: { handle: "scribe", scopes: ["doc:admin"] } }));
+    const entries = async (token: string, limit = 200) => (await json(await s.call("GET", `/me/audit?limit=${limit}`, { token }))).entries as Record<string, any>[];
+    return { ...s, ana, bo, agent, json, entries };
+  }
+
+  test("each key change writes one entry, with no key in it", async () => {
+    const w = await world();
+    const pat = await w.json(await w.call("POST", "/tokens", { token: w.ana, body: { scopes: ["doc:read"] } }));
+    const grant = await w.json(await w.call("POST", "/delegations", { token: w.ana, body: { scopes: ["doc:read"] } }));
+    const rotated = await w.json(await w.call("POST", `/principals/${w.agent.id}/keys`, { token: w.ana }));
+    await w.call("DELETE", `/principals/${grant.id}`, { token: w.ana });
+    const log = await w.entries(w.ana);
+    expect(log.filter((e) => e.action.startsWith("key.")).map((e) => [e.action, e.targetId, e.principalId].join(" ")).sort()).toEqual([
+      `key.create ${w.agent.id} ana`,
+      `key.create ${pat.id} ana`,
+      `key.create ${grant.id} ana`,
+      `key.rotate ${w.agent.id} ana`,
+      `key.revoke ${grant.id} ana`,
+    ].sort());
+    const text = JSON.stringify(log);
+    for (const secret of [w.agent.apiKey, pat.token, grant.apiKey, rotated.apiKey]) expect(text).not.toContain(secret);
+  });
+
+  test("a refused key change writes no entry", async () => {
+    const w = await world();
+    const before = (await w.entries(w.ana)).length;
+    expect((await w.call("DELETE", `/principals/${w.agent.id}`, { token: w.bo })).status).toBe(403);
+    expect((await w.call("POST", `/principals/${w.agent.id}/keys`, { token: w.bo })).status).toBe(403);
+    expect((await w.call("DELETE", "/principals/nope", { token: w.ana })).status).toBe(404);
+    expect((await w.call("POST", "/principals/nope/keys", { token: w.ana })).status).toBe(404);
+    expect((await w.call("POST", "/principals/ana/keys", { token: w.ana })).status).toBe(403);
+    expect((await w.call("POST", "/agents", { token: w.ana, body: { handle: "scribe", scopes: ["doc:admin"] } })).status).toBe(409);
+    expect((await w.entries(w.ana)).length).toBe(before);
+  });
+
+  test("a rotate stops the old keys, and a revoked agent cannot be rotated", async () => {
+    const w = await world();
+    const fresh = await w.json(await w.call("POST", `/principals/${w.agent.id}/keys`, { token: w.ana }));
+    expect((await w.call("GET", "/me", { token: w.agent.apiKey })).status).toBe(401);
+    expect((await w.call("GET", "/me", { token: fresh.apiKey })).status).toBe(200);
+    await w.call("DELETE", `/principals/${w.agent.id}`, { token: w.ana });
+    expect((await w.call("POST", `/principals/${w.agent.id}/keys`, { token: w.ana })).status).toBe(400);
+  });
+
+  test("an export writes an entry that the export holds, and an erase leaves one tombstone", async () => {
+    const w = await world();
+    expect((await w.call("GET", "/me/export", { token: w.agent.apiKey })).status).toBe(403);
+    const exported = await w.json(await w.call("GET", "/me/export", { token: w.ana }));
+    expect(exported.audit.filter((e: Record<string, any>) => e.action === "person.export")).toHaveLength(1);
+    await w.call("DELETE", "/me", { token: w.ana });
+    const rows = (await w.store.query("audit", { limit: 1000 })).items.map((i) => i.data);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: "person.erase", targetKind: "person", principalId: "(erased)", chain: [] });
+    expect(JSON.stringify(rows)).not.toContain("ana");
+  });
+
+  test("the person lists their log in pages, newest first, and an agent or a token cannot", async () => {
+    const w = await world();
+    for (let i = 0; i < 3; i++) t += 1000, await w.call("POST", "/delegations", { token: w.ana, body: { scopes: ["doc:read"] } });
+    const seen: number[] = [];
+    let cursor = "";
+    for (let pages = 0; pages < 10; pages++) {
+      const page = await w.json(await w.call("GET", `/me/audit?limit=2${cursor}`, { token: w.ana }));
+      seen.push(...page.entries.map((e: Record<string, any>) => e.at));
+      if (!page.nextCursor) break;
+      cursor = `&cursor=${encodeURIComponent(page.nextCursor)}`;
+    }
+    expect(seen).toHaveLength(4);
+    expect(seen).toEqual([...seen].sort((a, b) => b - a));
+    expect((await w.call("GET", "/me/audit", { token: w.agent.apiKey })).status).toBe(403);
+    const pat = await w.json(await w.call("POST", "/tokens", { token: w.ana, body: { scopes: ["doc:read"] } }));
+    expect((await w.call("GET", "/me/audit", { token: pat.token })).status).toBe(403);
+    expect((await w.call("GET", "/me/audit?limit=0", { token: w.ana })).status).toBe(400);
+    expect((await w.entries(w.bo)).length).toBe(0);
+  });
+
+  test("a resource id with a left-over allowed entry cannot be made again", async () => {
+    const w = await world();
+    await w.store.put("audit", "old", { id: "old", resourceId: "ghost", outcome: "allowed", at: 1 });
+    expect((await w.call("POST", "/resources", { token: w.ana, body: { id: "ghost", type: "doc" } })).status).toBe(400);
+    await w.store.put("audit", "probe", { id: "probe", resourceId: "free", outcome: "denied", at: 1 });
+    expect((await w.call("POST", "/resources", { token: w.ana, body: { id: "free", type: "doc" } })).status).toBe(201);
   });
 });

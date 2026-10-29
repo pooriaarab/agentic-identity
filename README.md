@@ -7,7 +7,7 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.4.0 preview. This code has principals and delegation chains,
+> Status: 0.5.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
@@ -84,7 +84,7 @@ await client.createResource({ id: "plan", type: "doc" });
 - Roles per resource: owner, editor, commenter, viewer. A folder role passes down.
 - Invites by email for a person, or by handle for an agent.
 - Share links with a role, an optional expiry, and a signed-in-only option.
-- An audit trail of access checks that shows who acted, and for whom. Each entry keeps the principal kind.
+- An audit trail that shows who acted, and for whom. It records access checks and every change: a grant, a revoke, an invite, a link, a key, an export, and an erase. Each entry keeps the principal kind.
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
 - Sign in with any OpenID Connect provider (Keycloak, EU Login, Google), and per-user data export and hard delete, served by the HTTP API.
 - API keys and personal access tokens for agents, served by the HTTP API (see Worker API).
@@ -99,7 +99,7 @@ await client.createResource({ id: "plan", type: "doc" });
 - OIDC discovery and the JWKS load on every sign-in. There is no cache yet. Only RS256 id tokens are accepted.
 - The per-IP budgets read `CF-Connecting-IP`. Cloudflare sets that header and replaces any value a client sends. Without Cloudflare in front, a client can send any value, and requests without the header share one budget. Serve the Worker through Cloudflare to count per IP.
 - `POST /test/token` is for tests only. Never set `IDENTITY_UNSAFE_TEST_MINT=1` in production.
-- A grant, an invite, or a link does not write an audit entry yet.
+- The CLI and the MCP server cannot list the audit log, because they do not exist yet. Use the API or the SDK.
 
 ## Principals and scopes
 
@@ -154,8 +154,15 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
 - A link has a role, an optional expiry, and an optional signed-in-only flag.
   The token is shown once. The store keeps only its hash.
 - `can` writes an audit entry for every allow and deny. It keeps the chain and
-  a machine label, and holds no email address. Grants, invites, and links do not
-  write audit entries yet.
+  a machine label, and holds no email address.
+- Each grant, revoke, invite, accept, link create, link revoke, key create, key rotate,
+  key revoke, export, and erase writes one entry in the same transaction as the change.
+  The entry holds the actor with its kind, the target kind and id, the action, the time,
+  and the request id. It holds no email, handle, or key. An erase of a person removes
+  their entries and leaves one tombstone with the time and the request id. It blanks
+  the target of entries that named what it erased.
+- `listPersonAudit(ctx, { limit, cursor })` lists what a person did, and what their
+  agents and tokens did for them. Only the person may read it.
 - `listAudit(ctx, resourceId, { limit, cursor })` needs an owner. It returns
   `{ entries, nextCursor }`, newest first. `limit` is a whole number from 1 to 200
   (default 50). `nextCursor` is set only when more entries exist. Pass it as `cursor`
@@ -171,6 +178,10 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   token, and a grant. A key is shown once, and the store keeps only its hash.
   Scopes can only narrow, and a grant can expire.
 - `DELETE /principals/:id` revokes it, and every key below it stops at once.
+  `POST /principals/:id/keys` rotates the key of an agent: the old keys stop, and the new key is shown once.
+- `GET /me/audit?limit=&cursor=` lists the log of the person, newest first. The SDK call is
+  `myAudit({ limit, cursor })`. Each response has an `x-request-id` header, which is the
+  `requestId` of the entries that the request wrote.
 - `/resources` and the paths under `/resources/:id` expose sharing: grants, invites, links, access, and audit.
   `/invites/:id/accept` and `/links/:id` act on one invite or link. A grant names its subject
   by kind (`human` or `agent`) and id. `POST /resources/:id/grants` takes `subjectKind` and

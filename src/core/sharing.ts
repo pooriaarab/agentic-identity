@@ -59,6 +59,13 @@ const assertSubject = (subject: unknown): Subject => {
   return { kind: kind as SubjectKind, id };
 };
 
+function pageOf(options: { limit?: number; cursor?: string }): { limit: number; cursor?: string } {
+  const limit = options.limit ?? AUDIT_PAGE;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
+  if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+  return { limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) };
+}
+
 export function createSharing(store: Store, options: { now?: () => number } = {}) {
   const now = options.now ?? Date.now;
   const forbidden = () => new Error("forbidden");
@@ -157,6 +164,8 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       await store.transaction(async (tx) => {
         const parent = input.parentId ? await requireResource(tx, input.parentId) : undefined;
         if (await tx.get("resources", resource.id)) throw new Error("resource exists");
+        // An allowed entry for a missing resource is left over from an erase that stopped. Its new owner must not read it.
+        if ((await tx.query("audit", { where: { resourceId: resource.id, outcome: "allowed" }, limit: 1 })).items.length > 0) throw new Error("resource id has old audit entries");
         if (parent) await touch(tx, parent);
         await tx.put("resources", resource.id, resource);
         await putGrant(tx, resource.id, subject, "owner");
@@ -211,7 +220,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
      * Erases a resource and what hangs on it: its grants, invites, links, and audit entries. A
      * resource with children is refused, so no child is left without its folder. Needs an owner.
      * The erase is not one step. It removes links, invites, audit entries, and the other grants
-     * first, then the owner grants and the resource in one transaction. A failed erase leaves the
+     * first, then the owner grants and the resource in one transaction, then the audit entries that
+     * a change wrote in between. If it stops after the transaction, those entries stay, and
+     * `createResource` refuses the id until an operator removes them from `audit`. A failed erase leaves the
      * resource with fewer shares, and running it again finishes the job. A grant, link, invite, or
      * child that races the erase is refused or erased. `can` writes its audit entry without a
      * transaction, so an entry written in the last moments before the commit, or after it, can
@@ -331,12 +342,21 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
 
     /** Newest first. Pass the `nextCursor` of the last page as `cursor` to read on. */
     async listAudit(ctx: PrincipalContext, resourceId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ entries: AuditEntry[]; nextCursor?: string }> {
-      const limit = options.limit ?? AUDIT_PAGE;
-      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
-      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+      const page = pageOf(options);
       await requireAdmin(ctx, resourceId);
-      const page = await store.query("audit", { where: { resourceId }, orderBy: { field: "at", direction: "desc" }, limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
-      return { entries: page.items.map((item) => item.data as unknown as AuditEntry), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
+      const found = await store.query("audit", { where: { resourceId }, orderBy: { field: "at", direction: "desc" }, ...page });
+      return { entries: found.items.map((item) => item.data as unknown as AuditEntry), ...(found.nextCursor === undefined ? {} : { nextCursor: found.nextCursor }) };
+    },
+
+    /**
+     * Everything done by a person and by the agents and tokens that act for them, newest first. It
+     * includes access checks. Only the person may read it, not an agent or a token.
+     */
+    async listPersonAudit(ctx: PrincipalContext, options: { limit?: number; cursor?: string } = {}): Promise<{ entries: AuditEntry[]; nextCursor?: string }> {
+      const page = pageOf(options);
+      if (ctx.kind !== "human" || ctx.chain.length !== 1) throw forbidden();
+      const found = await store.query("audit", { where: { rootId: ctx.principalId }, orderBy: { field: "at", direction: "desc" }, ...page });
+      return { entries: found.items.map((item) => item.data as unknown as AuditEntry), ...(found.nextCursor === undefined ? {} : { nextCursor: found.nextCursor }) };
     },
   };
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 - 2026-10-29
+
+### Added
+
+- Every grant, revoke, invite, accept, link create, link revoke, key create, key rotate, key revoke, export, and erase writes an audit entry in the same transaction as the change, so a change cannot commit without its entry. An entry holds the actor (id, kind, chain, root), the target kind and id, the action, the time, and the request id. It holds no email, handle, key, or link token. `CHANGE_ACTIONS` lists the actions.
+- The Worker makes a request id for each request, returns it in `x-request-id`, and ignores a value from the caller.
+- `POST /principals/:id/keys` rotates the key of an agent (SDK: `rotateKey`). Old keys stop in the same step.
+- `listPersonAudit(ctx, { limit, cursor })` and `GET /me/audit` (SDK: `myAudit`) list what a person and their agents did, newest first, in pages. Only the person may read it.
+- An export holds the entries a person made and the entries that name them. It writes a `person.export` entry first.
+- `runAuditContract` in `agentic-identity/testing`. It runs on the memory store and on D1.
+
+### Changed
+
+- An erase of a person leaves a `person.erase` tombstone (time, request id, a digest of the id) and blanks `targetId` to `(erased)` in entries that named what it removed.
+- `revokeGrant` now reads and writes its resource doc, like `grant`, so an erase and a revoke at the same moment cannot leave an entry. A revoke of a grant that does not exist writes no entry.
+- `deleteResource` sweeps the audit entries once more after its transaction. `createResource` refuses an id that still has an allowed audit entry, which an erase that stopped halfway can leave.
+- `AuditEntry` has the new fields `rootId`, `targetKind`, `targetId`, and `requestId`. `rootId` is missing on entries from before 0.5.0. `PrincipalContext` has an optional `requestId`.
+
+### Not yet
+
+- The CLI and the MCP server do not exist, so they cannot list the audit log.
+
 ## 0.4.0 - 2026-10-29
 
 ### Changed

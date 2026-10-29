@@ -4,10 +4,11 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
 import { beginLogin, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
+import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
-import { StoreConflictError, parseRegion, type Store } from "./ports.js";
+import { StoreConflictError, parseRegion, type Store, type StoreOps } from "./ports.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
@@ -126,9 +127,9 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const id = (c: Context, name = "id") => String(c.req.param(name));
   const isPerson = (ctx: PrincipalContext) => ctx.kind === "human" && ctx.chain.length === 1;
 
-  async function makePrincipal(parent: PrincipalContext, kind: Principal["kind"], scopes: Scope[], expiresAt: number | undefined, extra: object = {}) {
+  async function makePrincipal(ops: StoreOps, parent: PrincipalContext, kind: Principal["kind"], scopes: Scope[], expiresAt: number | undefined, extra: object = {}) {
     const principal = { id: `p_${randomToken(12)}`, kind, scopes, ...(kind === "agent" ? {} : { parentId: parent.principalId }), ...(expiresAt === undefined ? {} : { expiresAt }), ...extra };
-    await store.put("principals", principal.id, principal);
+    await ops.put("principals", principal.id, principal);
     return principal;
   }
 
@@ -175,11 +176,16 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   app.get("/me", authed(async (c, ctx) => c.json({ principalId: ctx.principalId, kind: ctx.kind, chain: ctx.chain, scopes: ctx.scopes })));
 
   // The export and the delete need the person at the keyboard, not an agent or a token.
-  app.get("/me/export", authed(async (c, ctx) => (isPerson(ctx) ? c.json(await exportPerson(store, ctx.principalId)) : fail(403, "only the person can export"))));
+  app.get("/me/export", authed(async (c, ctx) => {
+    if (!isPerson(ctx)) return fail(403, "only the person can export");
+    // The entry comes first, so the export holds the record of itself.
+    await recordChange(store, ctx, { action: "person.export", targetKind: "person", targetId: ctx.principalId }, now());
+    return c.json(await exportPerson(store, ctx.principalId));
+  }));
 
   app.delete("/me", authed(async (c, ctx) => {
     if (!isPerson(ctx)) return fail(403, "only the person can delete");
-    await deletePerson(store, ctx.principalId);
+    await deletePerson(store, ctx.principalId, { now, ...(ctx.requestId === undefined ? {} : { requestId: ctx.requestId }) });
     return c.json({ deleted: true });
   }));
 
@@ -215,9 +221,11 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
       const made = { id: `p_${randomToken(12)}`, kind: "agent", scopes, handle, ownerId: ctx.principalId };
       await tx.put("handles", handle, { principalId: made.id });
       await tx.put("principals", made.id, made);
-      return made;
+      const apiKey = await issueCredential(tx, { principalId: made.id, kind: "api_key", label: handle });
+      await recordChange(tx, ctx, { action: "key.create", targetKind: "principal", targetId: made.id }, now());
+      return { id: made.id, apiKey };
     });
-    return c.json({ id: agent.id, apiKey: await issueCredential(store, { principalId: agent.id, kind: "api_key", label: handle }) });
+    return c.json(agent);
   }));
 
   // A personal access token. It acts as the person, tagged as a token, with fewer scopes.
@@ -226,8 +234,13 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const input = await body(c);
     const scopes = scopesOf(input.scopes);
     const expiresAt = expiryOf(input.expiresInMs);
-    const made = await makePrincipal(ctx, "user_token", scopes, expiresAt);
-    return c.json({ id: made.id, token: await issueCredential(store, { principalId: made.id, kind: "pat", ...(expiresAt === undefined ? {} : { expiresAt }), label: String(input.label ?? "") }) });
+    const label = String(input.label ?? "");
+    return c.json(await store.transaction(async (tx) => {
+      const made = await makePrincipal(tx, ctx, "user_token", scopes, expiresAt);
+      const token = await issueCredential(tx, { principalId: made.id, kind: "pat", ...(expiresAt === undefined ? {} : { expiresAt }), label });
+      await recordChange(tx, ctx, { action: "key.create", targetKind: "principal", targetId: made.id }, now());
+      return { id: made.id, token };
+    }));
   }));
 
   // A grant to an agent: a person makes an agent_of_human, an agent makes an agent_of_agent.
@@ -237,22 +250,53 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const scopes = scopesOf(input.scopes);
     if (!scopes.every((s) => hasScope(ctx.scopes, s))) return fail(403, "scopes exceed your own");
     const expiresAt = expiryOf(input.expiresInMs);
-    const made = await makePrincipal(ctx, ctx.kind === "human" ? "agent_of_human" : "agent_of_agent", scopes, expiresAt);
-    return c.json({ id: made.id, apiKey: await issueCredential(store, { principalId: made.id, kind: "api_key", label: String(input.label ?? "") }) });
+    const label = String(input.label ?? "");
+    return c.json(await store.transaction(async (tx) => {
+      const made = await makePrincipal(tx, ctx, ctx.kind === "human" ? "agent_of_human" : "agent_of_agent", scopes, expiresAt);
+      const apiKey = await issueCredential(tx, { principalId: made.id, kind: "api_key", label });
+      await recordChange(tx, ctx, { action: "key.create", targetKind: "principal", targetId: made.id }, now());
+      return { id: made.id, apiKey };
+    }));
   }));
 
-  // Revoking a principal stops it and everything below it, because rights are re-read up the chain.
-  app.delete("/principals/:id", authed(async (c, ctx) => {
-    const target = (await store.get("principals", id(c))) as (Principal & { ownerId?: string }) | null;
-    if (!target) return fail(404, "not found");
+  // The owner of an agent, or any principal above the target in its chain, may manage it.
+  async function mayManage(ops: StoreOps, ctx: PrincipalContext, target: Principal & { ownerId?: string }): Promise<boolean> {
     let allowed = target.ownerId === ctx.principalId;
     for (let up = target.parentId, i = 0; up && i < 8 && !allowed; i++) {
       allowed = up === ctx.principalId;
-      up = ((await store.get("principals", up!)) as Principal | null)?.parentId;
+      up = ((await ops.get("principals", up)) as Principal | null)?.parentId;
     }
-    if (!allowed) return fail(403, "forbidden");
-    await store.put("principals", target.id, { ...target, revokedAt: now() });
-    return c.json({ revoked: target.id });
+    return allowed;
+  }
+
+  // Revoking a principal stops it and everything below it, because rights are re-read up the chain.
+  app.delete("/principals/:id", authed(async (c, ctx) => {
+    const revoked = await store.transaction(async (tx) => {
+      const target = (await tx.get("principals", id(c))) as (Principal & { ownerId?: string }) | null;
+      if (!target) return fail(404, "not found");
+      if (!(await mayManage(tx, ctx, target))) return fail(403, "forbidden");
+      await tx.put("principals", target.id, { ...target, revokedAt: now() });
+      await recordChange(tx, ctx, { action: "key.revoke", targetKind: "principal", targetId: target.id }, now());
+      return target.id;
+    });
+    return c.json({ revoked });
+  }));
+
+  // A new key for an agent. Every key it had stops in the same step. The new key is shown once.
+  app.post("/principals/:id/keys", authed(async (c, ctx) => {
+    const result = await store.transaction(async (tx) => {
+      const target = (await tx.get("principals", id(c))) as (Principal & { ownerId?: string }) | null;
+      if (!target) return fail(404, "not found");
+      if (!(await mayManage(tx, ctx, target))) return fail(403, "forbidden");
+      if (target.revokedAt != null || !["agent", "agent_of_human", "agent_of_agent"].includes(target.kind)) return fail(400, "bad principal");
+      const old = await tx.query("credentials", { where: { principalId: target.id, kind: "api_key" }, limit: 100 });
+      if (old.nextCursor !== undefined) return fail(409, "try again");
+      for (const key of old.items) if (key.data.revokedAt == null) await tx.put("credentials", key.id, { ...key.data, revokedAt: now() });
+      const apiKey = await issueCredential(tx, { principalId: target.id, kind: "api_key", label: String(old.items[0]?.data.label ?? "") });
+      await recordChange(tx, ctx, { action: "key.rotate", targetKind: "principal", targetId: target.id }, now());
+      return { id: target.id, apiKey };
+    });
+    return c.json(result);
   }));
 
   const sharing = createSharing(store, { now });
@@ -329,6 +373,14 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const cursor = c.req.query("cursor");
     if (limit !== undefined && !/^[0-9]{1,6}$/.test(limit)) return fail(400, "bad limit");
     return c.json(await sharing.listAudit(ctx, id(c), { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
+  }));
+
+  // Everything the person did, and what their agents and tokens did for them. Newest first.
+  app.get("/me/audit", authed(async (c, ctx) => {
+    const limit = c.req.query("limit");
+    const cursor = c.req.query("cursor");
+    if (limit !== undefined && !/^[0-9]{1,6}$/.test(limit)) return fail(400, "bad limit");
+    return c.json(await sharing.listPersonAudit(ctx, { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
   }));
 
   return app;

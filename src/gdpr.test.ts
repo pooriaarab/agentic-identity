@@ -105,7 +105,7 @@ describe("export and delete", () => {
     const w = await world();
     expect((await w.call("DELETE", "/me", w.ana)).status).toBe(200);
     const log = (await w.call("GET", "/resources/boss/audit?limit=200", w.bo)).body.entries as Record<string, unknown>[];
-    expect(log.find((e) => e.action === "grant.set")).toMatchObject({ principalId: "bo", targetId: "erased" });
+    expect(log.find((e) => e.action === "grant.set")).toMatchObject({ principalId: "bo", targetId: "(erased)" });
     expect(JSON.stringify(log)).not.toContain("ana");
   });
 
