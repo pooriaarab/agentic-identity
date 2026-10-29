@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-10-29
+
 ### Added
 
 - `createAccountRegistry` and the `AccountPackage` contract in `agentic-identity/account`. A package gives `exportAccount(subject, deps)` (plain JSON records by collection) and `eraseAccount(subject, deps)` (counts by collection). The registry runs every registered package for one export zip and one erase report with counts, so a host no longer reads a package's storage layout.
