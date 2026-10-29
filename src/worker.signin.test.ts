@@ -15,7 +15,7 @@
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import { oidcProvider } from "./core/oidc.js";
-import { createApp, type WorkerConfig } from "./worker.js";
+import { createApp, workerConfig, type WorkerConfig } from "./worker.js";
 
 const ISSUER = "https://idp.test/realms/eu";
 const provider = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret" });
@@ -77,6 +77,16 @@ async function setup(extra: Partial<WorkerConfig> = {}) {
   const callback = (state: string, code: string, cookie?: string) => call("GET", `/auth/callback?state=${state}&code=${code}`, cookie ? { cookie } : {});
   return { app, store, server, call, login, callback };
 }
+
+describe("worker env", () => {
+  const env = { OIDC_ISSUER: ISSUER, OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret", PUBLIC_URL: "https://app.test" };
+  test("OIDC_CALLBACK_PATH reaches the provider, and an empty or bad value stops the Worker", () => {
+    expect(workerConfig({ ...env, OIDC_CALLBACK_PATH: "/auth/done" }).signIn?.provider.callbackPath).toBe("/auth/done");
+    expect(workerConfig(env).signIn?.provider.callbackPath).toBeUndefined();
+    expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "" })).toThrow("callbackPath");
+    expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "/*" })).toThrow("callbackPath");
+  });
+});
 
 describe("sign-in", () => {
   test("a good login sets a session cookie with its flags, and the cookie works", async () => {
