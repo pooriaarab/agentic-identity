@@ -6,6 +6,10 @@
 
 - A `prepack` script now builds `dist/` before `npm pack` and `npm publish`.
 
+### Tests
+
+- The Store contract suite now tests that a transaction guards the docs a query returned. An adapter that skips this guard fails the suite.
+
 ## 0.3.0
 
 ### Breaking
