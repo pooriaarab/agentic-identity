@@ -329,7 +329,7 @@ export interface PackageEraseReport extends EraseReport {
   counts: Record<string, AccountCounts>;
 }
 
-const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const NAME = APP_ID; // a package id and a collection name follow the app id rule
 const DEPTH_LIMIT = 64;
 
 function checkSubject(subject: unknown): AccountSubject {
@@ -381,11 +381,12 @@ function snapshot(value: unknown, seen: Set<object>, depth: number): Json {
 }
 
 function copyRecords(records: unknown): AccountRecords {
-  if (typeof records !== "object" || records === null || Array.isArray(records)) throw new Error("export must be an object of collections");
+  // The top level goes through `snapshot` too: a Map or a class instance is not an object of collections.
+  const copy = snapshot(records, new Set(), -1);
+  if (typeof copy !== "object" || copy === null || Array.isArray(copy)) throw new Error("export must be an object of collections");
   const out: AccountRecords = Object.create(null);
-  for (const name of Object.keys(records)) {
+  for (const [name, list] of Object.entries(copy)) {
     if (!NAME.test(name)) throw new Error("invalid collection name");
-    const list = snapshot((records as Record<string, unknown>)[name], new Set(), 0);
     if (!Array.isArray(list)) throw new Error("a collection must be a list");
     out[name] = list;
   }
@@ -393,10 +394,10 @@ function copyRecords(records: unknown): AccountRecords {
 }
 
 function copyCounts(counts: unknown): AccountCounts {
-  if (typeof counts !== "object" || counts === null || Array.isArray(counts)) throw new Error("erase must return an object of counts");
+  const copy = snapshot(counts, new Set(), -1);
+  if (typeof copy !== "object" || copy === null || Array.isArray(copy)) throw new Error("erase must return an object of counts");
   const out: AccountCounts = Object.create(null);
-  for (const name of Object.keys(counts)) {
-    const n = (counts as Record<string, unknown>)[name]; // read once
+  for (const [name, n] of Object.entries(copy)) {
     if (!NAME.test(name)) throw new Error("invalid collection name");
     if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) throw new Error("a count must be a whole number, zero or more");
     out[name] = n;

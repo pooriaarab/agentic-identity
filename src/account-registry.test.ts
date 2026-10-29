@@ -102,8 +102,8 @@ describe("export", () => {
 
   test("limits nesting to 64 levels", async () => {
     const nest = (n: number) => { let v: unknown = 1; for (let i = 0; i < n; i++) v = [v]; return v; };
-    await createAccountRegistry().register(pkg("tasks", { rows: [nest(63)] }), {}).export(ana, { now });
-    await expect(createAccountRegistry().register(pkg("tasks", { rows: [nest(66)] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
+    await createAccountRegistry().register(pkg("tasks", { rows: [nest(64)] }), {}).export(ana, { now });
+    await expect(createAccountRegistry().register(pkg("tasks", { rows: [nest(65)] }), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
   });
 
   test("gives every package the subject's kind unchanged", async () => {
@@ -117,7 +117,7 @@ describe("export", () => {
   });
 
   test("refuses a bad shape or collection name", async () => {
-    const shapes: unknown[] = [null, [], "x", { rows: {} }, { rows: "x" }, { Rows: [] }, { "a/b": [] }, JSON.parse('{"__proto__": []}')];
+    const shapes: unknown[] = [null, [], new Map([["rows", [{ id: 1 }]]]), new Date(), Object.assign(Object.create({ rows: [] }), {}), "x", { rows: {} }, { rows: "x" }, { Rows: [] }, { "a/b": [] }, JSON.parse('{"__proto__": []}')];
     for (const shape of shapes) {
       await expect(createAccountRegistry().register(pkg("tasks", shape), {}).export(ana, { now })).rejects.toBeInstanceOf(AccountExportError);
     }
@@ -151,14 +151,14 @@ describe("erase", () => {
 
   test("bad counts fail that package and the rest still run", async () => {
     const store = createMemoryStore();
-    for (const counts of [{ rows: -1 }, { rows: 1.5 }, { rows: NaN }, { rows: "2" }, { Rows: 1 }, null, [] , 3]) {
+    for (const counts of [new Map([["rows", 3]]), { rows: -1 }, { rows: 1.5 }, { rows: NaN }, { rows: "2" }, { Rows: 1 }, null, [] , 3]) {
       const r = createAccountRegistry().register(pkg("tasks", {}, counts), {}).register(pkg("tables", {}, { rows: 1 }), {});
       const report = await r.erase(ana, store, { actor: null, now });
       expect(report.ok).toBe(false);
       expect(report.results.map((x) => [x.appId, x.ok])).toEqual([["tasks", false], ["tables", true]]);
       expect(report.counts).toEqual({ tables: { rows: 1 } });
     }
-    expect((await entries(store)).filter((e) => e.outcome === "denied")).toHaveLength(8);
+    expect((await entries(store)).filter((e) => e.outcome === "denied")).toHaveLength(9);
   });
 
   test("a throwing eraser is reported and has no counts", async () => {
