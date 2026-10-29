@@ -45,15 +45,22 @@ export function createHttpMail(options: HttpMailOptions): Mail {
     async send(message) {
       assertMailMessage(message);
       const token = typeof options.token === "function" ? await options.token() : options.token;
+      // A fixed message: a header error from the runtime would quote the secret.
+      if (token !== undefined && (typeof token !== "string" || !/^[\x21-\x7e]+$/.test(token))) throw new Error("invalid mail token");
       const payload = options.body ? options.body(message, from) : { from, to: message.to, subject: message.subject, text: message.text, ...(message.html === undefined ? {} : { html: message.html }) };
+      if (payload === undefined) throw new Error("the mail body builder returned nothing");
       const response = await options.fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify(payload),
-        redirect: "error",
+        // Workers refuse "error". With "manual", a 3xx is returned and not followed, so the token stays here.
+        redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!response.ok) throw new MailError(response.status);
+      if (!response.ok || response.type === "opaqueredirect") {
+        await response.body?.cancel().catch(() => undefined);
+        throw new MailError(response.status);
+      }
       // Use the id the API gives, when it gives one. Else make one.
       const reply = (await response.json().catch(() => null)) as { id?: unknown } | null;
       return { id: typeof reply?.id === "string" && reply.id !== "" && reply.id.length <= 256 ? reply.id : crypto.randomUUID() };
@@ -77,7 +84,7 @@ const base64 = (text: string) => (Buffer.from(encoder.encode(text)).toString("ba
 
 /** An RFC 2047 subject: plain when it is ASCII, else encoded words of at most 45 bytes. */
 function encodeSubject(subject: string): string {
-  if (/^[\x20-\x7e]*$/.test(subject)) return subject;
+  if (/^[\x20-\x7e]*$/.test(subject) && !subject.includes("=?")) return subject;
   const words: string[] = [];
   let chunk = "";
   for (const char of subject) {
@@ -92,9 +99,9 @@ function encodeSubject(subject: string): string {
 }
 
 /** The raw MIME text of a message. `assertMailMessage` and the sender check keep CR and LF out of every header. */
-export function buildMime(message: MailMessage, from: string, id: string): string {
+export function buildMime(message: MailMessage, from: string, id: string, at: number): string {
   const domain = from.slice(from.indexOf("@") + 1);
-  const head = [`From: ${from}`, `To: ${message.to}`, `Subject: ${encodeSubject(message.subject)}`, `Message-ID: <${id}@${domain}>`, "MIME-Version: 1.0"];
+  const head = [`From: ${from}`, `To: ${message.to}`, `Subject: ${encodeSubject(message.subject)}`, `Date: ${new Date(at).toUTCString()}`, `Message-ID: <${id}@${domain}>`, "MIME-Version: 1.0"];
   const part = (type: string, text: string) => [`Content-Type: ${type}; charset=utf-8`, "Content-Transfer-Encoding: base64", "", base64(text)].join("\r\n");
   if (message.html === undefined) return [...head, part("text/plain", message.text), ""].join("\r\n");
   const boundary = `=_${crypto.randomUUID()}`;
@@ -114,12 +121,13 @@ export function buildMime(message: MailMessage, from: string, id: string): strin
 export function createCloudflareMail(binding: EmailBindingLike, options: CloudflareMailOptions): Mail {
   assertSender(options.from);
   const { from } = options;
+  const now = options.now ?? Date.now;
   return {
     region: options.region === undefined ? "unknown" : parseRegion(options.region),
     async send(message) {
       assertMailMessage(message);
       const id = crypto.randomUUID();
-      await binding.send(new options.EmailMessage(from, message.to, buildMime(message, from, id)));
+      await binding.send(new options.EmailMessage(from, message.to, buildMime(message, from, id, now())));
       return { id };
     },
   };

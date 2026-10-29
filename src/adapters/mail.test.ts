@@ -71,15 +71,44 @@ describe("HTTP mail", () => {
     expect(() => make({ timeoutMs: 0 })).toThrow(RangeError);
   });
 
-  it("does not follow a redirect with the token", async () => {
-    let calls = 0;
-    const redirecting = (async (_url: URL, init: RequestInit) => {
-      calls++;
-      expect(init.redirect).toBe("error");
-      throw new TypeError("redirect");
-    }) as unknown as typeof fetch;
-    await expect(make({ fetch: redirecting }).send(message)).rejects.toThrow();
-    expect(calls).toBe(1);
+  it("turns a redirect into an error, and does not follow it", async () => {
+    const seen: RequestInit[] = [];
+    const redirecting = (async (_url: URL, init: RequestInit) => (seen.push(init), new Response(null, { status: 302, headers: { location: "https://evil.example.test/" } }))) as unknown as typeof fetch;
+    await expect(make({ fetch: redirecting }).send(message)).rejects.toMatchObject({ httpStatus: 302 });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.redirect).toBe("manual");
+  });
+
+  it("works with the redirect mode that workerd accepts, and never reaches the second host", async () => {
+    const hosts: string[] = [];
+    const edge = new Miniflare({
+      modules: true,
+      script: `export default { async fetch(request, env) {
+        const r = await fetch("https://mail.example.test/send", { method: "POST", headers: { authorization: "Bearer t0k3n" }, body: "{}", redirect: "manual" });
+        return Response.json({ status: r.status });
+      } }`,
+      outboundService: (request: Request) => {
+        hosts.push(new URL(request.url).host);
+        return new Response(null, { status: 302, headers: { location: "https://evil.example.test/" } });
+      },
+    });
+    try {
+      expect(await (await edge.dispatchFetch("https://app.example.test/")).json()).toEqual({ status: 302 });
+      expect(hosts).toEqual(["mail.example.test"]);
+    } finally {
+      await edge.dispose();
+    }
+  });
+
+  it("refuses a bad token with a fixed message that does not quote it", async () => {
+    for (const token of ["", "a b", "tok\r\nX: y", 5 as unknown as string]) {
+      const error = await make({ token: () => token }).send(message).catch((e: unknown) => e as Error);
+      expect((error as Error).message).toBe("invalid mail token");
+    }
+  });
+
+  it("refuses a body builder that returns nothing", async () => {
+    await expect(make({ body: () => undefined }).send(message)).rejects.toThrow("returned nothing");
   });
 
   it("lets the caller shape the body for another API", async () => {
@@ -123,7 +152,7 @@ describe("Cloudflare mail", () => {
 
   it("sets the envelope, and keeps the subject and bodies whole for any text", async () => {
     const { mail, sent } = setup();
-    const subjects = ["Plain", "Café ☕", "é".repeat(200), "🔑".repeat(50), "a".repeat(200)];
+    const subjects = ["=?UTF-8?B?SGk=?=", "Plain", "Café ☕", "é".repeat(200), "🔑".repeat(50), "a".repeat(200)];
     for (const subject of subjects) await mail.send({ to: "ana@example.test", subject, text: "Zażółć\r\ngęślą\n" + "x".repeat(500), html: "<p>日本語</p>" });
     expect(sent.every((m) => m.from === "noreply@example.test" && m.to === "ana@example.test")).toBe(true);
     expect(sent.map((m) => parseMime(m.raw).subject)).toEqual(subjects);
@@ -136,7 +165,8 @@ describe("Cloudflare mail", () => {
   });
 
   it("adds exactly the headers it means to", () => {
-    const raw = buildMime({ to: "ana@example.test", subject: "Hi", text: "x" }, "noreply@example.test", "id1");
-    expect(raw.split("\r\n\r\n")[0]!.split("\r\n").map((h) => h.split(":")[0])).toEqual(["From", "To", "Subject", "Message-ID", "MIME-Version", "Content-Type", "Content-Transfer-Encoding"]);
+    const raw = buildMime({ to: "ana@example.test", subject: "Hi", text: "x" }, "noreply@example.test", "id1", 0);
+    expect(raw).toContain("Date: Thu, 01 Jan 1970 00:00:00 GMT");
+    expect(raw.split("\r\n\r\n")[0]!.split("\r\n").map((h) => h.split(":")[0])).toEqual(["From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type", "Content-Transfer-Encoding"]);
   });
 });
