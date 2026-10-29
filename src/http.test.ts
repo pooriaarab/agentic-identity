@@ -5,7 +5,7 @@
 //  6. A scope the principal lacks is a 403. 7. An unknown kind or a bad scope option throws.
 //  8. Cookie writes need a listed Origin; a bearer write and a cookie read do not. A bad Authorization header
 //     is a 401 even beside a valid cookie. An expired key and a revoked parent are a 401.
-//  9. An Auth that throws gives a 503, never a principal. 9. No body holds the credential.
+//  9. An Auth that throws gives a 503, never a principal. 10. No body holds the credential.
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import type { PrincipalContext } from "./core/principals.js";
@@ -59,7 +59,9 @@ describe("requirePrincipal", () => {
     const { auth, key, req } = await setup();
     const token = await key("p_h");
     for (const authorization of [`Basic ${token}`, `bearer ${token}`, token]) {
-      expect(((await requirePrincipal(req({ authorization }), auth)) as Response).status).toBe(401);
+      const res = (await requirePrincipal(req({ authorization }), auth)) as Response;
+      expect(res.status).toBe(401);
+      expect(await res.text()).not.toContain(token);
     }
   });
 
@@ -88,6 +90,9 @@ describe("requirePrincipal", () => {
     expect(((await requirePrincipal(post({ cookie }), auth, { origins })) as Response).status).toBe(403);
     expect(((await requirePrincipal(post({ cookie, origin: "https://evil.test" }), auth, { origins })) as Response).status).toBe(403);
     expect(((await requirePrincipal(post({ cookie }), auth)) as Response).status).toBe(403);
+    expect(((await requirePrincipal(post({ cookie }), auth, { origins: [""] })) as Response).status).toBe(403);
+    const refused = (await requirePrincipal(post({ cookie }), auth, { origins })) as Response;
+    expect(await refused.text()).not.toContain(cookie.slice(8));
     expect(await requirePrincipal(post({ cookie, origin: "https://app.test" }), auth, { origins })).toMatchObject({ principalId: "p_h" });
     expect(await requirePrincipal(req({ cookie }), auth)).toMatchObject({ principalId: "p_h" });
     expect(await requirePrincipal(post({ authorization: `Bearer ${await key("p_h")}` }), auth)).toMatchObject({ principalId: "p_h" });

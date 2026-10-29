@@ -5,14 +5,14 @@ import { PRINCIPAL_KINDS, hasScope, isScope, type PrincipalContext, type Princip
 import type { Auth } from "./ports.js";
 
 export interface RequirePrincipalOptions {
-  /** Kinds that may pass. Any other kind gets a 403. Leave it out to allow every kind. */
+  /** Kinds that may pass. Any other kind gets a 403, and an empty list refuses everyone. Leave it out to allow every kind. */
   kinds?: readonly PrincipalKind[];
   /** A scope the principal must hold, as `<resource>:<action>`. A principal without it gets a 403. */
   scope?: Scope;
   /**
    * Origins (for example `https://app.example.org`) that may send a write with a session cookie.
    * A write (any method but GET, HEAD, OPTIONS) that rides on a cookie needs a matching `Origin`
-   * header, or it gets a 403. A bearer key needs no origin. An empty `kinds` list refuses everyone.
+   * header, or it gets a 403. A bearer key needs no origin. An empty entry never matches.
    */
   origins?: readonly string[];
 }
@@ -34,6 +34,7 @@ export async function requirePrincipal(request: Request, auth: Auth, options: Re
   const header = request.headers.get("authorization");
   // A header that is present but not a bearer token is a wrong scheme. A cookie must not rescue it.
   if (header !== null && !BEARER.test(header)) return reply(401, "unauthorized", { "www-authenticate": "Bearer" });
+  const origin = request.headers.get("origin");
   let found: PrincipalContext | null = null;
   try {
     found = await auth.authenticate(request);
@@ -42,7 +43,7 @@ export async function requirePrincipal(request: Request, auth: Auth, options: Re
   }
   if (!found) return reply(401, "unauthorized", { "www-authenticate": "Bearer" });
   // A page on another site can make the browser send the cookie, but it cannot set Origin to ours.
-  if (header === null && !SAFE_METHODS.has(request.method.toUpperCase()) && !options.origins?.includes(request.headers.get("origin") ?? "")) return reply(403, "bad origin");
+  if (header === null && !SAFE_METHODS.has(request.method.toUpperCase()) && !(origin && options.origins?.includes(origin))) return reply(403, "bad origin");
   if (options.kinds && !options.kinds.includes(found.kind)) return reply(403, "forbidden");
   if (options.scope !== undefined && !hasScope(found.scopes, options.scope)) return reply(403, "forbidden");
   return found;
