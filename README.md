@@ -7,10 +7,10 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.1.0 preview. This release has principals and delegation chains,
+> Status: 0.1.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
-> and the HTTP API (a Cloudflare Worker) with OIDC sign-in and personal data export and delete. The SDK, the CLI, and the MCP server are not in this release.
+> and the HTTP API (a Cloudflare Worker) with OIDC sign-in, personal data export and delete, and the typed SDK. The CLI and the MCP server are not built yet.
 >
 > Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
 > `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
@@ -36,7 +36,7 @@ npm install agentic-identity
 
 ## Not built yet
 
-- The SDK, the CLI (`npx agentic-identity`), and the MCP server.
+- The CLI (`npx agentic-identity`) and the MCP server.
 
 ## Principals and scopes
 
@@ -107,6 +107,30 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   person, their agents, grants, and keys, and each resource that only they own.
   Both need the person's own session or key, not an agent or a token. A resource
   that someone else owns stays, even when it sits in a deleted folder.
+
+## SDK
+
+`agentic-identity/sdk` is a typed client for the Worker API. It needs only `fetch`.
+
+```ts
+import { createClient, ApiError } from "agentic-identity/sdk";
+
+const me = createClient({ baseUrl: "https://id.example.org", token: process.env.AGENT_KEY });
+await me.createResource({ id: "plan", type: "doc" });
+const link = await me.createLink("plan", { role: "viewer", expiresInMs: 3_600_000 });
+const visitor = createClient({ baseUrl: "https://id.example.org" });
+await visitor.access("plan", "read", { linkToken: link.token });
+```
+
+- It refuses a `baseUrl` that is `http` (except localhost), or holds a password, a
+  query, or a fragment. It refuses a token that is not a bare token.
+- It never follows a redirect, so a redirect cannot carry the token to another host.
+- It encodes each path part, refuses `.`, `..`, and an empty id, and checks the role
+  and the action before it sends anything.
+- A failure is an `ApiError` with `status`, `reason` (`http`, `bad_response`,
+  `timeout`, or `network`), and `retryAfterSeconds` for a 429. No error holds the token.
+- `withToken(token)` makes a client for another credential, such as an agent key.
+- The default time limit is 30 seconds (`timeoutMs`).
 
 ## Ports
 
