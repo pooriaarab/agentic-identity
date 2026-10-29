@@ -68,6 +68,11 @@ const wellFormed = (text: string, what: string) => {
 };
 
 export interface NetlifyStoreOptions extends AdapterOptions {
+  /**
+   * Must be `"strong"`, and must match how the Netlify store was made: `getStore({ name, consistency: "strong" })`.
+   * `list` takes no per-call option, and a stale list can miss a doc that was just made.
+   */
+  consistency: "strong";
   /** How long a holder owns the lock before another may take it. Defaults to 30000. */
   leaseMs?: number;
   /** How long a transaction waits for the lock before it throws `StoreConflictError`. Defaults to 35000, a little over `leaseMs`, so it outwaits a crashed holder. */
@@ -94,7 +99,8 @@ type JournalWrite = { collection: string; id: string; doc: Doc | null };
  * writes run one at a time. A `query` reads every doc of the collection, so use it for small
  * collections.
  */
-export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStoreOptions = {}): Store {
+export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStoreOptions): Store {
+  if (options?.consistency !== "strong") throw new Error('pass consistency: "strong", and make the Netlify store with getStore({ name, consistency: "strong" })');
   const region = options.region === undefined ? "unknown" : parseRegion(options.region);
   const now = options.now ?? Date.now;
   const leaseMs = options.leaseMs ?? 30_000;
@@ -103,6 +109,7 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     if (!Number.isInteger(value) || value < 1) throw new RangeError(`${name} must be an integer of 1 or more`);
   }
   // `list` has no consistency option, so it uses the store's own. Refuse a store that says it is eventual.
+  // (A wrapper hides the field, which is why the option above is required too.)
   const own = (blobs as { client?: { consistency?: unknown } }).client?.consistency;
   if (own !== undefined && own !== "strong") throw new Error('make the Netlify store with getStore({ name, consistency: "strong" })');
   const strong = { consistency: "strong" } as const;
@@ -113,16 +120,17 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     return `d/${collection}/${await sha256Hex(id)}`;
   };
 
-  /** A key holds `{ id, doc }`, because the key holds only a hash of the id. */
+  /** A key holds `{ id, doc }`, because the key holds only a hash of the id. Null for a missing doc and for a tombstone. */
   const readDoc = async (key: string): Promise<{ id: string; doc: Doc } | null> => {
     const text = (await blobs.get(key, { type: "text", ...strong })) as string | null;
     if (text === null) return null;
     const stored = JSON.parse(text) as { id?: unknown; doc?: unknown };
     const { id, doc } = stored;
-    if (typeof id !== "string" || typeof doc !== "object" || doc === null || Array.isArray(doc)) throw new Error("a stored doc is not readable");
+    // A null doc is a tombstone: a delete is a conditional write of one, because Netlify has no conditional delete.
+    if (typeof id !== "string" || typeof doc !== "object" || Array.isArray(doc)) throw new Error("a stored doc is not readable");
     // The key names the hash of the id. A value under another key is not this doc.
     if (key !== `${key.slice(0, key.lastIndexOf("/") + 1)}${await sha256Hex(id)}`) throw new Error("a stored doc is under the wrong key");
-    return { id, doc: doc as Doc };
+    return doc === null ? null : { id, doc: doc as Doc };
   };
 
   async function readAll(collection: string): Promise<{ id: string; doc: Doc }[]> {
@@ -215,7 +223,8 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     }
   }
 
-  // One transaction at a time per adapter object, so its own callers do not poll against each other.
+  // One transaction at a time per adapter object, so its own callers do not poll against each other. After a
+  // timeout the order is not kept, and the lock key still keeps the transactions apart.
   // A call that has waited `waitMs` in all, for its turn and for the lock, gives up. A write made inside a
   // transaction waits for its own transaction, so it gives up.
   let queue: Promise<unknown> = Promise.resolve();
@@ -274,13 +283,23 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     }
   }
 
-  /** Applies a journal. Each write renews the lease first, with a check that the lock is still ours, so a holder that stalled stops. */
+  /**
+   * Applies a journal. A doc write is conditional on the ETag that was read before the lease was renewed,
+   * so a write that is delayed past the lease (the client retries for a long time) cannot land over a
+   * rival's commit: the rival changed the ETag, and Netlify refuses the write. A delete writes a tombstone,
+   * since Netlify has no conditional delete.
+   */
   async function applyWrites(writes: JournalWrite[], held: Held): Promise<void> {
     for (const w of writes) {
-      await held.write(writes);
       const key = await docKey(w.collection, w.id);
-      if (w.doc === null) await blobs.delete(key);
-      else await blobs.set(key, JSON.stringify({ id: w.id, doc: w.doc }));
+      const before = await blobs.getMetadata(key, strong); // read first, then renew: see above
+      if (before !== null && !before.etag) throw new Error("a stored doc has no ETag");
+      await held.write(writes);
+      const body = JSON.stringify({ id: w.id, doc: w.doc });
+      const done = await blobs.set(key, body, before === null ? { onlyIfNew: true } : { onlyIfMatch: before.etag! });
+      if (done.modified) continue;
+      // A refusal is a rival's write, unless our own write landed and the client's retry was refused.
+      if ((await blobs.get(key, { type: "text", ...strong })) !== body) throw new StoreConflictError("the store lock was lost");
     }
     await held.write(undefined);
   }

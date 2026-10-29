@@ -499,7 +499,7 @@ structural type for the Netlify `Store`, so pass the result of `getStore(...)` f
 import { getStore } from "@netlify/blobs";
 import { createNetlifyBlobs, createNetlifyStore } from "agentic-identity/netlify";
 
-const store = createNetlifyStore(getStore({ name: "identity-docs", consistency: "strong" }), { region: "eu" });
+const store = createNetlifyStore(getStore({ name: "identity-docs", consistency: "strong" }), { region: "eu", consistency: "strong" });
 const blobs = createNetlifyBlobs(getStore("identity-files"), { region: "eu", urlBase, urlSecret });
 ```
 
@@ -510,13 +510,16 @@ runs one script on the fake and on the real client against the official local se
 (`BlobsServer`), and compares the answers. The local server cannot run the contract suites:
 it checks a condition and then writes in two steps, it builds an ETag from the file time, and
 it sends no ETag on a read. Run the suites on a live Netlify site before you rely on
-this adapter in production.
+this adapter in production. No test proves one thing: that the live service returns, on a
+read, the same ETag string that it accepts in `If-Match` (a weak ETag would break every
+conditional write). The `Blobs` version and the lock both depend on it.
 
 - Give the `Store` and the `Blobs` each their own Netlify store. The adapter owns every key in it.
 - Every read call asks for `consistency: "strong"`. The default of Netlify Blobs is eventual.
   `list` has no such option, so make the `Store`'s Netlify store with `consistency: "strong"`,
   as above. A stale list can miss a doc that was just made, so `tx.query` could miss it.
-  `createNetlifyStore` throws for a store that says it is not strong.
+  `createNetlifyStore` needs the option `consistency: "strong"` as your word that the store is
+  strong, and it also throws for a store that says it is not.
 - `Blobs` maps to Netlify directly. A conditional `set` (`onlyIfNew`, `onlyIfMatch`) is atomic,
   and the ETag is the version. The size and content type sit in the metadata. A key is hashed,
   so any key works. `signedUrl` makes an HMAC URL for your function, as the R2 adapter does.
@@ -548,12 +551,14 @@ this adapter in production.
   delete the `lock` key by hand. A write made inside a transaction on the same adapter object
   waits for its own transaction, so it throws after `waitMs`. Use `tx`.
 - All writes take the same lock, so they run one at a time. A write costs about six requests
-  and two more per doc. Each renew sends the journal again, so keep a transaction to a few docs.
-  A hot app needs a different `Store`. The lease compares the clocks of the instances, so keep
-  them within a few seconds of each other. The doc writes are not conditional: Netlify has no
-  conditional delete. A single doc write that stalls past the lease, after its renew, can land
-  after a rival's commit and overwrite it. The client retries a request for up to about 25 s,
-  so a long `leaseMs` is safer.
+  and four more per doc. Each renew sends the journal again, so keep a transaction to a few
+  docs. A hot app needs a different `Store`. The lease compares the clocks of the instances, so
+  keep them within a few seconds of each other.
+- A doc write is conditional on the ETag that the holder read just before it renewed the lease.
+  The client retries a request for a long time, and has no timeout. A write that is delayed past
+  the lease then fails, because the rival that took over changed the ETag, and the holder gets
+  `NetlifyCommitUncertainError`. Netlify has no conditional delete, so a delete writes a
+  tombstone (a doc that holds `null`). Tombstones stay, so a `query` still reads them.
 - A `query` reads every doc of the collection, then filters in memory. Use it for small
   collections.
 - `region` is a claim. Netlify Blobs does not let you pick a region per store. Check where

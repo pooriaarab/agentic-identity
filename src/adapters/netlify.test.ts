@@ -14,13 +14,15 @@ import { runAuditContract, runBlobsContract, runStoreContract } from "../testing
 import { NetlifyCommitUncertainError, createNetlifyBlobs, createNetlifyStore, verifySignedBlobUrl, type NetlifyStoreLike } from "./netlify.js";
 import { createFakeNetlifyStore } from "./netlify.fake.js";
 
+type StoreOptions = Partial<Parameters<typeof createNetlifyStore>[1]>;
+const strongStore = (fake: NetlifyStoreLike, options: StoreOptions = {}) => createNetlifyStore(fake, { consistency: "strong", ...options });
 const SECRET = "s".repeat(32);
 const URL_BASE = "https://files.example/blob";
 const fakes = new Map<string, NetlifyStoreLike>();
 const fakeFor = (shared: string) => fakes.get(shared) ?? fakes.set(shared, createFakeNetlifyStore()).get(shared)!;
 const shareds = (options: { shared?: string; region?: string }) => options.shared ?? crypto.randomUUID();
 
-const makeStore = (options: { shared?: string; region?: string }) => createNetlifyStore(fakeFor(shareds(options)), options as never);
+const makeStore = (options: { shared?: string; region?: string }) => strongStore(fakeFor(shareds(options)), options as never);
 const makeBlobs = (options: { shared?: string; region?: string }) =>
   createNetlifyBlobs(fakeFor(shareds(options)), { region: "unknown", ...options, urlBase: URL_BASE, urlSecret: SECRET } as never);
 
@@ -28,7 +30,7 @@ const makeBlobs = (options: { shared?: string; region?: string }) =>
 const makeRetryStore = (options: { shared?: string; region?: string }) => {
   const shared = options.shared ?? crypto.randomUUID();
   if (!fakes.has(shared)) fakes.set(shared, createFakeNetlifyStore({ retryAfterLanding: true }));
-  return createNetlifyStore(fakes.get(shared)!, options as never);
+  return strongStore(fakes.get(shared)!, options as never);
 };
 const makeRetryBlobs = (options: { shared?: string; region?: string }) => {
   const shared = options.shared ?? crypto.randomUUID();
@@ -78,8 +80,8 @@ describe("Netlify store lock and journal", () => {
 
   it("finishes the journal at once after a write that fails once, and the transaction commits", async () => {
     const fake = createFakeNetlifyStore();
-    await twoDocs(createNetlifyStore(breakable(fake, true).store, { waitMs: 500 }));
-    const reader = createNetlifyStore(fake);
+    await twoDocs(strongStore(breakable(fake, true).store, { waitMs: 500 }));
+    const reader = strongStore(fake);
     expect([await reader.get("docs", "a"), await reader.get("docs", "b")]).toEqual([{ n: 1 }, { n: 2 }]);
     expect(await journalOf(fake)).toBeUndefined();
   });
@@ -87,14 +89,14 @@ describe("Netlify store lock and journal", () => {
   it("finishes the writes of a holder that stopped after it wrote the journal", async () => {
     const fake = createFakeNetlifyStore();
     const { store, broken } = breakable(fake);
-    const failure = await twoDocs(createNetlifyStore(store, { waitMs: 500 })).catch((e: unknown) => e);
+    const failure = await twoDocs(strongStore(store, { waitMs: 500 })).catch((e: unknown) => e);
     // The caller learns that the outcome is unknown, and that no retry is safe to assume.
     expect(failure).toBeInstanceOf(NetlifyCommitUncertainError);
     expect(((failure as Error).cause as Error).message).toBe("write failed");
-    expect(await createNetlifyStore(fake).get("docs", "b")).toBeNull();
+    expect(await strongStore(fake).get("docs", "b")).toBeNull();
     broken.on = false;
     // The next transaction on any adapter replays the journal before its own reads.
-    const next = createNetlifyStore(fake);
+    const next = strongStore(fake);
     await next.transaction(async (tx) => {
       expect(await tx.get("docs", "b")).toEqual({ n: 2 });
     });
@@ -106,7 +108,7 @@ describe("Netlify store lock and journal", () => {
     const fake = createFakeNetlifyStore();
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
-    const rival = createNetlifyStore(fake, options);
+    const rival = strongStore(fake, options);
     let docWrites = 0;
     const stalling: NetlifyStoreLike = {
       ...fake,
@@ -119,7 +121,7 @@ describe("Netlify store lock and journal", () => {
         return result;
       },
     };
-    await expect(twoDocs(createNetlifyStore(stalling, options))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
+    await expect(twoDocs(strongStore(stalling, options))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
     expect(await rival.get("docs", "a")).toEqual({ n: 1 });
     expect(await rival.get("docs", "b")).toEqual({ who: "rival" });
   });
@@ -128,7 +130,7 @@ describe("Netlify store lock and journal", () => {
     const fake = createFakeNetlifyStore();
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
-    const rival = createNetlifyStore(fake, options);
+    const rival = strongStore(fake, options);
     const slow: NetlifyStoreLike = {
       ...fake,
       set: async (key, data, opts) => {
@@ -139,10 +141,52 @@ describe("Netlify store lock and journal", () => {
         return fake.set(key, data, opts);
       },
     };
-    await expect(twoDocs(createNetlifyStore(slow, options))).rejects.toBeInstanceOf(StoreConflictError);
-    const reader = createNetlifyStore(fake, options);
+    await expect(twoDocs(strongStore(slow, options))).rejects.toBeInstanceOf(StoreConflictError);
+    const reader = strongStore(fake, options);
     await reader.put("docs", "z", { n: 0 }); // the next transaction would replay a journal, if one landed
     expect([await reader.get("docs", "a"), await reader.get("docs", "b")]).toEqual([{ who: "rival" }, null]);
+  });
+
+  // A doc write that the client delays past the lease, and a rival who commits meanwhile.
+  for (const kind of ["put", "delete"] as const) {
+    it(`refuses a late doc ${kind} that would land over a rival's commit`, async () => {
+      const fake = createFakeNetlifyStore();
+      let clock = 0;
+      const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
+      const rival = strongStore(fake, options);
+      await rival.put("docs", "x", { v: 0 });
+      let delayed = false;
+      const slow: NetlifyStoreLike = {
+        ...fake,
+        set: async (key, data, opts) => {
+          if (key.startsWith("d/docs/") && !delayed && String(data).includes('"id":"x"') && opts?.onlyIfMatch !== undefined) {
+            delayed = true;
+            clock = 500; // the write is delayed past the lease, and a rival takes over and commits
+            await rival.put("docs", "x", { v: 2 });
+          }
+          return fake.set(key, data, opts);
+        },
+      };
+      const late = strongStore(slow, options).transaction(async (tx) => {
+        await tx.get("docs", "x");
+        if (kind === "put") await tx.put("docs", "x", { v: 1 });
+        else await tx.delete("docs", "x");
+      });
+      await expect(late).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
+      expect(await rival.get("docs", "x")).toEqual({ v: 2 });
+      await rival.put("docs", "y", { v: 0 }); // the next transaction replays any journal that is left
+      expect(await rival.get("docs", "x")).toEqual({ v: 2 });
+    });
+  }
+
+  it("hides a deleted doc from get and query, and lets a later put bring it back", async () => {
+    const store = strongStore(createFakeNetlifyStore());
+    await store.put("docs", "a", { n: 1 });
+    await store.delete("docs", "a");
+    expect(await store.get("docs", "a")).toBeNull();
+    expect((await store.query("docs", {})).items).toEqual([]);
+    await store.put("docs", "a", { n: 2 });
+    expect(await store.get("docs", "a")).toEqual({ n: 2 });
   });
 
   it("reports an unknown outcome when the journal write itself fails", async () => {
@@ -151,15 +195,15 @@ describe("Netlify store lock and journal", () => {
       ...fake,
       set: async (key, data, options) => (key === "lock" && String(data).includes('"writes"') ? Promise.reject(new Error("dropped")) : fake.set(key, data, options)),
     };
-    await expect(twoDocs(createNetlifyStore(lossy, { waitMs: 100 }))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
+    await expect(twoDocs(strongStore(lossy, { waitMs: 100 }))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
   });
 
   it("fails a read-only transaction whose lease a rival took while it read", async () => {
     const fake = createFakeNetlifyStore();
     let clock = 0;
     const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
-    const store = createNetlifyStore(fake, options);
-    const rival = createNetlifyStore(fake, options);
+    const store = strongStore(fake, options);
+    const rival = strongStore(fake, options);
     await expect(
       store.transaction(async (tx) => {
         await tx.get("docs", "a");
@@ -172,12 +216,12 @@ describe("Netlify store lock and journal", () => {
   it("keeps a lock it cannot parse, or one with a bad journal, as held", async () => {
     const fake = createFakeNetlifyStore();
     await fake.set("lock", JSON.stringify({ owner: null, expiresAt: 0, writes: [{ collection: "Bad Name", id: "a", doc: null }] }));
-    await expect(createNetlifyStore(fake, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
+    await expect(strongStore(fake, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
   });
 
   it("refuses a doc stored under another key", async () => {
     const fake = createFakeNetlifyStore();
-    const store = createNetlifyStore(fake);
+    const store = strongStore(fake);
     await store.put("docs", "a", { n: 1 });
     await store.put("docs", "b", { n: 2 });
     const [one, two] = (await fake.list({ prefix: "d/docs/" })).blobs;
@@ -185,15 +229,18 @@ describe("Netlify store lock and journal", () => {
     await expect(store.query("docs", {})).rejects.toThrow("wrong key");
   });
 
-  it("refuses a Netlify store that is not strongly consistent", () => {
+  it("refuses a Netlify store that is not strongly consistent, and a missing consistency option", () => {
     for (const consistency of ["eventual", "other"]) {
-      expect(() => createNetlifyStore({ ...createFakeNetlifyStore(), client: { consistency } } as never)).toThrow("strong");
+      expect(() => strongStore({ ...createFakeNetlifyStore(), client: { consistency } } as never)).toThrow("strong");
     }
-    expect(() => createNetlifyStore({ ...createFakeNetlifyStore(), client: { consistency: "strong" } } as never)).not.toThrow();
+    expect(() => strongStore({ ...createFakeNetlifyStore(), client: { consistency: "strong" } } as never)).not.toThrow();
+    for (const options of [undefined, {}, { consistency: "eventual" }]) {
+      expect(() => createNetlifyStore(createFakeNetlifyStore(), options as never)).toThrow("strong");
+    }
   });
 
   it("gives up on a write made inside a transaction, and does not hang", async () => {
-    const store = createNetlifyStore(createFakeNetlifyStore(), { waitMs: 100 });
+    const store = strongStore(createFakeNetlifyStore(), { waitMs: 100 });
     await expect(store.transaction(() => store.put("docs", "a", { n: 1 }))).rejects.toBeInstanceOf(StoreConflictError);
     await store.put("docs", "b", { n: 1 });
   });
@@ -201,12 +248,12 @@ describe("Netlify store lock and journal", () => {
   it("treats an empty ETag from a lock write as an error, never as a condition", async () => {
     const fake = createFakeNetlifyStore();
     const emptyEtag: NetlifyStoreLike = { ...fake, set: async (key, data, options) => ({ ...(await fake.set(key, data, options)), etag: "" }) };
-    await expect(createNetlifyStore(emptyEtag, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toThrow("no ETag");
+    await expect(strongStore(emptyEtag, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toThrow("no ETag");
     await expect(createNetlifyBlobs(emptyEtag, { region: "eu", urlBase: URL_BASE, urlSecret: SECRET }).put("k", Uint8Array.of(1))).rejects.toThrow("no ETag");
   });
 
   it("keeps ids under the Netlify key limit, and refuses an id with a lone surrogate", async () => {
-    const store = createNetlifyStore(createFakeNetlifyStore());
+    const store = strongStore(createFakeNetlifyStore());
     const long = ["日".repeat(256), "😀".repeat(128), "é".repeat(256)];
     for (const [i, id] of long.entries()) await store.put("docs", id, { i });
     expect((await store.query("docs", {})).items.map((item) => [item.id, item.data.i]).sort()).toEqual(long.map((id, i) => [id, i]).sort());
@@ -221,7 +268,7 @@ describe("Netlify store lock and journal", () => {
     const fake = createFakeNetlifyStore();
     let clock = 1_000;
     await fake.set("lock", JSON.stringify({ owner: "gone", expiresAt: 1_500 }));
-    const store = createNetlifyStore(fake, { now: () => clock, leaseMs: 100, waitMs: 200 });
+    const store = strongStore(fake, { now: () => clock, leaseMs: 100, waitMs: 200 });
     await expect(store.put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
     expect(await store.get("docs", "a")).toBeNull();
     clock = 1_500;
@@ -233,7 +280,7 @@ describe("Netlify store lock and journal", () => {
     for (const body of ["not json", JSON.stringify({ owner: "x", expiresAt: "soon" }), JSON.stringify({ owner: 5, expiresAt: 0 }), JSON.stringify({ expiresAt: 0 })]) {
       const fake = createFakeNetlifyStore();
       await fake.set("lock", body);
-      const store = createNetlifyStore(fake, { waitMs: 100 });
+      const store = strongStore(fake, { waitMs: 100 });
       await expect(store.put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
       expect(await store.get("docs", "a")).toBeNull();
     }
@@ -242,8 +289,8 @@ describe("Netlify store lock and journal", () => {
   it("writes nothing when another holder took the lease while fn ran", async () => {
     const fake = createFakeNetlifyStore();
     let clock = 0;
-    const store = createNetlifyStore(fake, { now: () => clock, leaseMs: 100, waitMs: 100 });
-    const rival = createNetlifyStore(fake, { now: () => clock, leaseMs: 100, waitMs: 100 });
+    const store = strongStore(fake, { now: () => clock, leaseMs: 100, waitMs: 100 });
+    const rival = strongStore(fake, { now: () => clock, leaseMs: 100, waitMs: 100 });
     await expect(
       store.transaction(async (tx) => {
         await tx.get("docs", "a");
@@ -256,7 +303,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("frees the lock when fn throws, and writes nothing", async () => {
-    const store = createNetlifyStore(createFakeNetlifyStore(), { waitMs: 200 });
+    const store = strongStore(createFakeNetlifyStore(), { waitMs: 200 });
     await expect(
       store.transaction(async (tx) => {
         await tx.put("docs", "a", { n: 1 });
@@ -269,7 +316,7 @@ describe("Netlify store lock and journal", () => {
   });
 
   it("keeps ids with colons, dots, and non-ASCII characters apart", async () => {
-    const store = createNetlifyStore(createFakeNetlifyStore());
+    const store = strongStore(createFakeNetlifyStore());
     const ids = ["a:b", "a", "é-ü", "a.b", "日本語", "x".repeat(256)];
     for (const [i, id] of ids.entries()) await store.put("docs", id, { i });
     expect((await store.query("docs", {})).items.map((item) => item.id).sort()).toEqual([...ids].sort());
@@ -278,14 +325,14 @@ describe("Netlify store lock and journal", () => {
 
   it("loses no update when four adapter objects share one store", async () => {
     const fake = createFakeNetlifyStore();
-    const stores = Array.from({ length: 4 }, () => createNetlifyStore(fake));
+    const stores = Array.from({ length: 4 }, () => strongStore(fake));
     await stores[0]!.put("counters", "c", { n: 0 });
     await Promise.all(Array.from({ length: 16 }, (_, i) => bump(stores[i % 4]!)));
     expect(await stores[0]!.get("counters", "c")).toEqual({ n: 16 });
   });
 
   it("refuses bad options", () => {
-    for (const options of [{ leaseMs: 0 }, { waitMs: 1.5 }]) expect(() => createNetlifyStore(createFakeNetlifyStore(), options)).toThrow(RangeError);
+    for (const options of [{ leaseMs: 0 }, { waitMs: 1.5 }]) expect(() => strongStore(createFakeNetlifyStore(), options)).toThrow(RangeError);
   });
 });
 
@@ -335,8 +382,8 @@ describe("the real @netlify/blobs client on the local server", () => {
   it("tells an eventual store from a strong one", () => {
     const url = "http://localhost:1";
     const make = (consistency?: "strong") => getStore({ name: "c", siteID: "site", token: "t", apiURL: url, edgeURL: url, uncachedEdgeURL: url, ...(consistency ? { consistency } : {}) });
-    expect(() => createNetlifyStore(make() as unknown as NetlifyStoreLike)).toThrow("strong");
-    expect(() => createNetlifyStore(make("strong") as unknown as NetlifyStoreLike)).not.toThrow();
+    expect(() => strongStore(make() as unknown as NetlifyStoreLike)).toThrow("strong");
+    expect(() => strongStore(make("strong") as unknown as NetlifyStoreLike)).not.toThrow();
   });
 
   it("runs a conditional put, a refused put, and a delete through the adapter", async () => {
