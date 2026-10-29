@@ -7,7 +7,7 @@ import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type
 import { createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
-import { parseRegion, type Store } from "./ports.js";
+import { StoreConflictError, parseRegion, type Store } from "./ports.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
@@ -272,7 +272,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   // Erases the resource with its grants, invites, links, and audit entries. 409 when it has children.
   app.delete("/resources/:id", authed(async (c, ctx) => {
-    await sharing.deleteResource(ctx, id(c)).catch((e: Error) => (/children|too many owners/.test(e.message) ? fail(409, e.message) : Promise.reject(e)));
+    await sharing.deleteResource(ctx, id(c)).catch((e: Error) => (e instanceof StoreConflictError || /children|too many owners/.test(e.message) ? fail(409, e.message) : Promise.reject(e)));
     return c.json({ deleted: true });
   }));
 

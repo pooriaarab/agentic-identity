@@ -5,7 +5,7 @@
 ### Added
 
 - `listGrants(ctx, resourceId, { limit, cursor })` lists the honored grants on a resource, an owner only. It has the SDK call `listGrants` and the route `GET /resources/:id/grants`.
-- `deleteResource(ctx, resourceId)` erases a resource with its grants, invites, links, and audit entries, so grants no longer outlive an erase. An owner only. A resource with children is refused (409 over HTTP). It has the SDK call `deleteResource` and the route `DELETE /resources/:id`. It works on every `Store` adapter, and the tests run it on the memory store and on D1.
+- `deleteResource(ctx, resourceId)` erases a resource with its grants, invites, links, and audit entries, so an erase of a resource leaves no grant behind. An owner only. It is not one step: a failed erase leaves fewer shares, and a second run finishes it. A grant, link, invite, or child that races it is refused or erased. A resource with children is refused (409 over HTTP). It has the SDK call `deleteResource` and the route `DELETE /resources/:id`. The tests run it on the memory store and on D1.
 
 ### Breaking
 
