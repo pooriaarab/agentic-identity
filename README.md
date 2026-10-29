@@ -11,7 +11,7 @@ People, agents, and the access they share: delegation, invites, links, and an au
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
-> personal data export and delete, and the typed SDK. The CLI is built. The MCP server is not built yet.
+> personal data export and delete, and the typed SDK. The CLI and the MCP server are built. They work on a local file.
 >
 > Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
 > `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
@@ -86,21 +86,21 @@ await client.createResource({ id: "plan", type: "doc" });
 - Share links with a role, an optional expiry, and a signed-in-only option.
 - An audit trail that shows who acted, and for whom. It records access checks and every change: a grant, a revoke, an invite, a link, a key, an export, and an erase. Each entry keeps the principal kind.
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
-- A CLI (`agentic-identity`) for principals, roles, invites, links, and the audit log, on a local JSON file.
+- A CLI (`agentic-identity`) and an MCP server (`agentic-identity-mcp`) for principals, roles, invites, links, and the audit log, on a local JSON file.
 - Sign in with any OpenID Connect provider (Keycloak, EU Login, Google), and per-user data export and hard delete, served by the HTTP API.
 - API keys and personal access tokens for agents, served by the HTTP API (see Worker API).
 - A region claim on every adapter except `Auth`. `assertRegion` fails at start-up when a claim is missing or wrong.
 
 ## Not built yet
 
-- The MCP server.
+- A CLI and an MCP server for the Worker API. The ones here work on a local file and do not call the Worker.
 
 ## Limits
 
 - OIDC discovery and the JWKS load on every sign-in. There is no cache yet. Only RS256 id tokens are accepted.
 - The per-IP budgets read `CF-Connecting-IP`. Cloudflare sets that header and replaces any value a client sends. Without Cloudflare in front, a client can send any value, and requests without the header share one budget. Serve the Worker through Cloudflare to count per IP.
 - `POST /test/token` is for tests only. Never set `IDENTITY_UNSAFE_TEST_MINT=1` in production.
-- The MCP server does not exist yet. The CLI reads the audit log of a resource (`audit`), and it works on a local file only.
+- The CLI and the MCP server read the audit log of one resource (`audit`) from a local file. They do not call the Worker.
 
 ## CLI
 
@@ -145,6 +145,33 @@ Every command has `--help`. The commands are:
   nothing. Run it again. A crash can leave `store.json.lock`. A command removes it
   when it is 3 seconds old.
 - The same file store is available as `createFileStore` from `agentic-identity/file`.
+
+## MCP server
+
+`agentic-identity-mcp` (also `agentic-identity mcp`) serves the CLI commands as
+MCP tools over stdio. It speaks JSON-RPC 2.0, one JSON message per line. It
+works on the same store file as the CLI, with the same options (`--store`,
+`--as`) and the same environment variables.
+
+```json
+{ "mcpServers": { "identity": { "command": "npx", "args": ["agentic-identity-mcp", "--as", "<agent-id>"] } } }
+```
+
+- There is one tool for each CLI command: `identity_whoami`, `identity_principals_list`,
+  `identity_agents_create`, `identity_resources_create`, `identity_grants_set`,
+  `identity_grants_revoke`, `identity_grants_list`, `identity_invites_create`,
+  `identity_invites_accept`, `identity_invites_list`, `identity_links_create`,
+  `identity_links_revoke`, `identity_links_resolve`, and `identity_audit`.
+- A tool takes the CLI arguments, with `_` in a name for `-` (`expires_in_ms`).
+  A result holds the JSON as text, and as `structuredContent` when it is an object.
+- A refused or failed call is a result with `isError: true`. A bad request or an
+  unknown tool is a JSON-RPC error.
+- The server acts as one principal for its whole run. Start it with `--as` and
+  an agent id, so the agent gets only its own rights. Without `--as` it acts as
+  `local`, which has all rights.
+- Each call reads the file again when another process changed it, so the CLI and
+  the server can share one file.
+- It handles one message at a time, and it has no batch support.
 
 ## Principals and scopes
 

@@ -10,7 +10,7 @@ sharing model (roles, invites, links, audit), the `Store`, `Blobs`, `Auth`,
 `Realtime`), Cloudflare D1 and R2 adapters, and the port contract suites
 (`agentic-identity/testing`). It has the HTTP API (`agentic-identity/worker`),
 OIDC sign-in, and the typed SDK (`agentic-identity/sdk`). The CLI (`agentic-identity`)
-exists. The MCP server does not exist yet. Do not call a tool that is not here.
+and the MCP server (`agentic-identity-mcp`) exist, on a local file. Do not call a tool that is not here.
 
 ## Rules
 
