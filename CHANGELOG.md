@@ -8,6 +8,7 @@
 
 ### Added
 
+- `requirePrincipal` in `agentic-identity/http` is one framework-free bearer check for app Workers. It takes a `Request` and the `Auth` port and returns the principal, or a 401 or 403 `Response`. `kinds` and `scope` options narrow who passes. A write on the session cookie needs an `Origin` listed in `origins`, or it is a 403. An `Auth` that throws gives a 503.
 - The README documents `PRINCIPAL_KINDS`, `PrincipalKind`, and `Principal`. Apps import them from `agentic-identity` and keep no local copy.
 - The `agentic-identity-mcp` MCP server (also `agentic-identity mcp`) serves each CLI command as a tool over stdio: `identity_whoami`, `identity_principals_list`, `identity_agents_create`, `identity_resources_create`, `identity_grants_*`, `identity_invites_*`, `identity_links_*`, and `identity_audit`.
 - The `agentic-identity` CLI works on a local JSON file: `whoami`, `principals list`, `agents create`, `resources create`, `grants set|revoke|list`, `invites create|accept|list`, `links create|revoke|resolve`, and `audit`. It prints JSON. `createFileStore` (`agentic-identity/file`) is a `Store` on a JSON file and passes the `Store` and audit contract suites. `listInvites(ctx, resourceId)` lists the invites on a resource, an owner only, with no email.
