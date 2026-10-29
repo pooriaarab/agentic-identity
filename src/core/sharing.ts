@@ -44,6 +44,9 @@ export type Decision = { allowed: boolean; role?: Role };
 export type InviteSummary = { id: string; resourceId: string; role: Role; for: "email" | "handle"; handle?: string; expiresAt?: number; acceptedAt?: number; revokedAt?: number };
 type Identity = { email?: string; handle?: string };
 
+/** The most invites that `acceptPendingInvites` reads for one address or handle. */
+const MAX_PENDING_SCAN = 500;
+
 const randomToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const sha256 = async (text: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -339,6 +342,35 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         await tx.put("invites", inviteId, { ...current, revokedAt: now() });
         await recordChange(tx, ctx, { action: "invite.revoke", resourceId: current.resourceId as string, targetKind: "invite", targetId: inviteId }, now());
       });
+    },
+
+    /**
+     * Accepts every live invite for the caller's verified email, or for the handle of an agent with its own
+     * identity, and returns how many it took. An invite that is expired, taken, or not the caller's is skipped.
+     * A delegated agent takes none. It reads at most `MAX_PENDING_SCAN` invites for the address, so a flood of
+     * invites cannot hold the call.
+     */
+    async acceptPendingInvites(ctx: PrincipalContext, identity: Identity): Promise<number> {
+      if (ctx.chain.length !== 1) return 0;
+      const where: Record<string, string> | null = ctx.kind === "human" && typeof identity.email === "string" ? { email: identity.email.toLowerCase() } : ctx.kind === "agent" && typeof identity.handle === "string" ? { handle: identity.handle } : null;
+      if (!where) return 0;
+      let accepted = 0;
+      let scanned = 0;
+      for (let cursor: string | undefined; scanned < MAX_PENDING_SCAN; ) {
+        const page = await store.query("invites", { where, limit: 50, ...(cursor === undefined ? {} : { cursor }) });
+        scanned += page.items.length;
+        for (const { id, data } of page.items) {
+          if (data.acceptedAt !== undefined) continue;
+          try {
+            await this.acceptInvite(ctx, id, identity);
+            accepted += 1;
+          } catch {
+            // Expired, taken in a race, or the resource is gone: the next invite still counts.
+          }
+        }
+        if ((cursor = page.nextCursor) === undefined) break;
+      }
+      return accepted;
     },
 
     /** The token is returned once. Only its hash is stored. */

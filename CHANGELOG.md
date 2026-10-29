@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `acceptPendingInvites(ctx, identity)`, `POST /me/invites/accept`, and `acceptMyInvites()` in the SDK accept every live invite for the caller's verified email or own handle in one call, because an invitee never sees an invite id. A delegated agent and an unverified email get none.
+- `POST /test/token` marks the email as verified when the body sets `emailVerified: true` with an `email`. It stays behind the unsafe test flag.
+
 ## 0.6.0 - 2026-10-29
 
 ### Changed

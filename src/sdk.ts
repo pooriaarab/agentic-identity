@@ -175,6 +175,8 @@ export function createClient(options: ClientOptions) {
     /** Stops an invite from being accepted. Needs an owner. An invite that was accepted is refused (409): revoke the grant instead. */
     revokeInvite: (inviteId: string) => request<{ ok: true }>("DELETE", `/invites/${part(inviteId, "inviteId")}`),
     acceptInvite: (inviteId: string) => request<{ ok: true }>("POST", `/invites/${part(inviteId, "inviteId")}/accept`),
+    /** Accepts every live invite for the caller's verified email, or the agent's own handle. Returns how many. */
+    acceptMyInvites: () => request<{ accepted: number }>("POST", "/me/invites/accept"),
     createLink: (resourceId: string, input: { role: Role; expiresInMs?: number; signedInOnly?: boolean }) =>
       request<NewLink>("POST", `/resources/${part(resourceId, "resourceId")}/links`, drop({ ...input, role: oneOf(input.role, ROLES, "role") })),
     revokeLink: (linkId: string) => request<{ ok: true }>("DELETE", `/links/${part(linkId, "linkId")}`),

@@ -200,10 +200,12 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const scopes = input.scopes === undefined ? ["doc:admin"] : scopesOf(input.scopes);
     if (scopes.length === 0 || scopes.includes("*:admin")) return fail(400, "bad scopes");
     const email = typeof input.email === "string" ? input.email.toLowerCase() : undefined;
+    // Only a test asks for this. Without it the mint never marks an email as verified.
+    if (input.emailVerified !== undefined && (typeof input.emailVerified !== "boolean" || (input.emailVerified && email === undefined))) return fail(400, "bad emailVerified");
     const token = await store.transaction(async (tx) => {
       if ((await tx.get("principals", userId)) || (await tx.get("users", userId))) return fail(409, "that id exists");
       await tx.put("principals", userId, { id: userId, kind: "human", scopes });
-      if (email !== undefined) await tx.put("users", userId, { id: userId, email, emailVerified: false });
+      if (email !== undefined) await tx.put("users", userId, { id: userId, email, emailVerified: input.emailVerified === true });
       return issueCredential(tx, { principalId: userId, kind: "session", expiresAt: now() + 3_600_000 });
     });
     return c.json({ token });
@@ -329,6 +331,13 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     const agent = await store.get("principals", ctx.principalId);
     await sharing.acceptInvite(ctx, id(c), { ...(user?.emailVerified === true ? pick(user, "email") : {}), ...pick(agent ?? {}, "handle") });
     return c.json({ ok: true });
+  }));
+
+  // Every live invite for the caller's verified email or own handle, in one call. An invitee never sees an invite id.
+  app.post("/me/invites/accept", authed(async (c, ctx) => {
+    const user = await store.get("users", ctx.principalId);
+    const agent = await store.get("principals", ctx.principalId);
+    return c.json({ accepted: await sharing.acceptPendingInvites(ctx, { ...(user?.emailVerified === true ? pick(user, "email") : {}), ...pick(agent ?? {}, "handle") }) });
   }));
 
   app.post("/resources/:id/links", authed(async (c, ctx) => {
