@@ -25,9 +25,14 @@ export function oidcProvider(config: { issuer: string; clientId: string; clientS
   return { issuer: config.issuer, clientId: config.clientId, clientSecret: config.clientSecret, scopes };
 }
 
+/** The preset for Google sign-in. Any other provider uses `oidcProvider` with its own issuer. */
 export const googleProvider = (clientId: string, clientSecret: string): OidcProviderConfig =>
   oidcProvider({ issuer: "https://accounts.google.com", clientId, clientSecret });
 
+/**
+ * Thrown by `finishLogin` for a refused code, a bad or rejected id token, or a bad discovery
+ * document. The message holds no token and no claim. The Worker answers 401 for it.
+ */
 export class OidcError extends Error {}
 
 type Fetch = typeof fetch;

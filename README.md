@@ -295,6 +295,13 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `PUBLIC_URL`. Keycloak, EU Login, and
   Google all work: `issuer` is the only setting that differs. The session cookie is
   `HttpOnly`, `Secure`, and `SameSite=Lax`. An id token must be RS256.
+- The sign-in code is also a library. `oidcProvider({ issuer, clientId, clientSecret, scopes? })`
+  checks the settings and returns a provider config (https issuer, or http on localhost).
+  `googleProvider(clientId, clientSecret)` is the same call with the Google issuer
+  (`https://accounts.google.com`). `beginLogin(provider, redirectUri)` returns `{ url, state, nonce,
+  verifier }`. `finishLogin(provider, { redirectUri, code, nonce, verifier, now })` returns
+  `{ subject, emailVerified, email? }`, and throws `OidcError` for a refused code, a bad id token, or a
+  bad discovery document. Its message holds no token and no claim.
 - `GET /me/export` returns the person's data as JSON. `DELETE /me` removes the
   person, their agents, grants, and keys, and each resource that only they own.
   Both need the person's own session or key, not an agent or a token. A resource
