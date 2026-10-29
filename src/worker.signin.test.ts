@@ -109,6 +109,45 @@ describe("sign-in", () => {
     expect(new URL(location, "https://app.test").origin).toBe("https://app.test");
   });
 
+  test.each([
+    ["/.//evil.test"],
+    ["/./\\evil.test"],
+    ["/..//evil.test"],
+    ["/a/..//evil.test"],
+    ["/a/../..//evil.test"],
+    ["/%2e//evil.test"],
+    ["/%2E//evil.test"],
+    ["/%2e%2e//evil.test"],
+    ["/%2E%2E//evil.test"],
+    ["/.%2e//evil.test"],
+    ["/\\evil.test"],
+    ["/\t/evil.test"],
+    ["/.\t//evil.test"],
+    ["/\n/evil.test"],
+    ["/./\t/evil.test"],
+    ["/a/..\\evil.test"],
+    ["/.\\\\evil.test"],
+    ["http://["],
+    ["//["],
+  ])("dot segments and other ways to reach //: a returnTo of %j goes to /", async (to) => {
+    const s = await setup();
+    const { params, state, flow } = await s.login(to);
+    const location = (await s.callback(state, await s.server.approve(params), flow)).headers.get("location")!;
+    expect(location).toBe("/");
+  });
+
+  test.each([["/%2F%2Fevil.test"], ["/%2f%2fevil.test"], ["/%5C%5Cevil.test"], ["/a%2F..%2F%2Fevil.test"], ["/%252e//evil.test"], ["/.//evil.test"], ["/%2e%2e%2f%2fevil.test"]])(
+    "an encoded returnTo of %s never leaves this origin",
+    async (to) => {
+      const s = await setup();
+      const { params, state, flow } = await s.login(to);
+      const location = (await s.callback(state, await s.server.approve(params), flow)).headers.get("location")!;
+      expect(location.startsWith("/")).toBe(true);
+      expect(location).not.toMatch(/^\/[\\/]/);
+      expect(new URL(location, "https://app.test").origin).toBe("https://app.test");
+    },
+  );
+
   test.each([["/docs?x=1#top"], ["/a/b%20c"], ["/"]])("a returnTo of %s is kept", async (to) => {
     const s = await setup();
     const { params, state, flow } = await s.login(to);
