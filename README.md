@@ -9,9 +9,9 @@ People, agents, and the access they share: delegation, invites, links, and an au
 
 > Status: 0.6.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
-> with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, the contract suites,
+> with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, a Netlify Store and Blobs, a file Store and Blobs, a Store-backed Queue, Mail adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
-> personal data export and delete, and the typed SDK. The CLI and the MCP server are built. They work on a local file.
+> personal data export and delete, account export and erase across apps, and the typed SDK. The CLI and the MCP server are built. They work on a local file.
 >
 > Warning: `POST /test/token` signs a new person in with no check. It is off unless you set
 > `IDENTITY_UNSAFE_TEST_MINT=1`. Set it for tests only, never in production.
