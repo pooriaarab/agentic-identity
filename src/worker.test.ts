@@ -251,3 +251,23 @@ runAuthContract((options) => {
     revoke: (credential) => revokeCredential(store, credential, now()),
   };
 });
+
+describe("change log over HTTP", () => {
+  test("a change writes an entry that names the request, and the response header carries the same id", async () => {
+    const s = await setup({ unsafeTestMint: true });
+    const ana = await s.mint("ana");
+    await s.call("POST", "/resources", { token: ana, body: { id: "d1", type: "doc" } });
+    const res = await s.call("POST", "/resources/d1/links", { token: ana, body: { role: "viewer" } });
+    const id = res.headers.get("x-request-id");
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    const { entries } = (await (await s.call("GET", "/resources/d1/audit", { token: ana })).json()) as { entries: Record<string, unknown>[] };
+    expect(entries.find((e) => e.action === "link.create")).toMatchObject({ requestId: id, principalId: "ana", principalKind: "human", targetKind: "link" });
+  });
+
+  test("a request id from the caller is ignored", async () => {
+    const s = await setup({ unsafeTestMint: true });
+    const ana = await s.mint("ana");
+    const res = await s.app.request("/api/v1/me", { headers: { authorization: `Bearer ${ana}`, "x-request-id": "forged" } });
+    expect(res.headers.get("x-request-id")).not.toBe("forged");
+  });
+});

@@ -68,8 +68,16 @@ export async function exportPerson(store: Store, personId: string) {
     grants: grants.map((g) => g.data),
     resources: resources.filter((r) => r !== null),
     invites,
-    audit: (await many(store, "audit", "principalId", ids)).map((a) => a.data),
+    // Entries the person made, and entries of changes that named the person.
+    audit: [...new Map([...(await many(store, "audit", "principalId", ids)), ...(await many(store, "audit", "targetId", ids))].map((a) => [a.id, a.data])).values()],
   };
+}
+
+const ERASED = "erased";
+
+/** Blanks the target of every audit entry that names one of these ids. */
+async function redactTargets(store: Store, targetIds: string[]): Promise<void> {
+  for (const entry of await many(store, "audit", "targetId", targetIds)) await store.put("audit", entry.id, { ...entry.data, targetId: ERASED });
 }
 
 /** Removes the data first and the sign-in last, so a failed delete can run again. */
@@ -83,13 +91,21 @@ export async function deletePerson(store: Store, personId: string): Promise<void
   for (const collection of ["grants", "links", "invites", "audit"]) await remove(collection, await many(store, collection, "resourceId", owned));
   await Promise.all(owned.map((id) => store.delete("resources", id)));
   await remove("grants", mine);
-  await remove("invites", await many(store, "invites", "createdBy", ids));
-  if (typeof user?.email === "string") await remove("invites", await all(store, "invites", { email: user.email }));
+  // Entries about a person or an invite that goes are kept, with the target blanked, so a log of
+  // changes on a resource that stays does not name what was erased.
+  const gone = new Set(ids);
+  const invites = await many(store, "invites", "createdBy", ids);
+  if (typeof user?.email === "string") invites.push(...(await all(store, "invites", { email: user.email })));
+  invites.forEach((i) => gone.add(i.id));
+  await redactTargets(store, [...gone]);
+  await remove("invites", invites);
   await remove("audit", await many(store, "audit", "principalId", ids));
   await remove("credentials", await many(store, "credentials", "principalId", ids));
   // A freed handle can be made again, so an invite to it must go, or its next owner would accept it.
   const handles = principals.flatMap((p) => (typeof p.data.handle === "string" ? [p.data.handle] : []));
-  await remove("invites", await many(store, "invites", "handle", handles));
+  const handleInvites = await many(store, "invites", "handle", handles);
+  await redactTargets(store, handleInvites.map((i) => i.id));
+  await remove("invites", handleInvites);
   await Promise.all(handles.map((handle) => store.delete("handles", handle)));
   await Promise.all(principals.map((p) => store.delete("principals", p.id)));
   await store.delete("users", personId);

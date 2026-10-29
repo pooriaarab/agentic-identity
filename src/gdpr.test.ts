@@ -100,4 +100,18 @@ describe("export and delete", () => {
     expect((await w.call("GET", "/resources/bo-note/access?action=admin", w.bo)).body.allowed).toBe(true);
     expect((await w.call("DELETE", "/me", w.ana)).status).toBe(401);
   });
+
+  test("a delete keeps the log of a change on a resource that stays, with the erased target blanked", async () => {
+    const w = await world();
+    expect((await w.call("DELETE", "/me", w.ana)).status).toBe(200);
+    const log = (await w.call("GET", "/resources/boss/audit?limit=200", w.bo)).body.entries as Record<string, unknown>[];
+    expect(log.find((e) => e.action === "grant.set")).toMatchObject({ principalId: "bo", targetId: "erased" });
+    expect(JSON.stringify(log)).not.toContain("ana");
+  });
+
+  test("the export holds the log entries of changes that named the person", async () => {
+    const w = await world();
+    const audit = (await w.call("GET", "/me/export", w.ana)).body.audit as Record<string, unknown>[];
+    expect(audit.some((e) => e.action === "grant.set" && e.principalId === "bo" && e.targetId === "ana")).toBe(true);
+  });
 });

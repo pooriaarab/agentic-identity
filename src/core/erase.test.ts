@@ -152,6 +152,7 @@ function suite(name: string, size: number, make: () => Promise<[Store, Store]>) 
 
     test.each([
       ["grant", (s: ReturnType<typeof createSharing>) => s.grant(ana, "doc", person("mallory"), "owner")],
+      ["revokeGrant", (s: ReturnType<typeof createSharing>) => s.revokeGrant(ana, "doc", person("bo"))],
       ["createLink", (s: ReturnType<typeof createSharing>) => s.createLink(ana, "doc", { role: "viewer" })],
       ["createInvite", (s: ReturnType<typeof createSharing>) => s.createInvite(ana, "doc", { role: "viewer", handle: "scribe" })],
       ["createResource", (s: ReturnType<typeof createSharing>) => s.createResource(ana, { id: "late", type: "doc", parentId: "doc" })],
@@ -162,7 +163,7 @@ function suite(name: string, size: number, make: () => Promise<[Store, Store]>) 
       await expect(write(late)).rejects.toThrow("forbidden");
       const owners = (await store.query("grants", { where: { role: "owner" } })).items.filter((g) => g.data.subjectId === "mallory");
       expect(owners).toEqual([]);
-      expect((await left(store, "doc")).links + (await left(store, "doc")).invites).toBe(0);
+      expect((await left(store, "doc")).links + (await left(store, "doc")).invites + (await left(store, "doc")).audit).toBe(0);
       expect((await store.get("resources", "late"))).toBeNull();
     });
 
