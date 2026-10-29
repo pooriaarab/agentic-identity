@@ -5,7 +5,7 @@
 ### Added
 
 - `listGrants(ctx, resourceId, { limit, cursor })` lists the honored grants on a resource, an owner only. It has the SDK call `listGrants` and the route `GET /resources/:id/grants`.
-- `deleteResource(ctx, resourceId)` erases a resource with its grants, invites, links, and audit entries, so an erase of a resource leaves no grant behind. An owner only. It is not one step: a failed erase leaves fewer shares, and a second run finishes it. A grant, link, invite, or child that races it is refused or erased. A resource with children is refused (409 over HTTP). It has the SDK call `deleteResource` and the route `DELETE /resources/:id`. The tests run it on the memory store and on D1.
+- `deleteResource(ctx, resourceId)` erases a resource with its grants, invites, links, and audit entries, so an erase of a resource leaves no grant behind. An owner only. It is not one step: a failed erase leaves fewer shares, and a second run finishes it. A grant, link, invite, or child that races it is refused or erased. A resource with children is refused (409 over HTTP). It has the SDK call `deleteResource` and the route `DELETE /resources/:id`. Each grant, link, invite, and child now rewrites its resource doc, so two such writes on one resource at the same moment conflict and one runs again. The tests run it on the memory store and on D1.
 
 ### Breaking
 

@@ -192,7 +192,14 @@ function suite(name: string, size: number, make: () => Promise<[Store, Store]>) 
     test("a link revoked after the erase does not come back", async () => {
       const { store, sharing } = await setup();
       const link = await sharing.createLink(ana, "doc", { role: "viewer" });
-      const late = createSharing({ ...store, get: async (c: string, id: string) => { const found = await store.get(c, id); if (c === "links") await sharing.deleteResource(ana, "doc"); return found; } } as Store);
+      let erased = false;
+      const late = createSharing({
+        ...store,
+        transaction: async (fn) => {
+          if (!erased) ((erased = true), await sharing.deleteResource(ana, "doc"));
+          return store.transaction(fn);
+        },
+      } as Store);
       await expect(late.revokeLink(ana, link.id)).rejects.toThrow("forbidden");
       expect(await store.get("links", link.id)).toBeNull();
     });
@@ -225,6 +232,11 @@ function suite(name: string, size: number, make: () => Promise<[Store, Store]>) 
         if ((cursor = page.nextCursor) === undefined) break;
       }
       expect(seen.sort()).toEqual(["ana", "b1", "b2", "b3"]);
+    });
+
+    test("listGrants refuses a cursor that is not text", async () => {
+      const { sharing } = await setup();
+      await expect(sharing.listGrants(ana, "doc", { cursor: 5 as unknown as string })).rejects.toThrow("invalid cursor");
     });
 
     test.each([[0], [201], [1.5], [Number.NaN], ["5"]])("listGrants refuses the limit %j", async (limit) => {
