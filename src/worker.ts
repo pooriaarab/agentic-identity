@@ -4,10 +4,10 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
 import { beginLogin, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
-import { createSharing, type Role, type SubjectKind } from "./core/sharing.js";
+import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
-import { parseRegion, type Store } from "./ports.js";
+import { StoreConflictError, parseRegion, type Store } from "./ports.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
@@ -71,6 +71,8 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status, error.retryAfterSeconds === undefined ? {} : { "retry-after": String(error.retryAfterSeconds) });
+    // A transaction that kept conflicting did nothing. The client can try again.
+    if (error instanceof StoreConflictError) return c.json({ error: "try again" }, 409);
     return c.json({ error: error.message === "forbidden" ? "forbidden" : "bad request" }, error.message === "forbidden" ? 403 : 400);
   });
 
@@ -261,6 +263,19 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   app.delete("/resources/:id/grants/:kind/:subjectId", authed(async (c, ctx) => {
     await sharing.revokeGrant(ctx, id(c), { kind: c.req.param("kind") as SubjectKind, id: id(c, "subjectId") });
     return c.json({ ok: true });
+  }));
+
+  app.get("/resources/:id/grants", authed(async (c, ctx) => {
+    const limit = c.req.query("limit");
+    const cursor = c.req.query("cursor");
+    if (limit !== undefined && !/^[0-9]{1,6}$/.test(limit)) return fail(400, "bad limit");
+    return c.json(await sharing.listGrants(ctx, id(c), { ...(limit === undefined ? {} : { limit: Number(limit) }), ...(cursor === undefined ? {} : { cursor }) }));
+  }));
+
+  // Erases the resource with its grants, invites, links, and audit entries. 409 when it has children.
+  app.delete("/resources/:id", authed(async (c, ctx) => {
+    await sharing.deleteResource(ctx, id(c)).catch((e: Error) => (e instanceof EraseRefusedError ? fail(409, e.message) : Promise.reject(e)));
+    return c.json({ deleted: true });
   }));
 
   app.post("/resources/:id/invites", authed(async (c, ctx) => {

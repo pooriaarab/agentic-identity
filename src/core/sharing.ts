@@ -1,7 +1,7 @@
 // Sharing: resources, roles, folders, invites, links, and `can`.
 // Roles belong to the root of a chain (the person, or an agent with its own
 // identity). A delegated agent gets that role, cut down by its scopes.
-import type { Doc, Store, StoreOps } from "../ports.js";
+import { StoreConflictError, type Doc, type Store, type StoreOps } from "../ports.js";
 import { auditEntry, hasScope, type Action, type AuditEntry, type PrincipalContext } from "./principals.js";
 
 export const ROLES = ["viewer", "commenter", "editor", "owner"] as const;
@@ -16,6 +16,16 @@ const rank = (role: unknown) => ROLES.indexOf(role as Role);
 /** The default and the largest page of `listAudit`. */
 export const AUDIT_PAGE = 50;
 export const MAX_AUDIT_PAGE = 200;
+/** `deleteResource` removes the owner grants in one transaction, so it refuses more owners than this. */
+export const MAX_OWNERS_ON_ERASE = 100;
+
+/** `deleteResource` refused: the resource has children, or too many owners. */
+export class EraseRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EraseRefusedError";
+  }
+}
 const linkRoles: readonly Role[] = ROLES.filter((r) => r !== "owner");
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -125,6 +135,17 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
   const legacyKeyOf = async (tx: StoreOps, resourceId: string, who: Subject) =>
     (await tx.get("principals", who.id))?.kind === who.kind ? `${resourceId}:${who.id}` : undefined;
 
+  // A write that hangs on a resource reads the resource in its own transaction, and writes the
+  // same doc back after its other reads. An erase reads and deletes the resource in a transaction
+  // too. So a write that lands first changes the doc the erase read, and the erase runs again and
+  // sees it. A write that lands later finds no resource and is refused.
+  const requireResource = async (tx: StoreOps, resourceId: string) => {
+    const found = await tx.get<Resource>("resources", resourceId);
+    if (!found) throw forbidden();
+    return found;
+  };
+  const touch = (tx: StoreOps, found: Resource) => tx.put("resources", found.id, found);
+
   return {
     async createResource(ctx: PrincipalContext, input: { id?: string; type: string; parentId?: string }): Promise<Resource> {
       const resource: Resource = { id: input.id ?? crypto.randomUUID(), type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}) };
@@ -133,7 +154,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       if (!subject || !hasScope(ctx.scopes, `${resource.type}:write`)) throw forbidden();
       if (input.parentId && (!(await store.get("resources", input.parentId)) || !(await decide(ctx, "write", input.parentId)).allowed)) throw forbidden();
       await store.transaction(async (tx) => {
+        const parent = input.parentId ? await requireResource(tx, input.parentId) : undefined;
         if (await tx.get("resources", resource.id)) throw new Error("resource exists");
+        if (parent) await touch(tx, parent);
         await tx.put("resources", resource.id, resource);
         await putGrant(tx, resource.id, subject, "owner");
       });
@@ -146,7 +169,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
         const legacy = await legacyKeyOf(tx, resourceId, who);
+        const found = await requireResource(tx, resourceId);
         if (role !== "owner" && (await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        await touch(tx, found);
         if (legacy) await tx.delete("grants", legacy);
         await putGrant(tx, resourceId, who, role);
       });
@@ -163,6 +188,57 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       });
     },
 
+    /** The grants on one resource that are honored, in id order. Needs an owner. Pass the `nextCursor` as `cursor` to read on. */
+    async listGrants(ctx: PrincipalContext, resourceId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ grants: Grant[]; nextCursor?: string }> {
+      const limit = options.limit ?? AUDIT_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
+      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+      await requireAdmin(ctx, resourceId);
+      const page = await store.query("grants", { where: { resourceId }, limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
+      const honored = page.items.filter((g) => SUBJECT_KINDS.includes(g.data.subjectKind as SubjectKind) && rank(g.data.role) >= 0);
+      return { grants: honored.map((g) => g.data as unknown as Grant), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
+    },
+
+    /**
+     * Erases a resource and what hangs on it: its grants, invites, links, and audit entries. A
+     * resource with children is refused, so no child is left without its folder. Needs an owner.
+     * The erase is not one step. It removes links, invites, audit entries, and the other grants
+     * first, then the owner grants and the resource in one transaction. A failed erase leaves the
+     * resource with fewer shares, and running it again finishes the job. A grant, link, invite, or
+     * child that races the erase is refused or erased. `can` writes its audit entry without a
+     * transaction, so an entry written in the last moments before the commit, or after it, can
+     * stay. A later `deleteResource` removes it, and the entries of a missing resource are not
+     * part of the erase.
+     */
+    async deleteResource(ctx: PrincipalContext, resourceId: string): Promise<void> {
+      await requireAdmin(ctx, resourceId);
+      if ((await store.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
+      if ((await store.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 })).items.length > MAX_OWNERS_ON_ERASE) throw new EraseRefusedError("too many owners: revoke some first");
+      // Every doc of the resource but an owner's grant, in pages by cursor. The owners go in the transaction.
+      for (const collection of ["links", "invites", "grants", "audit"]) {
+        for (let cursor: string | undefined; ; ) {
+          const page = await store.query(collection, { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+          await Promise.all(page.items.filter((d) => collection !== "grants" || d.data.role !== "owner").map((d) => store.delete(collection, d.id)));
+          if ((cursor = page.nextCursor) === undefined) break;
+        }
+      }
+      await store.transaction(async (tx) => {
+        await requireResource(tx, resourceId);
+        if ((await tx.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
+        // What a write added since the sweep. Each write changed the resource doc, so none can land after this read and commit.
+        const rest: [string, string][] = [];
+        // Audit entries are not here: `can` writes them outside a transaction, so reading them guards nothing.
+        for (const collection of ["grants", "links", "invites"]) {
+          const cap = collection === "grants" ? 2 * MAX_OWNERS_ON_ERASE : MAX_OWNERS_ON_ERASE;
+          const left = await tx.query(collection, { where: { resourceId }, limit: cap + 1 });
+          if (left.items.length > cap) throw new StoreConflictError("too many docs are left on the resource, try again");
+          rest.push(...left.items.map((d): [string, string] => [collection, d.id]));
+        }
+        for (const [collection, id] of rest) await tx.delete(collection, id);
+        await tx.delete("resources", resourceId);
+      });
+    },
+
     async createInvite(ctx: PrincipalContext, resourceId: string, input: { role: Role; email?: string; handle?: string; expiresInMs?: number }) {
       assertRole(input.role, linkRoles);
       if ((input.email === undefined) === (input.handle === undefined)) throw new Error("give an email or a handle");
@@ -170,10 +246,13 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const expiresAt = input.expiresInMs === undefined ? undefined : lifetime(input.expiresInMs);
       await requireAdmin(ctx, resourceId);
       const id = crypto.randomUUID();
-      await store.put("invites", id, {
-        id, resourceId, role: input.role, createdBy: ctx.principalId,
-        ...(input.email === undefined ? { handle: input.handle as string } : { email: input.email.toLowerCase() }),
-        ...(expiresAt === undefined ? {} : { expiresAt }),
+      await store.transaction(async (tx) => {
+        await touch(tx, await requireResource(tx, resourceId));
+        await tx.put("invites", id, {
+          id, resourceId, role: input.role, createdBy: ctx.principalId,
+          ...(input.email === undefined ? { handle: input.handle as string } : { email: input.email.toLowerCase() }),
+          ...(expiresAt === undefined ? {} : { expiresAt }),
+        });
       });
       return { id };
     },
@@ -187,7 +266,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         const mine = invite?.email !== undefined ? ctx.kind === "human" && identity.email?.toLowerCase() === invite.email : ctx.kind === "agent" && identity.handle === invite?.handle;
         const live = invite && invite.acceptedAt === undefined && finiteOrAbsent(invite.expiresAt) && (invite.expiresAt == null || (invite.expiresAt as number) > now());
         if (!invite || !live || !mine) throw forbidden();
+        const target = await requireResource(tx, invite.resourceId as string);
         const current = rank((await tx.get("grants", grantKey(invite.resourceId as string, subject)))?.role);
+        await touch(tx, target);
         await tx.put("invites", inviteId, { ...invite, acceptedAt: now() });
         if (rank(invite.role) > current) await putGrant(tx, invite.resourceId as string, subject, invite.role as Role);
       });
@@ -199,9 +280,13 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const expiresAt = input.expiresAt === undefined ? undefined : futureTime(input.expiresAt);
       await requireAdmin(ctx, resourceId);
       const [id, token] = [crypto.randomUUID(), randomToken()];
-      await store.put("links", id, {
-        id, resourceId, role: input.role, tokenHash: await sha256(token), signedInOnly: input.signedInOnly === true,
-        ...(expiresAt === undefined ? {} : { expiresAt }),
+      const tokenHash = await sha256(token);
+      await store.transaction(async (tx) => {
+        await touch(tx, await requireResource(tx, resourceId));
+        await tx.put("links", id, {
+          id, resourceId, role: input.role, tokenHash, signedInOnly: input.signedInOnly === true,
+          ...(expiresAt === undefined ? {} : { expiresAt }),
+        });
       });
       return { id, token };
     },
@@ -210,7 +295,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const link = await store.get("links", linkId);
       if (!link) throw forbidden();
       await requireAdmin(ctx, link.resourceId as string);
-      await store.put("links", linkId, { ...link, revokedAt: now() });
+      // In a transaction, so a link that an erase removed in between is not put back.
+      await store.transaction(async (tx) => {
+        const current = await tx.get("links", linkId);
+        if (!current) throw forbidden();
+        await tx.put("links", linkId, { ...current, revokedAt: now() });
+      });
     },
 
     /** Decide, and write the audit entry for an allow and for a deny. `ctx` is null for a link visitor. */

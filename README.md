@@ -163,7 +163,9 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
 - `DELETE /principals/:id` revokes it, and every key below it stops at once.
 - `/resources`, `/grants`, `/invites`, `/links`, `/access`, and `/audit` expose sharing.
   A grant names its subject by kind (`human` or `agent`) and id: `POST /resources/:id/grants` takes
-  `subjectKind` and `subjectId`, and `DELETE /resources/:id/grants/:kind/:subjectId` removes one.
+  `subjectKind` and `subjectId`, and `DELETE /resources/:id/grants/:kind/:subjectId` removes one. `GET /resources/:id/grants?limit=&cursor=` lists them (an owner only).
+  `DELETE /resources/:id` erases a resource with its grants, invites, links, and audit entries. It
+  answers 409 when the resource has children or too many owners.
   `GET /resources/:id/audit?limit=&cursor=` returns `{ entries, nextCursor }`, newest
   first. The SDK call is `audit(resourceId, { limit, cursor })`.
 - `POST /test/token` makes a new person with narrow rights (`doc:admin` unless the body lists other scopes, never `*:admin`). It never changes a person that exists and never marks an email as verified. It answers 404 unless `IDENTITY_UNSAFE_TEST_MINT=1`, and the Worker refuses to run with that flag when `REGION` is not `unknown` or `PUBLIC_URL` is https.
