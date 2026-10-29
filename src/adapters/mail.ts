@@ -3,7 +3,7 @@
 // Neither one logs, and neither puts an address or a body in an error.
 import { assertMailMessage, parseRegion, type AdapterOptions, type Mail, type MailMessage } from "../ports.js";
 
-const ADDRESS = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
+const ADDRESS = /^[^\s\x00-\x1f\x7f@<>,;"]+@[^\s\x00-\x1f\x7f@<>,;"]+\.[^\s\x00-\x1f\x7f@<>,;"]+$/;
 const encoder = new TextEncoder();
 
 function assertSender(from: unknown): asserts from is string {
@@ -35,11 +35,12 @@ export interface HttpMailOptions extends AdapterOptions {
 
 export function createHttpMail(options: HttpMailOptions): Mail {
   const url = new URL(options.url);
+  if (url.username !== "" || url.password !== "") throw new Error("the mail URL must not hold credentials");
   if (url.protocol !== "https:") throw new Error("the mail URL must use https");
   assertSender(options.from);
   const { from } = options;
   const timeoutMs = options.timeoutMs ?? 10_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError("timeoutMs must be above 0");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31) throw new RangeError("timeoutMs must be above 0 and at most 2147483648");
   return {
     region: options.region === undefined ? "unknown" : parseRegion(options.region),
     async send(message) {
@@ -48,11 +49,12 @@ export function createHttpMail(options: HttpMailOptions): Mail {
       // A fixed message: a header error from the runtime would quote the secret.
       if (token !== undefined && (typeof token !== "string" || !/^[\x21-\x7e]+$/.test(token))) throw new Error("invalid mail token");
       const payload = options.body ? options.body(message, from) : { from, to: message.to, subject: message.subject, text: message.text, ...(message.html === undefined ? {} : { html: message.html }) };
-      if (payload === undefined) throw new Error("the mail body builder returned nothing");
+      const text = payload !== null && typeof payload === "object" ? JSON.stringify(payload) : undefined;
+      if (text === undefined) throw new Error("the mail body builder must return an object");
       const response = await options.fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify(payload),
+        body: text,
         // Workers refuse "error". With "manual", a 3xx is returned and not followed, so the token stays here.
         redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
@@ -127,7 +129,15 @@ export function createCloudflareMail(binding: EmailBindingLike, options: Cloudfl
     async send(message) {
       assertMailMessage(message);
       const id = crypto.randomUUID();
-      await binding.send(new options.EmailMessage(from, message.to, buildMime(message, from, id, now())));
+      const at = now();
+      if (!Number.isFinite(at)) throw new RangeError("the clock must return a finite number");
+      const raw = buildMime(message, from, id, at);
+      // The binding and the class check the envelope, and their errors can quote the address.
+      try {
+        await binding.send(new options.EmailMessage(from, message.to, raw));
+      } catch {
+        throw new Error("mail send failed");
+      }
       return { id };
     },
   };

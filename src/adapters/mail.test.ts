@@ -107,8 +107,13 @@ describe("HTTP mail", () => {
     }
   });
 
-  it("refuses a body builder that returns nothing", async () => {
-    await expect(make({ body: () => undefined }).send(message)).rejects.toThrow("returned nothing");
+  it("refuses a body builder that returns anything but an object", async () => {
+    for (const value of [undefined, null, () => 1, "text", 5]) await expect(make({ body: () => value }).send(message)).rejects.toThrow("must return an object");
+  });
+
+  it("refuses a URL with credentials, and a timeout that is too large, when it is built", () => {
+    expect(() => make({ url: "https://user:secret@mail.example.test/send" })).toThrow("credentials");
+    expect(() => make({ timeoutMs: 2 ** 40 })).toThrow(RangeError);
   });
 
   it("lets the caller shape the body for another API", async () => {
@@ -158,6 +163,25 @@ describe("Cloudflare mail", () => {
     expect(sent.map((m) => parseMime(m.raw).subject)).toEqual(subjects);
     expect(parseMime(sent[0]!.raw)).toMatchObject({ text: "Zażółć\r\ngęślą\n" + "x".repeat(500), html: "<p>日本語</p>" });
     for (const m of sent) expect(Math.max(...m.raw.split("\r\n").map((l) => l.length))).toBeLessThanOrEqual(998);
+  });
+
+  it("replaces an error from the binding, so the address stays out of it", async () => {
+    const binding = { send: async () => { throw new Error("ana@example.test is not a verified destination"); } };
+    const mail = createCloudflareMail(binding, { from: "noreply@example.test", EmailMessage: FakeEmailMessage });
+    await expect(mail.send({ to: "ana@example.test", subject: "Hi", text: "x" })).rejects.toThrow(/^mail send failed$/);
+  });
+
+  it("refuses a clock that is not finite", async () => {
+    const { mail } = setup({ now: () => NaN });
+    await expect(mail.send({ to: "ana@example.test", subject: "Hi", text: "x" })).rejects.toThrow(RangeError);
+  });
+
+  it("writes only the headers it means to in a message with an HTML part", () => {
+    const raw = buildMime({ to: "ana@example.test", subject: "Hi", text: "x", html: "<p>x</p>" }, "noreply@example.test", "id1", 0);
+    const [head, ...parts] = raw.split("\r\n--");
+    expect(head!.split("\r\n").map((h) => h.split(":")[0]!).filter((h) => h !== "")).toEqual(["From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type"]);
+    const headers = parts.slice(0, 2).map((p) => p.split("\r\n\r\n")[0]!.split("\r\n").slice(1).map((h) => h.split(":")[0]));
+    expect(headers).toEqual([["Content-Type", "Content-Transfer-Encoding"], ["Content-Type", "Content-Transfer-Encoding"]]);
   });
 
   it("refuses a bad sender and a header injection through the sender", () => {
