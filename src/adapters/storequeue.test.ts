@@ -9,10 +9,11 @@
 //  5. A doc in the collection that is not a message must not stop its own topic or the others,
 //     whether it sorts first or last, and must not show in `dead()`.
 //  6. One instance that runs twice at once must not let the first run settle the second's claim.
-//  7. A failed settle must not stop the rest of the run.
+//  7. A failed settle, or a claim that loses its race for good, must not stop the rest of the run.
+//  8. A clock that returns NaN must not store a message that nothing can deliver.
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Json, Store } from "../ports.js";
+import { StoreConflictError, type Json, type Store } from "../ports.js";
 import { runQueueContract } from "../testing.js";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./cloudflare.js";
 import { createFirestoreStore } from "./firestore.js";
@@ -30,38 +31,67 @@ beforeAll(async () => {
 afterAll(() => mf.dispose());
 
 const emulator = process.env.FIRESTORE_EMULATOR_HOST;
-const firestore = (): Store => {
+/** A dataset gives out Store instances that share its data, as two isolates do. */
+type Dataset = { open(): Store };
+const firestore = (): Dataset => {
   const projectId = `q${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
-  return emulator
-    ? createFirestoreStore({ projectId, fetch, baseUrl: `http://${emulator}`, token: "owner", maxAttempts: 40 })
-    : createFirestoreStore({ projectId, fetch: createFakeFirestore().fetch });
+  const fake = createFakeFirestore();
+  return {
+    open: () =>
+      emulator
+        ? createFirestoreStore({ projectId, fetch, baseUrl: `http://${emulator}`, token: "owner", maxAttempts: 40 })
+        : createFirestoreStore({ projectId, fetch: fake.fetch }),
+  };
 };
-const d1 = async (): Promise<Store> => {
+const d1 = async (): Promise<Dataset> => {
   await db.prepare("DELETE FROM store_docs").run();
-  return createD1Store(db, { region: "unknown" });
+  return { open: () => createD1Store(db, { region: "unknown" }) };
+};
+const memory = (): Dataset => {
+  const shared = crypto.randomUUID();
+  return { open: () => createMemoryStore({ shared }) };
 };
 
-const backends: [string, () => Store | Promise<Store>][] = [
-  ["memory", () => createMemoryStore()],
+const backends: [string, () => Dataset | Promise<Dataset>][] = [
+  ["memory", memory],
   ["D1", d1],
   ["Firestore", firestore],
 ];
 
-for (const [name, makeStore] of backends) {
+for (const [name, makeDataset] of backends) {
   describe(`Store queue on ${name}`, () => {
     runQueueContract(async (options) => {
-      const queue = createStoreQueue(await makeStore(), options);
+      const queue = createStoreQueue((await makeDataset()).open(), options);
       return { queue, run: () => queue.run(), dead: (topic) => queue.dead(topic) };
     });
 
     it("delivers each message once when two runners share the Store", async () => {
-      const store = await makeStore();
-      const [one, two] = [createStoreQueue(store), createStoreQueue(store)];
+      const data = await makeDataset();
+      const [one, two] = [createStoreQueue(data.open()), createStoreQueue(data.open())];
       const got: Json[] = [];
       for (const q of [one, two]) q.consume("a", async (body) => void got.push(body));
       for (let i = 0; i < 6; i++) await one.send("a", i);
       await Promise.all([one.run(), two.run()]);
       expect([...got].sort()).toEqual([0, 1, 2, 3, 4, 5]);
+    });
+
+    it("parks a doc that is not a message, even when it is first, and serves the rest of its topic", async () => {
+      const store = (await makeDataset()).open();
+      const q = createStoreQueue(store);
+      const seen: Json[] = [];
+      q.consume("a", async (b) => void seen.push(b));
+      q.consume("b", async (b) => void seen.push(b));
+      await store.put("queue_messages", "junk1", { topic: "a", state: "pending", due: "soon" });
+      await store.put("queue_messages", "junk2", { topic: "a", state: "pending", due: -1, attempt: "x" });
+      await store.put("queue_messages", "junk3", { topic: "a", state: "pending", due: -2, attempt: -100, body: 1 });
+      await store.put("queue_messages", "junk5", { topic: "a", state: "pending", due: 5 });
+      await store.put("queue_messages", "junk6", { topic: "a", state: "pending", due: true, attempt: 0, body: 1 });
+      await store.put("queue_messages", "junk4", { topic: "a", state: "dead", key: "k" });
+      await q.send("a", "late");
+      await q.send("b", "ok");
+      await q.run();
+      expect(seen).toEqual(["late", "ok"]);
+      expect(await q.dead("a")).toEqual([]);
     });
   });
 }
@@ -135,23 +165,6 @@ describe("Store queue leases", () => {
     expect((await store.get("queue_messages", id))!.state).toBe("dead");
   });
 
-  it("parks a doc that is not a message, even when it is first, and serves the rest of its topic", async () => {
-    const { store, make } = setup();
-    const q = make();
-    const seen: Json[] = [];
-    q.consume("a", async (b) => void seen.push(b));
-    q.consume("b", async (b) => void seen.push(b));
-    await store.put("queue_messages", "junk1", { topic: "a", state: "pending", due: "soon" });
-    await store.put("queue_messages", "junk2", { topic: "a", state: "pending", due: -1, attempt: "x" });
-    await store.put("queue_messages", "junk3", { topic: "a", state: "pending", due: -2, attempt: -100, body: 1 });
-    await store.put("queue_messages", "junk4", { topic: "a", state: "dead", key: "k" });
-    await q.send("a", "late");
-    await q.send("b", "ok");
-    await q.run();
-    expect(seen).toEqual(["late", "ok"]);
-    expect(await q.dead("a")).toEqual([]);
-  });
-
   it("does not let one run settle the claim of another run on the same instance", async () => {
     const { store, make, at } = setup();
     const q = make();
@@ -170,6 +183,35 @@ describe("Store queue leases", () => {
     releases[1]!();
     await second;
     expect((await store.query("queue_messages")).items).toHaveLength(0);
+  });
+
+  it("goes on with the other topics when a claim gives up on a race", async () => {
+    const base = createMemoryStore();
+    let lose = true;
+    const store: Store = {
+      ...base,
+      region: base.region,
+      transaction: (fn) => {
+        if (!lose) return base.transaction(fn);
+        lose = false;
+        return Promise.reject(new StoreConflictError());
+      },
+    };
+    const q = createStoreQueue(store);
+    const seen: Json[] = [];
+    q.consume("a", async (b) => void seen.push(b));
+    q.consume("b", async (b) => void seen.push(b));
+    await q.send("a", 1);
+    await q.send("b", 2);
+    await q.run();
+    expect(seen).toEqual([2]);
+    await q.run();
+    expect(seen).toEqual([2, 1]);
+  });
+
+  it("refuses to send with a clock that is not a finite number", async () => {
+    const q = createStoreQueue(createMemoryStore(), { now: () => NaN });
+    await expect(q.send("a", 1)).rejects.toThrow();
   });
 
   it("goes on with the other topics when a settle fails", async () => {

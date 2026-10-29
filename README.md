@@ -459,11 +459,16 @@ contract suite on memory, on D1 (miniflare), and on Firestore (the emulator in C
   one Store do not both deliver it. A runner that crashes loses the lease, and another runner
   delivers the message with a higher attempt. Delivery is at-least-once: write handlers that
   cope with a repeat.
+- Runner clocks must agree to well within `leaseSeconds`. A runner that is ahead by more
+  than the lease sees a live claim as expired and delivers the message again.
 - A handler must finish within `leaseSeconds`. After that another runner may deliver the
   message again, and the first runner's result is dropped.
 - A retry has the due time of its failure, so it goes behind messages sent after it. The order
   is strict only for messages that succeed the first time.
-- A doc in `queue_messages` that is not a valid message is parked, and `run()` goes on.
+- A doc in `queue_messages` that is not a valid message is parked, and `run()` goes on. A run
+  whose claim loses a race for good (`StoreConflictError`) moves to the next topic.
+- Parked messages and parked bad docs stay in the Store. There is no purge yet, so delete them
+  from `queue_messages` yourself. On D1 they slow each claim a little as they pile up.
 - Firestore needs two composite indexes on `queue_messages`: (`topic`, `state`, `due`) and
   (`topic`, `state`, `key`), each ascending. The emulator does not check indexes. Production
   Firestore refuses the queries until you create them.
