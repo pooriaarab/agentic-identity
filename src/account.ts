@@ -2,7 +2,7 @@
 // `AccountApp` port). Export joins every app's files into one zip with a manifest. Erase runs
 // every app's eraser and writes one audit entry per app. No Node API is used: a Worker can run it.
 import type { Doc, Store } from "./ports.js";
-import { auditEntry, type PrincipalContext } from "./core/principals.js";
+import { auditEntry, PRINCIPAL_KINDS, type PrincipalContext } from "./core/principals.js";
 
 export interface AccountFile {
   /** A relative path inside the app's folder, with `/` separators. */
@@ -35,7 +35,7 @@ export interface AccountManifest {
 
 export interface AccountOptions {
   now?: () => number;
-  /** Who runs the request. It goes in the audit entries. `null` is recorded as anonymous. */
+  /** Who runs the request. It goes in the audit entries. `eraseAccount` needs it: `null` is recorded as anonymous on purpose, a missing value is an error. */
   actor?: PrincipalContext | null;
 }
 
@@ -174,7 +174,7 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
       for (const file of files) {
         checkPath(file.path);
         // Compared without case: a Windows or macOS unzip would let one file overwrite the other.
-        const key = file.path.toLowerCase();
+        const key = file.path.normalize("NFC").toLowerCase();
         if (paths.has(key)) throw new Error("duplicate file path");
         for (let cut = key.indexOf("/"); cut !== -1; cut = key.indexOf("/", cut + 1)) {
           if (paths.has(key.slice(0, cut))) throw new Error("file path under a file");
@@ -262,12 +262,14 @@ export interface EraseReport {
 export async function eraseAccount(subject: string, apps: AccountApp[], store: Pick<Store, "put" | "get">, options: AccountOptions = {}): Promise<EraseReport> {
   if (typeof subject !== "string" || subject === "") throw new Error("subject is required");
   checkApps(apps);
+  if (options.actor === undefined) throw new Error("actor is required: pass a principal, or null for an anonymous request");
+  if (options.actor !== null && !(PRINCIPAL_KINDS as readonly unknown[]).includes(options.actor.kind)) throw new Error("actor has no valid kind");
   const now = options.now ?? Date.now;
   // A clock that is broken fails before any eraser runs, so no erase goes without its entry.
   const first = now();
   if (typeof first !== "number" || !Number.isFinite(first)) throw new Error("now must return a finite number");
   // Found before the first eraser runs: an eraser may remove the principals this reads.
-  const actor = await actorFor(store, subject, options.actor ?? null);
+  const actor = await actorFor(store, subject, options.actor);
   const results: EraseResult[] = [];
   for (const app of apps) {
     let error: string | undefined;

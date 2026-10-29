@@ -103,7 +103,7 @@ describe("exportAccount", () => {
 
   test("refuses an empty app list", async () => {
     await expect(exportAccount("ana", [], { now })).rejects.toThrow("apps are required");
-    await expect(eraseAccount("ana", [], createMemoryStore(), { now })).rejects.toThrow("apps are required");
+    await expect(eraseAccount("ana", [], createMemoryStore(), { now , actor: null })).rejects.toThrow("apps are required");
   });
 
   test("refuses an empty subject", async () => {
@@ -117,7 +117,7 @@ describe("eraseAccount", () => {
   test("erases every app and audits each one", async () => {
     const store = createMemoryStore();
     const erased: string[] = [];
-    const report = await eraseAccount("ana", [app("docs", [], erased), app("tasks", [], erased)], store, { now });
+    const report = await eraseAccount("ana", [app("docs", [], erased), app("tasks", [], erased)], store, { now , actor: null });
     expect(report).toEqual({ ok: true, results: [{ appId: "docs", ok: true, audited: true }, { appId: "tasks", ok: true, audited: true }] });
     expect(erased).toEqual(["docs:ana", "tasks:ana"]);
     const log = await entries(store);
@@ -162,7 +162,7 @@ describe("eraseAccount", () => {
   test("a failing eraser is reported and the rest still run", async () => {
     const store = createMemoryStore();
     const erased: string[] = [];
-    const report = await eraseAccount("ana", [app("docs", [], erased, true), app("tasks", [], erased)], store, { now });
+    const report = await eraseAccount("ana", [app("docs", [], erased, true), app("tasks", [], erased)], store, { now , actor: null });
     expect(report.ok).toBe(false);
     expect(report.results.map((r) => [r.appId, r.ok])).toEqual([["docs", false], ["tasks", true]]);
     expect(report.results[0]!.error).toBe("boom");
@@ -194,7 +194,7 @@ describe("eraseAccount", () => {
   test("a failing audit write is reported and the erase goes on", async () => {
     const erased: string[] = [];
     const store = { get: async () => null, put: async () => { throw new Error("audit down"); } };
-    const report = await eraseAccount("ana", [app("docs", [], erased), app("tasks", [], erased)], store, { now });
+    const report = await eraseAccount("ana", [app("docs", [], erased), app("tasks", [], erased)], store, { now , actor: null });
     expect(report.ok).toBe(false);
     expect(report.results.map((r) => [r.ok, r.audited])).toEqual([[true, false], [true, false]]);
     expect(erased).toHaveLength(2);
@@ -202,8 +202,8 @@ describe("eraseAccount", () => {
 
   test("refuses an empty subject and bad apps before any erase", async () => {
     const erased: string[] = [];
-    await expect(eraseAccount("", [app("docs", [], erased)], createMemoryStore(), { now })).rejects.toThrow("subject is required");
-    await expect(eraseAccount("ana", [app("docs", [], erased), app("Bad", [], erased)], createMemoryStore(), { now })).rejects.toThrow("invalid app id");
+    await expect(eraseAccount("", [app("docs", [], erased)], createMemoryStore(), { now , actor: null })).rejects.toThrow("subject is required");
+    await expect(eraseAccount("ana", [app("docs", [], erased), app("Bad", [], erased)], createMemoryStore(), { now , actor: null })).rejects.toThrow("invalid app id");
     expect(erased).toEqual([]);
   });
 });
@@ -215,6 +215,17 @@ describe("case, content text, and a clock that throws", () => {
     await expect(exportAccount("ana", [app("docs", [f("A"), f("a/b")])], { now })).rejects.toThrow("docs");
     await expect(exportAccount("ana", [app("docs", [f("a", "\ud800")])], { now })).rejects.toThrow("docs");
   });
+  test("eraseAccount needs an actor, a valid kind, and treats null as anonymous", async () => {
+    const erased: string[] = [];
+    const store = createMemoryStore();
+    await expect(eraseAccount("ana", [app("docs", [], erased)], store, { now })).rejects.toThrow("actor is required");
+    await expect(eraseAccount("ana", [app("docs", [], erased)], store, { now, actor: { principalId: "x", chain: [] } as never })).rejects.toThrow("valid kind");
+    expect(erased).toEqual([]);
+  });
+  test("paths that differ by Unicode form clash", async () => {
+    const f = (path: string): AccountFile => ({ path, content: "x" });
+    await expect(exportAccount("ana", [app("docs", [f("\u00e9"), f("e\u0301")])], { now })).rejects.toThrow("docs");
+  });
   test("a clock that throws after the first call still leaves an entry for each erase", async () => {
     const store = createMemoryStore();
     let calls = 0;
@@ -222,7 +233,7 @@ describe("case, content text, and a clock that throws", () => {
       if (++calls > 1) throw new Error("clock");
       return 1_700_000_000_000;
     };
-    const report = await eraseAccount("ana", [app("docs"), app("tasks")], store, { now: clock });
+    const report = await eraseAccount("ana", [app("docs"), app("tasks")], store, { now: clock , actor: null });
     expect(report.results.map((r) => r.audited)).toEqual([true, true]);
   });
 });
@@ -230,7 +241,7 @@ describe("case, content text, and a clock that throws", () => {
 describe("clock and zip names", () => {
   test("eraseAccount refuses a clock that is not finite before any eraser runs", async () => {
     const erased: string[] = [];
-    await expect(eraseAccount("ana", [app("docs", [], erased)], createMemoryStore(), { now: () => NaN })).rejects.toThrow("finite");
+    await expect(eraseAccount("ana", [app("docs", [], erased)], createMemoryStore(), { now: () => NaN , actor: null })).rejects.toThrow("finite");
     expect(erased).toEqual([]);
   });
   test("writeZip refuses two files with the same name", () => {
