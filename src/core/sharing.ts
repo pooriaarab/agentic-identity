@@ -288,11 +288,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
      * never carries an address: it says whether the invite is for an email or for a handle.
      */
     async listInvites(ctx: PrincipalContext, resourceId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ invites: InviteSummary[]; nextCursor?: string }> {
-      const limit = options.limit ?? AUDIT_PAGE;
-      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE) throw new RangeError(`limit must be a whole number from 1 to ${MAX_AUDIT_PAGE}`);
-      if (options.cursor !== undefined && typeof options.cursor !== "string") throw new Error("invalid cursor");
+      const paging = pageOf(options);
       await requireAdmin(ctx, resourceId);
-      const page = await store.query("invites", { where: { resourceId }, limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
+      const page = await store.query("invites", { where: { resourceId }, ...paging });
       const invites = page.items.map(({ data: d }): InviteSummary => ({
         id: d.id as string, resourceId, role: d.role as Role, for: d.email !== undefined ? "email" : "handle",
         ...(typeof d.handle === "string" ? { handle: d.handle } : {}),

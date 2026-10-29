@@ -113,3 +113,29 @@ it("refuses a file that holds a doc that is not an object", async () => {
     await expect(createFileStore({ path }).get("principals", "x")).rejects.toThrow("not an agentic-identity store file");
   }
 });
+
+it("refuses a write when the file was read again in this process after the transaction began", async () => {
+  const path = pathFor();
+  const [one, two] = [createFileStore({ path }), createFileStore({ path })];
+  await one.put("docs", "a", { n: 0 });
+  await expect(
+    one.transaction(async (tx) => {
+      const a = await tx.get("docs", "a");
+      // Another process saves a = 10. A second store here reads the file again, then this write lands.
+      writeFileSync(`${path}.other`, JSON.stringify({ format: 1, collections: { docs: { a: { n: 10 } } } }));
+      renameSync(`${path}.other`, path);
+      await two.get("docs", "a");
+      await tx.put("docs", "a", { n: (a?.n as number) + 1 });
+    }),
+  ).rejects.toThrow(StoreConflictError);
+  expect(onDisk(path).docs.a).toEqual({ n: 10 });
+  expect(await one.get("docs", "a")).toEqual({ n: 10 });
+});
+
+it("does not show the start of a file that is not a store", async () => {
+  const path = pathFor();
+  writeFileSync(path, "jo@ex.io");
+  const error = await createFileStore({ path }).get("docs", "a").catch((e: Error) => e);
+  expect(String(error)).toContain("not an agentic-identity store file");
+  expect(String(error)).not.toContain("ex.io");
+});

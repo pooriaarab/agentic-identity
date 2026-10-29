@@ -157,10 +157,12 @@ export const COMMANDS: Command[] = [
       { name: "handle", type: "string", description: "The handle of the agent. Give this or an email." },
       expiresInMs,
     ],
-    run: async (app, args) =>
-      createSharing(app.store, { now: app.now }).createInvite(await app.actor(), str(args, "resource"), {
+    run: async (app, args) => {
+      if ((args.email === undefined) === (args.handle === undefined)) throw new UsageError("give an email or a handle, not both");
+      return createSharing(app.store, { now: app.now }).createInvite(await app.actor(), str(args, "resource"), {
         role: str(args, "role") as Role, ...opt(args.email as string | undefined, "email"), ...opt(args.handle as string | undefined, "handle"), ...opt(args["expires-in-ms"] as number | undefined, "expiresInMs"),
-      }),
+      });
+    },
   },
   {
     path: ["invites", "accept"], tool: "identity_invites_accept", summary: "Accept an invite as the actor.",

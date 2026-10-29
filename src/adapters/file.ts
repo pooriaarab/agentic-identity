@@ -38,7 +38,13 @@ function readFile(path: string): Map<string, Map<string, Doc>> {
   const mirror = new Map<string, Map<string, Doc>>();
   if (!existsSync(path)) return mirror;
   const bad = () => new Error(`${path} is not an agentic-identity store file`);
-  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  // The message of a parse error quotes the start of the input, so it must not reach the caller.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw bad();
+  }
   const collections = isDoc(parsed) && parsed.format === FORMAT ? parsed.collections : undefined;
   if (!isDoc(collections)) throw bad();
   for (const [name, docs] of Object.entries(collections)) {
@@ -73,15 +79,28 @@ const refresh = async (shared: Shared) => {
   if (shared.seen !== signature(shared.path)) await load(shared);
 };
 
+const unlinkQuietly = (path: string) => {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Already gone.
+  }
+};
+
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** One writer at a time, across processes. A lock that a crash left behind is removed after a while. */
-function withLock<R>(path: string, fn: () => R): R {
+/**
+ * One writer at a time, across processes. A lock that a crash left behind is removed after a while.
+ * Two waiters can both remove such a lock and both take a new one, so `fn` gets `owned`, which it
+ * calls just before it renames the file: it is false when another process took the lock over.
+ */
+function withLock<R>(path: string, fn: (owned: () => boolean) => R): R {
   const lock = `${path}.lock`;
+  const mine = `${process.pid}:${crypto.randomUUID()}`;
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   for (const start = Date.now(); ; ) {
     try {
-      closeSync(openSync(lock, "wx", 0o600));
+      writeFileSync(lock, mine, { flag: "wx", mode: 0o600 });
       break;
     } catch (error) {
       if ((error as { code?: string }).code !== "EEXIST") throw error;
@@ -94,10 +113,18 @@ function withLock<R>(path: string, fn: () => R): R {
       sleep(10);
     }
   }
+  const owned = () => {
+    try {
+      return readFileSync(lock, "utf8") === mine;
+    } catch {
+      return false;
+    }
+  };
   try {
-    return fn();
+    return fn(owned);
   } finally {
-    unlinkSync(lock);
+    // Never remove a lock that another process holds now. A failed unlock must not hide the result.
+    if (owned()) unlinkQuietly(lock);
   }
 }
 
@@ -109,7 +136,7 @@ function commit(shared: Shared, used: Store, writes: Write[]): void {
   try {
     // An in-process call that read the file again since this one began has newer data than this one.
     if (shared.inner !== used) throw new StoreConflictError();
-    withLock(shared.path, () => {
+    withLock(shared.path, (owned) => {
       if (shared.seen !== signature(shared.path)) throw new StoreConflictError("the store file changed during the write");
       const next = new Map([...shared.mirror].map(([name, docs]) => [name, new Map(docs)]));
       for (const { collection, id, doc } of writes) {
@@ -127,6 +154,10 @@ function commit(shared: Shared, used: Store, writes: Write[]): void {
         closeSync(fd);
       }
       chmodSync(temp, 0o600);
+      if (!owned()) {
+        unlinkQuietly(temp);
+        throw new StoreConflictError("the store file lock was taken over");
+      }
       renameSync(temp, shared.path);
       shared.mirror = next;
       shared.seen = signature(shared.path);

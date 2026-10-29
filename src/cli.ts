@@ -117,6 +117,6 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
     return 0;
   } catch (error) {
     io.err(`error: ${error instanceof Error ? error.message : String(error)}`);
-    return error instanceof UsageError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
+    return error instanceof UsageError || error instanceof RangeError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? 2 : 1;
   }
 }

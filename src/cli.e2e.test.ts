@@ -1,6 +1,6 @@
 // Spawns the real CLI on a store file. Each step is a separate process, so it also shows that the file keeps the data.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
@@ -8,7 +8,6 @@ import { COMMANDS } from "./commands.js";
 import { bundleEntry } from "./test-bundle.js";
 
 let bin = "";
-let linkToken = "";
 const store = join(mkdtempSync(join(tmpdir(), "ai-cli-")), "store.json");
 beforeAll(async () => {
   bin = await bundleEntry("src/cli-bin.ts");
@@ -89,7 +88,7 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     expect(run("grants", "list", "doc1").json().grants).toHaveLength(1);
 
     const invite = run("invites", "create", "doc1", "editor", "--handle", "helper").json();
-    expect(run("invites", "create", "doc1", "editor").code).toBe(1);
+    expect(run("invites", "create", "doc1", "editor").code).toBe(2);
     expect(run("invites", "list", "doc1").json().invites).toMatchObject([{ id: invite.id, for: "handle", handle: "helper", role: "editor" }]);
     expect(run("--as", agent.id, "invites", "accept", invite.id).json()).toEqual({ ok: true });
     expect(run("--as", agent.id, "invites", "accept", invite.id).code).toBe(1);
@@ -101,7 +100,6 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
 
     const link = run("links", "create", "doc1", "viewer").json();
     expect(link.token).toBeTypeOf("string");
-    linkToken = link.token;
     expect(run("links", "resolve", "doc1", link.token).json()).toEqual({ allowed: true, role: "viewer" });
     expect(run("links", "resolve", "doc1", link.token, "--action", "write").json()).toMatchObject({ allowed: false });
     expect(run("links", "revoke", link.id).json()).toEqual({ ok: true });
@@ -112,8 +110,23 @@ describe("agentic-identity CLI", { timeout: 60_000 }, () => {
     expect(audit.find((e) => e.action === "invite.accept")).toMatchObject({ principalKind: "agent", machineMade: true });
   });
 
-  test("the store file is private and holds no link token", () => {
+  test("a signed-in-only link gives nothing to a visitor, and a usage error exits 2", () => {
+    run("resources", "create", "doc", "--id", "doc2");
+    const link = run("links", "create", "doc2", "viewer", "--signed-in-only").json();
+    expect(run("links", "resolve", "doc2", link.token).json()).toEqual({ allowed: false });
+    expect(run("invites", "create", "doc2", "viewer").code).toBe(2);
+    expect(run("audit", "doc2", "--limit", "0").code).toBe(2);
+    // The file is private and keeps no token, only its hash.
     expect(statSync(store).mode & 0o777).toBe(0o600);
-    expect(readFileSync(store, "utf8")).not.toContain(linkToken);
+    expect(readFileSync(store, "utf8")).not.toContain(link.token);
+  });
+
+  test("a file that is not a store is refused without showing it", () => {
+    const stray = join(mkdtempSync(join(tmpdir(), "ai-stray-")), "contacts.txt");
+    writeFileSync(stray, "jo@ex.io\nalice.secret@example.com\n");
+    const r = spawnSync(process.execPath, [bin, "--store", stray, "whoami"], { encoding: "utf8" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("not an agentic-identity store file");
+    expect(r.stderr + r.stdout).not.toMatch(/ex\.io|example\.com/);
   });
 });

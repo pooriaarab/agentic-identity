@@ -49,6 +49,16 @@ describe("agents create", () => {
   });
 });
 
+describe("principals list", () => {
+  test("shows ids, kinds, handles, and scopes, and nothing else a record holds", async () => {
+    const { store, run } = await setup();
+    await store.put("principals", "ann", { id: "ann", kind: "human", scopes: ["doc:read"], email: "ann@example.com", tokenHash: "abc" });
+    const { principals } = (await run(undefined, ["principals", "list"], {})) as { principals: Record<string, unknown>[] };
+    expect(principals.find((p) => p.id === "ann")).toEqual({ id: "ann", kind: "human", scopes: ["doc:read"] });
+    expect(JSON.stringify(principals)).not.toMatch(/example\.com|tokenHash/);
+  });
+});
+
 describe("the actor", () => {
   test("an unknown, revoked, or expired actor is refused by every command", async () => {
     const { store, run, tick } = await setup();
