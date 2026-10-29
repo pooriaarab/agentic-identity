@@ -53,7 +53,7 @@ export async function openApp(store: Store, options: { as?: string; now?: () => 
     now,
     async actor() {
       const found = await resolveChain(as, async (id) => ((await store.get("principals", id)) ?? undefined) as unknown as Principal | undefined, { now: now() });
-      if (!found.ok) throw new UsageError(`cannot act as "${as}": ${found.reason} at "${found.at}"`);
+      if (!found.ok) throw new UsageError(`cannot act as the chosen principal: ${found.reason}`);
       return found;
     },
   };

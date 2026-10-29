@@ -73,8 +73,11 @@ function parseCommand(command: Command, rest: string[], extra: string[]): { valu
     store: { type: "string" }, as: { type: "string" }, help: { type: "boolean", short: "h" },
     ...Object.fromEntries(command.args.filter((a) => !a.positional).map((a) => [a.name, { type: a.type === "boolean" ? "boolean" : "string" } as const])),
   };
-  // The last value of a repeated flag would win, so a flag that picks who acts or where must come once.
-  for (const name of ["--as", "--store"]) if (rest.slice(0, rest.indexOf("--") < 0 ? rest.length : rest.indexOf("--")).filter((t) => t === name || t.startsWith(`${name}=`)).length > 1) throw new UsageError(`give ${name} once`);
+  // The last value of a repeated flag would win, so a flag may come once.
+  const upTo = rest.indexOf("--") < 0 ? rest.length : rest.indexOf("--");
+  const named = rest.slice(0, upTo).filter((t) => t.startsWith("--")).map((t) => t.split("=")[0]);
+  const again = named.find((t, i) => named.indexOf(t) !== i);
+  if (again) throw new UsageError(`give ${again} once`);
   const parsed = parseArgs({ args: rest, options, allowPositionals: true, strict: true });
   const values: Args = {};
   const positional = command.args.filter((a) => a.positional);
@@ -86,7 +89,7 @@ function parseCommand(command: Command, rest: string[], extra: string[]): { valu
     if (raw === undefined) continue;
     if (a.type === "number") {
       const n = Number(raw);
-      if (typeof raw !== "string" || raw.trim() === "" || !Number.isFinite(n)) throw new UsageError(`--${a.name} must be a number`);
+      if (typeof raw !== "string" || !/^[0-9]{1,15}$/.test(raw) || !Number.isFinite(n)) throw new UsageError(`--${a.name} must be a whole number`);
       values[a.name] = n;
     } else values[a.name] = a.type === "list" ? String(raw).split(",").map((s) => s.trim()).filter(Boolean) : (raw as string | boolean);
   }
@@ -101,7 +104,7 @@ export async function runCli(argv: string[], env: Record<string, string | undefi
     const help = flags.includes("--help") || flags.includes("-h");
     if (!command) {
       if (found.length === 0 || help) return io.out(mainHelp()), found.length === 0 && !help ? 2 : 0;
-      throw new UsageError(`unknown command "${found.join(" ")}". Run with --help.`);
+      throw new UsageError("unknown command. Run with --help.");
     }
     if (help) return io.out(commandHelp(command)), 0;
     const { values, globals } = parseCommand(command, rest, extra);

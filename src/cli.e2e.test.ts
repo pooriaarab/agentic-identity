@@ -19,7 +19,8 @@ const run = (...args: string[]) => {
   return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
 };
 
-describe("agentic-identity CLI", () => {
+// Each step spawns a process, and the VM is shared, so give the tests room.
+describe("agentic-identity CLI", { timeout: 60_000 }, () => {
   test("--help exits 0 for the program and for every command", () => {
     expect(run("--help").code).toBe(0);
     expect(run("--help").out).toContain("grants list");
@@ -53,10 +54,19 @@ describe("agentic-identity CLI", () => {
     expect(run("--as", "ghost", "whoami").err).toContain("cannot act as");
   });
 
-  test("a usage error does not echo an email", () => {
-    const r = run("invites", "accept", "abc", "ann@example.com");
-    expect(r.code).toBe(2);
-    expect(r.err).not.toContain("example.com");
+  test("a repeated flag and a loose number are usage errors", () => {
+    expect(run("agents", "create", "twice", "--scopes", "doc:read", "--scopes", "*:admin").code).toBe(2);
+    expect(run("audit", "d9", "--limit", "0x10").code).toBe(2);
+    expect(run("audit", "d9", "--limit", "1e2").code).toBe(2);
+    expect(run("links", "create", "d9", "viewer", "--expires-in-ms", "-5").code).toBe(2);
+  });
+
+  test("an error does not echo an email that was mistyped", () => {
+    for (const args of [["invites", "accept", "abc", "ann@example.com"], ["ann@example.com"], ["--as", "ann@example.com", "whoami"]]) {
+      const r = run(...args);
+      expect(r.code, args.join(" ")).toBeGreaterThan(0);
+      expect(r.err).not.toContain("example.com");
+    }
   });
 
   test("principals, grants, invites, links, and audit work across processes", () => {

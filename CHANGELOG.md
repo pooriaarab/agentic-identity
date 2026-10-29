@@ -4,6 +4,7 @@
 
 ### Added
 
+- The `agentic-identity` CLI works on a local JSON file: `whoami`, `principals list`, `agents create`, `resources create`, `grants set|revoke|list`, `invites create|accept|list`, `links create|revoke|resolve`, and `audit`. It prints JSON. `createFileStore` (`agentic-identity/file`) is a `Store` on a JSON file and passes the `Store` and audit contract suites. `listInvites(ctx, resourceId)` lists the invites on a resource, an owner only, with no email.
 - `createFirestoreBlobs` in `agentic-identity/firestore` is a `Blobs` adapter on Firestore docs. It cuts an object into chunk docs and swaps a meta doc in one transaction, so `ifMatch` and `ifNoneMatch` hold. It passes the `Blobs` contract suite.
 - The CI job `firestore-emulator` runs the `Store`, audit, and `Blobs` contract suites against the Firestore emulator. It fails when the emulator is not up, so it cannot pass on the fake.
 - `verifySignedBlobUrl` is also exported from `agentic-identity/firestore`. Signed URLs share one module with the R2 adapter.
@@ -16,7 +17,6 @@
 
 ### Added
 
-- The `agentic-identity` CLI works on a local JSON file: `whoami`, `principals list`, `agents create`, `resources create`, `grants set|revoke|list`, `invites create|accept|list`, `links create|revoke|resolve`, and `audit`. It prints JSON. `createFileStore` (`agentic-identity/file`) is a `Store` on a JSON file and passes the `Store` and audit contract suites. `listInvites(ctx, resourceId)` lists the invites on a resource, an owner only, with no email.
 - `agentic-identity/firestore` has a Firestore `Store` over the REST API with an injected `fetch`. The `Store` contract suite runs against the emulator when `FIRESTORE_EMULATOR_HOST` is set, and against an in-process fake of the REST surface otherwise (CI uses the fake). The contract has a new case for paging over non-ASCII ids and values.
 - Every grant, revoke, invite, accept, link create, link revoke, key create, key rotate, and key revoke writes an audit entry in the same transaction as the change, so a change cannot commit without its entry. An export and an erase write theirs as separate steps (see below). An entry holds the actor (id, kind, chain, root), the target kind and id, the action, the time, and the request id. It holds no email, handle, key, or link token. `CHANGE_ACTIONS` lists the actions.
 - The Worker makes a request id for each request, returns it in `x-request-id`, and ignores a value from the caller.

@@ -100,13 +100,14 @@ await client.createResource({ id: "plan", type: "doc" });
 - OIDC discovery and the JWKS load on every sign-in. There is no cache yet. Only RS256 id tokens are accepted.
 - The per-IP budgets read `CF-Connecting-IP`. Cloudflare sets that header and replaces any value a client sends. Without Cloudflare in front, a client can send any value, and requests without the header share one budget. Serve the Worker through Cloudflare to count per IP.
 - `POST /test/token` is for tests only. Never set `IDENTITY_UNSAFE_TEST_MINT=1` in production.
-- The CLI and the MCP server cannot list the audit log, because they do not exist yet. Use the API or the SDK.
+- The MCP server does not exist yet. The CLI reads the audit log of a resource (`audit`), and it works on a local file only.
 
 ## CLI
 
 The CLI works on a local JSON file. It does not call the Worker. It prints JSON
 on stdout. An error goes to stderr as `error: <message>`. The exit code is 0 for
-success, 1 for a refused or failed action, and 2 for a usage error.
+success, 1 for a refused or failed action, and 2 for a usage error (this includes
+an acting principal that is unknown, revoked, or expired).
 
 ```sh
 npx agentic-identity resources create doc --id plan
@@ -140,7 +141,8 @@ Every command has `--help`. The commands are:
 - `invites list` shows no email.
 - Several processes can use one file. Each command reads the file again when
   another process changed it. A write that another process overtook fails with
-  "the data changed during the transaction" and changes nothing. Run it again.
+  an error such as "the store file changed during the write" and changes
+  nothing. Run it again.
 - The same file store is available as `createFileStore` from `agentic-identity/file`.
 
 ## Principals and scopes
