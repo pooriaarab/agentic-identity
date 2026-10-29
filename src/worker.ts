@@ -2,7 +2,7 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { D1_SCHEMA, createD1Store, type D1Like } from "./adapters/cloudflare.js";
-import { beginLogin, callbackUri, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
+import { beginLogin, callbackUri, checkCallbackPath, finishLogin, oidcProvider, type OidcProviderConfig } from "./core/oidc.js";
 import { ACTIONS, hasScope, isScope, type Principal, type PrincipalContext, type Scope } from "./core/principals.js";
 import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
@@ -70,9 +70,10 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const limiter = deps.limiter ?? createStoreRateLimiter(store, { now });
   const limits = { ...DEFAULT_LIMITS, ...config.rateLimits };
   const customPath = config.signIn?.provider.callbackPath;
+  if (customPath !== undefined) checkCallbackPath(customPath);
   if (customPath !== undefined && (customPath === "/api/v1" || customPath.startsWith("/api/v1/"))) throw new Error("callbackPath must be outside /api/v1");
-  // The flow cookie must reach the callback, so a path outside /api/v1/auth needs the cookie on /.
-  const flowCookiePath = customPath === undefined ? "/api/v1/auth" : "/";
+  // The flow cookie must reach the callback, so it uses the callback path when that is custom.
+  const flowCookiePath = customPath === undefined ? "/api/v1/auth" : customPath;
   // Built on use, so a bad PUBLIC_URL fails the sign-in routes only.
   const redirectUri = () => callbackUri(config.signIn!.provider, config.signIn!.publicUrl);
 
@@ -425,6 +426,7 @@ let warned = false;
 
 /** The Worker config from the env. A bad OIDC setting throws, so the Worker does not start. */
 export function workerConfig(env: Pick<Env, "IDENTITY_UNSAFE_TEST_MINT" | "OIDC_ISSUER" | "OIDC_CLIENT_ID" | "OIDC_CLIENT_SECRET" | "OIDC_CALLBACK_PATH" | "PUBLIC_URL">): WorkerConfig {
+  if (env.OIDC_CALLBACK_PATH !== undefined && !(env.OIDC_ISSUER && env.PUBLIC_URL)) throw new Error("OIDC_CALLBACK_PATH needs OIDC_ISSUER and PUBLIC_URL");
   const provider = env.OIDC_ISSUER ? oidcProvider({ issuer: env.OIDC_ISSUER, clientId: env.OIDC_CLIENT_ID ?? "", clientSecret: env.OIDC_CLIENT_SECRET ?? "", ...(env.OIDC_CALLBACK_PATH !== undefined ? { callbackPath: env.OIDC_CALLBACK_PATH } : {}) }) : undefined;
   return { unsafeTestMint: env.IDENTITY_UNSAFE_TEST_MINT === "1", ...(provider && env.PUBLIC_URL ? { signIn: { provider, publicUrl: env.PUBLIC_URL } } : {}) };
 }

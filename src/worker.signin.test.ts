@@ -85,6 +85,7 @@ describe("worker env", () => {
     expect(workerConfig(env).signIn?.provider.callbackPath).toBeUndefined();
     expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "" })).toThrow("callbackPath");
     expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "/*" })).toThrow("callbackPath");
+    expect(() => workerConfig({ ...env, OIDC_CALLBACK_PATH: "/auth/done", PUBLIC_URL: undefined })).toThrow("needs OIDC_ISSUER and PUBLIC_URL");
   });
 });
 
@@ -123,7 +124,9 @@ describe("sign-in", () => {
   test("the flow cookie covers a custom callback path, and a path inside /api/v1 is refused", async () => {
     const custom = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/auth/done" });
     const s = await setup({ signIn: { provider: custom, publicUrl: "https://app.test" } });
-    expect((await s.login()).res.headers.get("set-cookie")).toMatch(/Path=\/(;|$)/);
+    expect((await s.login()).res.headers.get("set-cookie")).toMatch(/Path=\/auth\/done(;|$)/);
+    const byHand = { ...custom, callbackPath: "*" };
+    expect(() => createApp({ store: createMemoryStore(), config: { signIn: { provider: byHand, publicUrl: "https://app.test" }, unsafeTestMint: false } })).toThrow("callbackPath");
     const inside = oidcProvider({ issuer: ISSUER, clientId: "client", clientSecret: "secret", callbackPath: "/api/v1/me" });
     expect(() => createApp({ store: createMemoryStore(), config: { signIn: { provider: inside, publicUrl: "https://app.test" }, unsafeTestMint: false } })).toThrow("outside /api/v1");
   });

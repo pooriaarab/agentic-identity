@@ -17,6 +17,11 @@ export const DEFAULT_CALLBACK_PATH = "/api/v1/auth/callback";
 /** The redirect URI for a provider: the origin of `origin` and the provider's callback path. Use it for both `beginLogin` and `finishLogin`. */
 export const callbackUri = (provider: Pick<OidcProviderConfig, "callbackPath">, origin: string): string => `${new URL(origin).origin}${provider.callbackPath ?? DEFAULT_CALLBACK_PATH}`;
 
+/** Throws for a callbackPath that is not plain segments. A provider made by hand must pass it too. */
+export function checkCallbackPath(path: string): void {
+  if (!/^(\/[A-Za-z0-9_~-]+(\.[A-Za-z0-9_~-]+)*)+\/?$/.test(path)) throw new Error("callbackPath must be an absolute path of letters, digits, and - _ . ~ segments");
+}
+
 export function oidcProvider(config: { issuer: string; clientId: string; clientSecret: string; scopes?: string[]; callbackPath?: string }): OidcProviderConfig {
   let url: URL;
   try {
@@ -31,9 +36,7 @@ export function oidcProvider(config: { issuer: string; clientId: string; clientS
   const scopes = config.scopes ?? ["openid", "email", "profile"];
   if (!scopes.includes("openid")) throw new Error("scopes must include openid");
   const path = config.callbackPath;
-  if (path !== undefined && !/^(\/[A-Za-z0-9_~-]+(\.[A-Za-z0-9_~-]+)*)+\/?$/.test(path)) {
-    throw new Error("callbackPath must be an absolute path of letters, digits, and - _ . ~ segments");
-  }
+  if (path !== undefined) checkCallbackPath(path);
   return { issuer: config.issuer, clientId: config.clientId, clientSecret: config.clientSecret, scopes, ...(path === undefined || path === DEFAULT_CALLBACK_PATH ? {} : { callbackPath: path }) };
 }
 
