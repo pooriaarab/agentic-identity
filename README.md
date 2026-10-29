@@ -7,7 +7,7 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.8.0 preview. This code has principals and delegation chains,
+> Status: 0.9.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, a Netlify Store and Blobs, a file Store and Blobs, a Store-backed Queue, Mail adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
@@ -319,6 +319,32 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   person, their agents, grants, and keys, and each resource that only they own.
   Both need the person's own session or key, not an agent or a token. A resource
   that someone else owns stays, even when it sits in a deleted folder.
+
+## Sign in with an email link
+
+`POST /api/v1/auth/magic` with `{ "email", "returnTo"? }` mails a sign-in link through the `Mail`
+port. The link opens `GET /api/v1/auth/magic/verify?token=...`, which sets the session cookie
+(`HttpOnly`, `Secure`, `SameSite=Lax`) and redirects to `returnTo` on your own origin (else `/`).
+
+```ts
+createApp({ store, mail: createHttpMail({ url, fetch, from, token }), config: { magicLink: { publicUrl: "https://app.example", appName: "Docs" }, unsafeTestMint: false } });
+```
+
+The Worker entry turns it on when `PUBLIC_URL`, `MAIL_FROM`, and a mail transport are set. The
+transport is `MAIL_HTTP_URL` (with `MAIL_HTTP_TOKEN`) for `createHttpMail`, or a `SEND_EMAIL`
+binding for `createCloudflareMail`. It is off (404) without them. OIDC is not needed.
+
+- The token is 32 random bytes. The store keeps only its SHA-256 hash, and the row is deleted when
+  it is used. A link works once and ends after 15 minutes. A bad, used, or expired link is a 400.
+- The answer is `202 { "ok": true }` for every valid address, known or not, and also when the mail
+  fails to send. Only a malformed address is a 400.
+- Budgets: 3 requests per address and 10 per IP in 10 minutes, and 600 for all callers in 15 minutes.
+  Over budget is a 429 with `Retry-After`. Set `rateLimits.magicEmail`, `magicIp`, or `magicAll`.
+- The person is `u_` plus a hash of the address, and the email is marked verified. It is a
+  different person than an OIDC sign-in with the same address: the two methods are not linked.
+- A mail scanner that opens links can use up a link. The person asks for a new one.
+- The link carries the token in the URL. The verify answer sets `Referrer-Policy: no-referrer` and
+  `Cache-Control: no-store`. No log line holds an address.
 
 ## SDK
 

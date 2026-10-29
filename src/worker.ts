@@ -8,19 +8,25 @@ import { recordChange } from "./core/audit.js";
 import { EraseRefusedError, createSharing, type Role, type SubjectKind } from "./core/sharing.js";
 import { deletePerson, exportPerson } from "./gdpr.js";
 import { createStoreAuth, issueCredential, randomToken, revokeCredential, sha256Hex } from "./credentials.js";
-import { StoreConflictError, parseRegion, type Store, type StoreOps } from "./ports.js";
+import { StoreConflictError, parseRegion, type Mail, type Store, type StoreOps } from "./ports.js";
+import { createCloudflareMail, createHttpMail } from "./adapters/mail.js";
 import { PrincipalAdminError, revokePrincipal, rotateKey } from "./principal-admin.js";
 import { createStoreRateLimiter, type RateLimiter, type RateRule } from "./ratelimit.js";
 
 export interface WorkerConfig {
   /** Sign-in is off (404) when this is missing. `publicUrl` is the origin of this Worker. */
   signIn?: { provider: OidcProviderConfig; publicUrl: string };
+  /** Email magic-link sign-in. It is off (404) when this or the `mail` dependency is missing. */
+  magicLink?: { publicUrl: string; appName?: string };
   sessionTtlMs?: number;
   /** Turns on `POST /test/token`, which makes a new person with narrow rights. For tests only. */
   unsafeTestMint: boolean;
   /** Requests per window. A principal counts at the root of its chain. */
-  rateLimits?: Partial<Record<"principal" | "ip" | "login" | "loginAll", RateRule>>;
+  rateLimits?: Partial<Record<"principal" | "ip" | "login" | "loginAll" | "magicIp" | "magicEmail" | "magicAll", RateRule>>;
 }
+
+/** A magic link works for 15 minutes, once. */
+const MAGIC_TTL_MS = 900_000;
 
 const DEFAULT_LIMITS = {
   principal: { limit: 60, windowMs: 60_000 },
@@ -28,6 +34,10 @@ const DEFAULT_LIMITS = {
   login: { limit: 20, windowMs: 60_000 },
   /** Sign-in starts for everyone in one flow lifetime. It caps the pending rows. */
   loginAll: { limit: 600, windowMs: 600_000 },
+  /** Magic-link requests per IP, per address, and for everyone in one link lifetime. */
+  magicIp: { limit: 10, windowMs: 600_000 },
+  magicEmail: { limit: 3, windowMs: 600_000 },
+  magicAll: { limit: 600, windowMs: MAGIC_TTL_MS },
 };
 
 const FLOW_TTL_MS = 600_000;
@@ -62,7 +72,7 @@ const fail = (status: HttpError["status"], message: string): never => {
   throw new HttpError(status, message);
 };
 
-export function createApp(deps: { store: Store; config: WorkerConfig; now?: () => number; fetch?: typeof fetch; limiter?: RateLimiter }) {
+export function createApp(deps: { store: Store; config: WorkerConfig; now?: () => number; fetch?: typeof fetch; limiter?: RateLimiter; mail?: Mail }) {
   const { store, config } = deps;
   const now = deps.now ?? Date.now;
   const auth = createStoreAuth(store, { now });
@@ -77,6 +87,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   const flowCookiePath = customPath === undefined ? "/api/v1/auth" : customPath;
   // Built on use, so a bad PUBLIC_URL fails the sign-in routes only.
   const redirectUri = () => callbackUri(config.signIn!.provider, config.signIn!.publicUrl);
+  const publicUrl = config.signIn?.publicUrl ?? config.magicLink?.publicUrl;
 
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status, error.retryAfterSeconds === undefined ? {} : { "retry-after": String(error.retryAfterSeconds) });
@@ -120,7 +131,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     // A page on another site can make the browser send the session cookie. It cannot set Origin
     // to ours, and it cannot add an Authorization header.
     const viaCookie = !/^Bearer [A-Za-z0-9_-]{1,512}$/.test(c.req.header("authorization") ?? "");
-    if (isWrite(c) && viaCookie && (!config.signIn || c.req.header("origin") !== new URL(config.signIn.publicUrl).origin)) return fail(403, "bad origin");
+    if (isWrite(c) && viaCookie && (!publicUrl || c.req.header("origin") !== new URL(publicUrl).origin)) return fail(403, "bad origin");
     if (isWrite(c)) await throttle(`principal:${ctx.chain[0]!.id}`, limits.principal);
     return handler(c, ctx);
   };
@@ -173,6 +184,54 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     setCookie(c, "session", await issueCredential(store, { principalId: id, kind: "session", expiresAt: now() + ttl }), { ...cookieFlags, path: "/", maxAge: ttl / 1000 });
     deleteCookie(c, "oidc_flow", { path: flowCookiePath });
     return c.redirect(flow.returnTo as string, 302);
+  });
+
+  // Sign in with a link sent by mail. The answer is the same for every address, so it never
+  // says whether an address is known. The token is random, lives 15 minutes, works once, and
+  // the store holds only its hash.
+  app.post("/auth/magic", async (c) => {
+    if (!config.magicLink || !deps.mail) return fail(404, "magic-link sign-in is not configured");
+    const input = await body(c);
+    const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
+    if (email.length > 254 || !/^[^\s\x00-\x1f\x7f@<>,;"]+@[^\s\x00-\x1f\x7f@<>,;"]+\.[^\s\x00-\x1f\x7f@<>,;"]+$/.test(email)) return fail(400, "bad email");
+    const origin = new URL(config.magicLink.publicUrl).origin;
+    const returnTo = safeReturnTo(typeof input.returnTo === "string" ? input.returnTo : "/", origin);
+    const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+    await throttle(`magic:ip:${ip}`, limits.magicIp);
+    await throttle(`magic:email:${email}`, limits.magicEmail);
+    await throttle("magic:all", limits.magicAll);
+    const stale = await store.query("magic_links", { orderBy: { field: "expiresAt" }, limit: 25 });
+    await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("magic_links", f.id)));
+    const token = randomToken(32);
+    await store.put("magic_links", await sha256Hex(token), { email, returnTo, expiresAt: now() + MAGIC_TTL_MS });
+    const link = `${origin}/api/v1/auth/magic/verify?token=${token}`;
+    const name = config.magicLink.appName ?? "your account";
+    // A send that fails looks the same as one that works, so the answer tells nothing about the address.
+    await deps.mail.send({ to: email, subject: `Sign in to ${name}`.slice(0, 200), text: `Open this link to sign in. It works once and ends in 15 minutes.\n\n${link}\n\nIf you did not ask for it, ignore this message.` }).catch(() => undefined);
+    return c.json({ ok: true }, 202);
+  });
+
+  app.get("/auth/magic/verify", async (c) => {
+    const token = c.req.query("token") ?? "";
+    // No Referer, and no cache: the URL holds the token.
+    c.header("referrer-policy", "no-referrer");
+    c.header("cache-control", "no-store");
+    if (!config.magicLink || !/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
+    const hash = await sha256Hex(token);
+    // The row is read and deleted together, so two clicks cannot both win.
+    const link = await store.transaction(async (tx) => {
+      const found = await tx.get("magic_links", hash);
+      await tx.delete("magic_links", hash);
+      return found;
+    });
+    if (!link || typeof link.email !== "string" || typeof link.returnTo !== "string" || typeof link.expiresAt !== "number" || !Number.isFinite(link.expiresAt) || link.expiresAt <= now()) return fail(400, "bad link");
+    const issuer = "magic-link";
+    const id = `u_${(await sha256Hex(`${issuer}|${link.email}`)).slice(0, 24)}`;
+    if (!(await store.get("principals", id))) await store.put("principals", id, { id, kind: "human", scopes: ["*:admin"] });
+    await store.put("users", id, { id, issuer, subject: link.email, emailVerified: true, email: link.email });
+    const ttl = config.sessionTtlMs ?? 28_800_000;
+    setCookie(c, "session", await issueCredential(store, { principalId: id, kind: "session", expiresAt: now() + ttl }), { ...cookieFlags, path: "/", maxAge: ttl / 1000 });
+    return c.redirect(safeReturnTo(link.returnTo, new URL(config.magicLink.publicUrl).origin), 302);
   });
 
   app.post("/auth/logout", authed(async (c) => {
@@ -407,6 +466,21 @@ interface Env {
   OIDC_CLIENT_ID?: string;
   OIDC_CLIENT_SECRET?: string;
   OIDC_CALLBACK_PATH?: string;
+  /** Magic-link mail. Set `MAIL_FROM` with `MAIL_HTTP_URL` (and `MAIL_HTTP_TOKEN`), or with a `SEND_EMAIL` binding. */
+  MAIL_FROM?: string;
+  MAIL_HTTP_URL?: string;
+  MAIL_HTTP_TOKEN?: string;
+  SEND_EMAIL?: { send(message: unknown): Promise<void> };
+}
+
+async function mailFromEnv(env: Env): Promise<Mail | undefined> {
+  if (!env.MAIL_FROM) return undefined;
+  const region = parseRegion(env.REGION);
+  if (env.MAIL_HTTP_URL) return createHttpMail({ url: env.MAIL_HTTP_URL, fetch: globalThis.fetch.bind(globalThis), from: env.MAIL_FROM, ...(env.MAIL_HTTP_TOKEN ? { token: env.MAIL_HTTP_TOKEN } : {}), region });
+  if (!env.SEND_EMAIL) return undefined;
+  const specifier = "cloudflare:email";
+  const { EmailMessage } = (await import(/* @vite-ignore */ specifier)) as { EmailMessage: new (from: string, to: string, raw: string) => unknown };
+  return createCloudflareMail(env.SEND_EMAIL, { from: env.MAIL_FROM, EmailMessage, region });
 }
 
 /** The test mint signs people in with no check. A config that names a region or an https URL is a real one. */
@@ -445,7 +519,8 @@ export default {
       throw error;
     });
     await schema;
-    const config = workerConfig(env);
-    return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config }).fetch(request);
+    const mail = env.PUBLIC_URL ? await mailFromEnv(env) : undefined;
+    const config = { ...workerConfig(env), ...(mail && env.PUBLIC_URL ? { magicLink: { publicUrl: env.PUBLIC_URL } } : {}) };
+    return createApp({ store: createD1Store(env.DB, { region: parseRegion(env.REGION) }), config, ...(mail ? { mail } : {}) }).fetch(request);
   },
 };
