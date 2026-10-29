@@ -212,6 +212,15 @@ describe("accept pending invites", () => {
     expect((await sharing.acceptPendingInvites(bo, { email: "bo@example.test" })).accepted).toBe(0);
   });
 
+  test("a revoked invite is skipped, and the live one still counts", async () => {
+    const revoked = await sharing.createInvite(ana, "folder", { role: "editor", email: "bo@example.test" });
+    await sharing.createInvite(ana, "child", { role: "viewer", email: "bo@example.test" });
+    await sharing.revokeInvite(ana, revoked.id);
+    expect((await sharing.acceptPendingInvites(bo, { email: "bo@example.test" })).accepted).toBe(1);
+    expect(await allowed(bo, "read", "folder")).toBe(false);
+    expect(await allowed(bo, "read", "child")).toBe(true);
+  });
+
   test("an unverified person, a delegated agent, and an agent with an email get nothing", async () => {
     await sharing.createInvite(ana, "folder", { role: "viewer", email: "bo@example.test" });
     expect((await sharing.acceptPendingInvites(bo, {})).accepted).toBe(0);
