@@ -30,8 +30,8 @@ export const googleProvider = (clientId: string, clientSecret: string): OidcProv
   oidcProvider({ issuer: "https://accounts.google.com", clientId, clientSecret });
 
 /**
- * Thrown by `finishLogin` for a refused code, a bad or rejected id token, or a bad discovery
- * document. The message holds no token and no claim. The Worker answers 401 for it.
+ * Thrown by `beginLogin` and `finishLogin` for a bad discovery document or an unreachable provider, and
+ * by `finishLogin` for a refused code or a bad or rejected id token. The message holds no token and no claim. The Worker answers 401 for it.
  */
 export class OidcError extends Error {}
 
@@ -40,9 +40,10 @@ const b64url = (bytes: ArrayBuffer | Uint8Array) => Buffer.from(bytes instanceof
 const randomToken = (bytes: number) => b64url(crypto.getRandomValues(new Uint8Array(bytes)));
 
 async function discover(provider: OidcProviderConfig, fetchImpl: Fetch) {
-  const res = await fetchImpl(`${provider.issuer}/.well-known/openid-configuration`);
-  const doc = (await res.json()) as Record<string, string>;
-  if (!res.ok || doc.issuer !== provider.issuer || !doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) throw new OidcError("bad discovery document");
+  // A provider that is down or answers with a page that is not JSON fails like a bad document.
+  const res = await fetchImpl(`${provider.issuer}/.well-known/openid-configuration`).catch(() => undefined);
+  const doc = (await res?.json().catch(() => undefined)) as Record<string, string> | null | undefined;
+  if (!res?.ok || typeof doc !== "object" || doc === null || doc.issuer !== provider.issuer || !doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) throw new OidcError("bad discovery document");
   return doc as { authorization_endpoint: string; token_endpoint: string; jwks_uri: string };
 }
 
@@ -64,9 +65,9 @@ export async function finishLogin(
 ): Promise<{ subject: string; email?: string; emailVerified: boolean }> {
   const doc = await discover(provider, fetchImpl);
   const form = new URLSearchParams({ grant_type: "authorization_code", code: input.code, redirect_uri: input.redirectUri, client_id: provider.clientId, client_secret: provider.clientSecret, code_verifier: input.verifier });
-  const tokenRes = await fetchImpl(doc.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form });
-  const idToken = ((await tokenRes.json().catch(() => ({}))) as { id_token?: unknown }).id_token;
-  if (!tokenRes.ok || typeof idToken !== "string") throw new OidcError("the provider refused the code");
+  const tokenRes = await fetchImpl(doc.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form }).catch(() => undefined);
+  const idToken = ((await tokenRes?.json().catch(() => ({}))) as { id_token?: unknown } | null)?.id_token;
+  if (!tokenRes?.ok || typeof idToken !== "string") throw new OidcError("the provider refused the code");
   const parts = idToken.split(".");
   if (parts.length !== 3) throw new OidcError("bad id token");
   try {
