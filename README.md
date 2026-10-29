@@ -349,6 +349,30 @@ if (who instanceof Response) return who;
 - An `Auth` that throws is a 503. A bad `kinds` or `scope` option throws a `RangeError`.
 - The body is `{"error": "..."}` and never holds the credential.
 
+### WebSocket sign-in
+
+A browser cannot set `Authorization` on a WebSocket. It can offer subprotocols, so the token
+rides in one. `principalFromWebSocketRequest` reads it and runs `requirePrincipal`.
+`acceptWebSocketProtocol` names the subprotocol on the 101 answer, because a browser closes a
+socket whose answer does not name an entry that it offered.
+
+```ts
+import { acceptWebSocketProtocol, principalFromWebSocketRequest } from "agentic-identity/http";
+
+const who = await principalFromWebSocketRequest(request, auth, { protocol: "agentic-docs", origins: ["https://app.example.org"] });
+if (who instanceof Response) return who;
+const room = await openRoom(request, who);
+return acceptWebSocketProtocol(request, room, "agentic-docs");
+// Browser: new WebSocket(url, ["agentic-docs", `agentic-docs.bearer.${base64url(token)}`])
+```
+
+- The browser offers `<protocol>` and `<protocol>.bearer.<token>`. The token is base64url of its UTF-8 text. Pass `encoding: "plain"` to send the token as it is.
+- A missing, malformed, repeated, or bad token is a 401. A token entry without the bare `<protocol>` is a 401 too.
+- A request that is not a WebSocket upgrade, or that has an `Authorization` header, ignores the subprotocol.
+- With no token, the session cookie works only from an `Origin` in `origins`. Otherwise it is a 403.
+- `acceptWebSocketProtocol` names only `<protocol>`, never the entry that holds the token. It changes only a 101 answer.
+- Kinds, scope, and the 503 answer work as in `requirePrincipal`.
+
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
