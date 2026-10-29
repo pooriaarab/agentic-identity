@@ -1,14 +1,9 @@
 // The contract suites run on a fake of the Netlify Blobs client (`netlify.fake.ts`). The local
 // `BlobsServer` of `@netlify/blobs` cannot run them: it checks a condition and then writes in two
-// steps, it builds an ETag from the file mtime, and it sends no ETag on a read. A second suite here
-// runs the adapters on the real client and that server, for what the server does right, and a
-// fidelity test runs one script on the fake and on the real client and compares them.
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { getStore } from "@netlify/blobs";
-import { BlobsServer } from "@netlify/blobs/server";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// steps, it builds an ETag from the file mtime, and it sends no ETag on a read. The real client and
+// that server run in `netlify.real.test.ts`, for what the server does right. `npm test` runs that
+// file too, and the CI job `netlify-real-client` runs it alone.
+import { describe, expect, it } from "vitest";
 import { StoreConflictError } from "../ports.js";
 import { runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
 import { NetlifyCommitUncertainError, createNetlifyBlobs, createNetlifyStore, verifySignedBlobUrl, type NetlifyStoreLike } from "./netlify.js";
@@ -399,69 +394,5 @@ describe("Netlify blobs", () => {
     await fake.set(key, new ArrayBuffer(1), { metadata: { size: "1" } });
     await expect(blobs.get("k".repeat(5000))).rejects.toThrow("bad metadata");
     await expect(blobs.head("k".repeat(5000))).rejects.toThrow("bad metadata");
-  });
-});
-
-// The real client on the official local server.
-describe("the real @netlify/blobs client on the local server", () => {
-  let server: BlobsServer;
-  let directory: string;
-  let real: NetlifyStoreLike;
-  beforeAll(async () => {
-    directory = mkdtempSync(join(tmpdir(), "netlify-blobs-"));
-    server = new BlobsServer({ directory, token: "t" });
-    const { port } = await server.start();
-    const url = `http://localhost:${port}`;
-    real = getStore({ name: "contract", siteID: "site", token: "t", apiURL: url, edgeURL: url, uncachedEdgeURL: url });
-  });
-  afterAll(async () => {
-    await server.stop();
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  it("tells an eventual store from a strong one", () => {
-    const url = "http://localhost:1";
-    const make = (consistency?: "strong") => getStore({ name: "c", siteID: "site", token: "t", apiURL: url, edgeURL: url, uncachedEdgeURL: url, ...(consistency ? { consistency } : {}) });
-    expect(() => strongStore(make() as unknown as NetlifyStoreLike)).toThrow("strong");
-    expect(() => strongStore(make("strong") as unknown as NetlifyStoreLike)).not.toThrow();
-  });
-
-  it("runs a conditional put, a refused put, and a delete through the adapter", async () => {
-    const blobs = createNetlifyBlobs(real, { region: "unknown", urlBase: URL_BASE, urlSecret: SECRET });
-    const first = (await blobs.put("k", Uint8Array.of(1, 2), { ifNoneMatch: "*", contentType: "text/plain" }))!;
-    expect(typeof first.version).toBe("string");
-    expect(await blobs.put("k", Uint8Array.of(9), { ifNoneMatch: "*" })).toBeNull();
-    expect(await blobs.put("k", Uint8Array.of(9), { ifMatch: "nope" })).toBeNull();
-    const second = (await blobs.put("k", Uint8Array.of(3), { ifMatch: first.version }))!;
-    expect(second.version).not.toBe(first.version);
-    const [{ key }] = (await real.list({ prefix: "b/" })).blobs;
-    expect(Buffer.from((await real.get(key, { type: "arrayBuffer", consistency: "strong" })) as ArrayBuffer)).toEqual(Buffer.from([3]));
-    expect((await real.getMetadata(key, { consistency: "strong" }))!.metadata).toMatchObject({ size: 1 });
-    await blobs.delete("k");
-    await blobs.delete("k");
-    expect(await real.getMetadata(key, { consistency: "strong" })).toBeNull();
-  });
-
-  it("answers the fake's script the same way", async () => {
-    const script = async (store: NetlifyStoreLike) => {
-      const log: unknown[] = [];
-      const shape = (r: { modified: boolean; etag?: string }) => ({ modified: r.modified, etag: r.etag ? "non-empty" : r.etag });
-      log.push(await store.get("x", { type: "text", consistency: "strong" }));
-      log.push(await store.getMetadata("x", { consistency: "strong" }));
-      const one = await store.set("p/x", "hi", { metadata: { size: 2 } });
-      log.push(shape(one), shape(await store.set("p/x", "again", { onlyIfNew: true })));
-      log.push(shape(await store.set("p/x", "no", { onlyIfMatch: '"stale"' })), shape(await store.set("p/none", "no", { onlyIfMatch: one.etag! })));
-      const two = await store.set("p/x", "two", { onlyIfMatch: one.etag! });
-      log.push(shape(two), two.etag !== one.etag);
-      log.push(await store.get("p/x", { type: "text", consistency: "strong" }));
-      log.push((await store.getMetadata("p/x", { consistency: "strong" }))!.metadata);
-      await store.set("q/y", "other");
-      log.push((await store.list({ prefix: "p/" })).blobs.map((b) => b.key), (await store.list({ prefix: "none/" })).blobs);
-      await store.delete("p/x");
-      await store.delete("p/x");
-      log.push(await store.get("p/x", { type: "text", consistency: "strong" }));
-      return log;
-    };
-    expect(await script(createFakeNetlifyStore())).toEqual(await script(real));
   });
 });
