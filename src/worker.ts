@@ -189,34 +189,54 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
   // Sign in with a link sent by mail. The answer is the same for every address, so it never
   // says whether an address is known. The token is random, lives 15 minutes, works once, and
   // the store holds only its hash.
+  const verifyPath = "/api/v1/auth/magic/verify";
   app.post("/auth/magic", async (c) => {
     if (!config.magicLink || !deps.mail) return fail(404, "magic-link sign-in is not configured");
     const input = await body(c);
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
-    if (email.length > 254 || !/^[^\s\x00-\x1f\x7f@<>,;"]+@[^\s\x00-\x1f\x7f@<>,;"]+\.[^\s\x00-\x1f\x7f@<>,;"]+$/.test(email)) return fail(400, "bad email");
+    if (email.length > 254 || email.endsWith(".") || !/^[^\s\x00-\x1f\x7f@<>,;"]+@[^\s\x00-\x1f\x7f@<>,;"]+\.[^\s\x00-\x1f\x7f@<>,;"]+$/.test(email)) return fail(400, "bad email");
     const origin = new URL(config.magicLink.publicUrl).origin;
     const returnTo = safeReturnTo(typeof input.returnTo === "string" ? input.returnTo : "/", origin);
     const ip = c.req.header("cf-connecting-ip") ?? "unknown";
     await throttle(`magic:ip:${ip}`, limits.magicIp);
-    await throttle(`magic:email:${email}`, limits.magicEmail);
     await throttle("magic:all", limits.magicAll);
+    await throttle(`magic:email:${email}`, limits.magicEmail);
     const stale = await store.query("magic_links", { orderBy: { field: "expiresAt" }, limit: 25 });
     await Promise.all(stale.items.filter((f) => !(typeof f.data.expiresAt === "number" && f.data.expiresAt > now())).map((f) => store.delete("magic_links", f.id)));
     const token = randomToken(32);
     await store.put("magic_links", await sha256Hex(token), { email, returnTo, expiresAt: now() + MAGIC_TTL_MS });
-    const link = `${origin}/api/v1/auth/magic/verify?token=${token}`;
+    const link = `${origin}${verifyPath}?token=${token}`;
     const name = config.magicLink.appName ?? "your account";
     // A send that fails looks the same as one that works, so the answer tells nothing about the address.
-    await deps.mail.send({ to: email, subject: `Sign in to ${name}`.slice(0, 200), text: `Open this link to sign in. It works once and ends in 15 minutes.\n\n${link}\n\nIf you did not ask for it, ignore this message.` }).catch(() => undefined);
+    await deps.mail.send({ to: email, subject: `Sign in to ${name}`.slice(0, 200), text: `Open this link to sign in. It works once and ends in 15 minutes.\n\n${link}\n\nIf you did not ask for it, ignore this message.` }).catch(() => console.warn("magic-link mail failed"));
     return c.json({ ok: true }, 202);
   });
 
-  app.get("/auth/magic/verify", async (c) => {
-    const token = c.req.query("token") ?? "";
+  const noLeak = (c: Context) => {
     // No Referer, and no cache: the URL holds the token.
     c.header("referrer-policy", "no-referrer");
     c.header("cache-control", "no-store");
-    if (!config.magicLink || !/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
+  };
+  // Opening the link only shows a button. A mail scanner or a HEAD request does not use the token up,
+  // and a page on another site cannot press the button for the person.
+  app.on(["GET", "HEAD"], "/auth/magic/verify", async (c) => {
+    noLeak(c);
+    const token = c.req.query("token") ?? "";
+    if (!config.magicLink) return fail(404, "magic-link sign-in is not configured");
+    if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
+    c.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
+    return c.html(
+      `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Sign in</title><main><h1>Sign in</h1><form method="post" action="${verifyPath}"><input type="hidden" name="token" value="${token}"><button type="submit">Continue</button></form></main></html>`,
+    );
+  });
+
+  app.post("/auth/magic/verify", async (c) => {
+    noLeak(c);
+    if (!config.magicLink) return fail(404, "magic-link sign-in is not configured");
+    if (c.req.header("origin") !== new URL(config.magicLink.publicUrl).origin) return fail(403, "bad origin");
+    const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
+    const token = typeof form.token === "string" ? form.token : "";
+    if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return fail(400, "bad link");
     const hash = await sha256Hex(token);
     // The row is read and deleted together, so two clicks cannot both win.
     const link = await store.transaction(async (tx) => {
@@ -231,7 +251,7 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     await store.put("users", id, { id, issuer, subject: link.email, emailVerified: true, email: link.email });
     const ttl = config.sessionTtlMs ?? 28_800_000;
     setCookie(c, "session", await issueCredential(store, { principalId: id, kind: "session", expiresAt: now() + ttl }), { ...cookieFlags, path: "/", maxAge: ttl / 1000 });
-    return c.redirect(safeReturnTo(link.returnTo, new URL(config.magicLink.publicUrl).origin), 302);
+    return c.redirect(safeReturnTo(link.returnTo, new URL(config.magicLink.publicUrl).origin), 303);
   });
 
   app.post("/auth/logout", authed(async (c) => {
@@ -476,6 +496,16 @@ interface Env {
 async function mailFromEnv(env: Env): Promise<Mail | undefined> {
   if (!env.MAIL_FROM) return undefined;
   const region = parseRegion(env.REGION);
+  try {
+    return await buildMail({ ...env, MAIL_FROM: env.MAIL_FROM }, region);
+  } catch {
+    // A bad mail setting turns magic-link off. It must not break the other routes.
+    console.warn("magic-link mail settings are not valid");
+    return undefined;
+  }
+}
+
+async function buildMail(env: Env & { MAIL_FROM: string }, region: ReturnType<typeof parseRegion>): Promise<Mail | undefined> {
   if (env.MAIL_HTTP_URL) return createHttpMail({ url: env.MAIL_HTTP_URL, fetch: globalThis.fetch.bind(globalThis), from: env.MAIL_FROM, ...(env.MAIL_HTTP_TOKEN ? { token: env.MAIL_HTTP_TOKEN } : {}), region });
   if (!env.SEND_EMAIL) return undefined;
   const specifier = "cloudflare:email";

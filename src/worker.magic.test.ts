@@ -10,6 +10,9 @@
 //     that fails to send gives the same answer. A bad address is the only 400.
 //  8. Rate limits: per address, per IP (another address does not help), and for everyone.
 //  9. returnTo that leaves the site becomes `/`. 10. It is off (404) with no mail or no config.
+// 11. Opening the link (GET, HEAD, a scanner) must not use the token up. Only a POST with our own
+//     Origin does, so a page on another site cannot sign a person into the attacker's account.
+// 12. A bad mail setting in the Worker env turns this off and does not break other routes.
 import { describe, expect, test } from "vitest";
 import { createMemoryMail, createMemoryStore } from "./adapters/memory.js";
 import { sha256Hex } from "./credentials.js";
@@ -29,9 +32,11 @@ function setup(extra: Partial<WorkerConfig> = {}, mailOverride?: Mail) {
     const text = memoryMail.outbox().at(index)!.text;
     return /token=([A-Za-z0-9_-]+)/.exec(text)![1]!;
   };
-  const verify = (token: string) => app.request(`/api/v1/auth/magic/verify?token=${token}`);
+  const open = (token: string, method = "GET") => app.request(`/api/v1/auth/magic/verify?token=${token}`, { method });
+  const verify = (token: string, origin: string | false = "https://app.test") =>
+    app.request("/api/v1/auth/magic/verify", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...(origin ? { origin } : {}) }, body: new URLSearchParams({ token }) });
   const me = (cookie: string) => app.request("/api/v1/me", { headers: { cookie } });
-  return { store, memoryMail, app, ask, tokenFrom, verify, me };
+  return { store, memoryMail, app, ask, tokenFrom, open, verify, me };
 }
 
 describe("magic-link sign-in", () => {
@@ -53,7 +58,7 @@ describe("magic-link sign-in", () => {
     const { ask, tokenFrom, verify, me, store } = setup();
     await ask("ana@example.test", "1.1.1.1", "/docs/1");
     const res = await verify(tokenFrom());
-    expect(res.status).toBe(302);
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/docs/1");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -85,8 +90,33 @@ describe("magic-link sign-in", () => {
     await ask("ana@example.test");
     const token = tokenFrom();
     const results = await Promise.all([verify(token), verify(token)]);
-    expect(results.map((r) => r.status).sort()).toEqual([302, 400]);
+    expect(results.map((r) => r.status).sort()).toEqual([303, 400]);
     expect((await verify(token)).status).toBe(400);
+  });
+
+  test("opening the link does not use it up, and a POST needs our Origin", async () => {
+    const { ask, tokenFrom, open, verify } = setup();
+    await ask("ana@example.test");
+    const token = tokenFrom();
+    for (const method of ["GET", "HEAD", "GET"]) {
+      const res = await open(token, method);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    }
+    expect(await (await open(token)).text()).toContain(`name="token" value="${token}"`);
+    for (const origin of [false as const, "https://evil.test", "null"]) {
+      const res = await verify(token, origin);
+      expect(res.status).toBe(403);
+      expect(res.headers.get("set-cookie")).toBeNull();
+    }
+    expect((await verify(token)).status).toBe(303);
+  });
+
+  test("an address with a trailing dot is refused", async () => {
+    const { ask } = setup();
+    expect((await ask("ana@example.test.")).status).toBe(400);
   });
 
   test("a link ends at 15 minutes", async () => {
@@ -96,7 +126,7 @@ describe("magic-link sign-in", () => {
     await ask("bob@example.test", "2.2.2.2");
     const fresh = tokenFrom();
     t += 899_999;
-    expect((await verify(fresh)).status).toBe(302);
+    expect((await verify(fresh)).status).toBe(303);
     t += 1;
     const res = await verify(old);
     expect(res.status).toBe(400);
@@ -185,7 +215,8 @@ describe("magic-link sign-in", () => {
   test("it is off with no config or no mail", async () => {
     const off = setup({ magicLink: undefined });
     expect((await off.ask("ana@example.test")).status).toBe(404);
-    expect((await off.verify("a".repeat(43))).status).toBe(400);
+    expect((await off.open("a".repeat(43))).status).toBe(404);
+    expect((await off.verify("a".repeat(43))).status).toBe(404);
     const app = createApp({ store: createMemoryStore(), now: () => t, config: { magicLink: { publicUrl: "https://app.test" }, unsafeTestMint: false } });
     const res = await app.request("/api/v1/auth/magic", { method: "POST", body: JSON.stringify({ email: "ana@example.test" }) });
     expect(res.status).toBe(404);

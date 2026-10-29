@@ -323,8 +323,9 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
 ## Sign in with an email link
 
 `POST /api/v1/auth/magic` with `{ "email", "returnTo"? }` mails a sign-in link through the `Mail`
-port. The link opens `GET /api/v1/auth/magic/verify?token=...`, which sets the session cookie
-(`HttpOnly`, `Secure`, `SameSite=Lax`) and redirects to `returnTo` on your own origin (else `/`).
+port. The link opens `GET /api/v1/auth/magic/verify?token=...`, a page with one button. The button
+sends `POST /api/v1/auth/magic/verify`, which needs the Origin of `publicUrl`, sets the session cookie
+(`HttpOnly`, `Secure`, `SameSite=Lax`), and redirects to `returnTo` on your own origin (else `/`).
 
 ```ts
 createApp({ store, mail: createHttpMail({ url, fetch, from, token }), config: { magicLink: { publicUrl: "https://app.example", appName: "Docs" }, unsafeTestMint: false } });
@@ -332,7 +333,8 @@ createApp({ store, mail: createHttpMail({ url, fetch, from, token }), config: { 
 
 The Worker entry turns it on when `PUBLIC_URL`, `MAIL_FROM`, and a mail transport are set. The
 transport is `MAIL_HTTP_URL` (with `MAIL_HTTP_TOKEN`) for `createHttpMail`, or a `SEND_EMAIL`
-binding for `createCloudflareMail`. It is off (404) without them. OIDC is not needed.
+binding for `createCloudflareMail`. A bad mail setting turns this sign-in off and logs a fixed
+line. It is off (404) without them. OIDC is not needed.
 
 - The token is 32 random bytes. The store keeps only its SHA-256 hash, and the row is deleted when
   it is used. A link works once and ends after 15 minutes. A bad, used, or expired link is a 400.
@@ -342,7 +344,12 @@ binding for `createCloudflareMail`. It is off (404) without them. OIDC is not ne
   Over budget is a 429 with `Retry-After`. Set `rateLimits.magicEmail`, `magicIp`, or `magicAll`.
 - The person is `u_` plus a hash of the address, and the email is marked verified. It is a
   different person than an OIDC sign-in with the same address: the two methods are not linked.
-- A mail scanner that opens links can use up a link. The person asks for a new one.
+- Opening the link (a mail scanner, a HEAD request, a page on another site) does not use the token.
+  Only the button does, so another site cannot sign a person into the attacker's account.
+- The per-address budget is counted for any caller, so a caller can keep an address from getting
+  mail for a while. A failed send logs `magic-link mail failed`, never an address.
+- An address with a trailing dot in the domain is refused. Plus tags and dots are other addresses.
+- The IP comes from `CF-Connecting-IP`. Behind another host, set that header at your proxy.
 - The link carries the token in the URL. The verify answer sets `Referrer-Policy: no-referrer` and
   `Cache-Control: no-store`. No log line holds an address.
 
