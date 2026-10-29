@@ -32,7 +32,11 @@ const decode = (value: Value): unknown => {
   if ("doubleValue" in value) return value.doubleValue;
   if ("stringValue" in value) return value.stringValue;
   if ("referenceValue" in value) return value.referenceValue;
-  throw new HttpError(400, "INVALID_ARGUMENT");
+  return undefined; // a map or an array: never equal to a scalar
+};
+const kind = (value: Value): string => {
+  const tag = Object.keys(value)[0]!;
+  return tag === "integerValue" || tag === "doubleValue" ? "number" : tag;
 };
 
 const compare = (a: unknown, b: unknown): number =>
@@ -118,7 +122,7 @@ export function createFakeFirestore(options: FakeFirestoreOptions = {}): { fetch
         }
         if (f.fieldFilter?.op === "EQUAL") {
           const got = stored.fields[f.fieldFilter.field.fieldPath];
-          return got !== undefined && compare(decode(got), decode(f.fieldFilter.value)) === 0 && Object.keys(got)[0]!.slice(0, 3) === Object.keys(f.fieldFilter.value)[0]!.slice(0, 3);
+          return got !== undefined && kind(got) === kind(f.fieldFilter.value) && decode(got) !== undefined && compare(decode(got), decode(f.fieldFilter.value)) === 0;
         }
         throw new HttpError(400, "INVALID_ARGUMENT");
       });

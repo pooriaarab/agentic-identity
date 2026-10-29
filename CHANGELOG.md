@@ -4,7 +4,7 @@
 
 ### Added
 
-- `agentic-identity/firestore` has a Firestore `Store` over the REST API with an injected `fetch`. It passes the `Store` contract suite against the emulator (when `FIRESTORE_EMULATOR_HOST` is set) or an in-process fake of the REST surface.
+- `agentic-identity/firestore` has a Firestore `Store` over the REST API with an injected `fetch`. The `Store` contract suite runs against the emulator when `FIRESTORE_EMULATOR_HOST` is set, and against an in-process fake of the REST surface otherwise (CI uses the fake). The contract has a new case for paging over non-ASCII ids and values.
 
 ## 0.4.0 - 2026-10-29
 

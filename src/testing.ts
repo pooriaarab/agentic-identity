@@ -152,6 +152,16 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       }
     });
 
+    it("pages over ids and sort values that are not ASCII", async () => {
+      const s = await make({});
+      for (const [id, name] of [["名", "龍"], ["é", "ж"], ["😀", "a"]] as const) await s.put("intl", id, { name });
+      for (const query of [{}, { orderBy: { field: "name" } }] as Query[]) {
+        const all = ids(await s.query("intl", query));
+        expect(all).toHaveLength(3);
+        expect(await walk(s, "intl", { ...query, limit: 1 })).toEqual(all);
+      }
+    });
+
     it("rejects a field name that is a path or has symbols, in where and in orderBy", async () => {
       const s = await seeded();
       for (const field of ["a.b", "a b", "", "$x", "a/b", "1a"]) {

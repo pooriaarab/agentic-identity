@@ -21,14 +21,23 @@ function make(options: { shared?: string; region?: string } = {}) {
 runStoreContract((options) => make(options));
 
 it("throws StoreConflictError after the last attempt when Firestore keeps aborting", async () => {
-  const aborting = (async (input: RequestInfo | URL) =>
+  const begun: unknown[] = [];
+  const aborting = (async (input: RequestInfo | URL, init?: RequestInit) =>
     String(input).endsWith(":beginTransaction")
-      ? new Response(JSON.stringify({ transaction: "dA==" }))
+      ? (begun.push(JSON.parse(init!.body as string)), new Response(JSON.stringify({ transaction: `t${begun.length}` })))
       : String(input).endsWith(":rollback")
         ? new Response("{}")
         : new Response(JSON.stringify({ error: { code: 409, status: "ABORTED" } }), { status: 409 })) as typeof fetch;
   const store = createFirestoreStore({ projectId: "p", fetch: aborting, maxAttempts: 3 });
   await expect(store.transaction((tx) => tx.get("docs", "a"))).rejects.toBeInstanceOf(StoreConflictError);
+  // Each retry names the transaction it replaces, so Firestore does not age it as a new one.
+  expect(begun).toEqual([{ options: { readWrite: {} } }, { options: { readWrite: { retryTransaction: "t1" } } }, { options: { readWrite: { retryTransaction: "t2" } } }]);
+});
+
+it("retries and then gives up when beginTransaction itself is aborted", async () => {
+  const aborted = (async () => new Response(JSON.stringify({ error: { code: 409, status: "ABORTED" } }), { status: 409 })) as typeof fetch;
+  const store = createFirestoreStore({ projectId: "p", fetch: aborted, maxAttempts: 2 });
+  await expect(store.transaction(async () => 1)).rejects.toBeInstanceOf(StoreConflictError);
 });
 
 it("never puts a token or a doc in an error", async () => {

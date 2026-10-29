@@ -121,6 +121,16 @@ interface RunQueryRow {
   document?: { name: string; fields?: Fields };
 }
 
+const toBase64Url = (text: string) => {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+const fromBase64Url = (cursor: string) => {
+  const binary = atob(cursor.replace(/-/g, "+").replace(/_/g, "/"));
+  return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+};
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const isAborted = (error: unknown) => error instanceof FirestoreError && (error.code === "ABORTED" || error.httpStatus === 409);
 
@@ -194,7 +204,7 @@ export function createFirestoreStore(options: FirestoreOptions): Store {
       let value: Json;
       let id: string;
       try {
-        const parsed = JSON.parse(atob(q.cursor.replace(/-/g, "+").replace(/_/g, "/"))) as [Json, string];
+        const parsed = JSON.parse(fromBase64Url(q.cursor)) as [Json, string];
         [value, id] = parsed;
         if (typeof id !== "string" || !Array.isArray(parsed) || parsed.length !== 2) throw new Error();
         if (field === undefined ? value !== id : value === null || typeof value === "object") throw new Error();
@@ -216,10 +226,14 @@ export function createFirestoreStore(options: FirestoreOptions): Store {
     const found = rows.flatMap((row) => (row.document ? [{ id: idOf(row.document.name), data: decodeFields(row.document.fields ?? {}) as T }] : []));
     const items = found.slice(0, limit);
     const last = items[items.length - 1];
-    const cursorValue = (item: { id: string; data: Doc }): Json => (field === undefined ? item.id : (item.data[field] as Json));
+    const cursorValue = (item: { id: string; data: Doc }): Json => {
+      const value = field === undefined ? item.id : (item.data[field] as Json);
+      if (typeof value === "object" && value !== null) throw new Error(`cannot page by "${field}": a doc holds an array or a map there`);
+      return value;
+    };
     return {
       items,
-      ...(found.length > limit && last ? { nextCursor: btoa(JSON.stringify([cursorValue(last), last.id])).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") } : {}),
+      ...(found.length > limit && last ? { nextCursor: toBase64Url(JSON.stringify([cursorValue(last), last.id])) } : {}),
     };
   }
 
@@ -237,10 +251,21 @@ export function createFirestoreStore(options: FirestoreOptions): Store {
       await commit([writeOf(collection, id, null)]);
     },
     async transaction<R>(fn: (tx: StoreOps) => Promise<R>): Promise<R> {
+      let previous: string | undefined;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        if (attempt > 1) await sleep(Math.random() * 10 * attempt);
-        const begun = await call<{ transaction: string }>("POST", ":beginTransaction", { options: { readWrite: {} } });
-        const id = begun?.transaction ?? fail("firestore did not start a transaction");
+        // Firestore ages a transaction that retries an earlier one, so it does not lose to younger ones again.
+        if (attempt > 1) await sleep(Math.random() * 20 * 2 ** (attempt - 1));
+        let id: string;
+        try {
+          const begun = await call<{ transaction: string }>("POST", ":beginTransaction", {
+            options: { readWrite: { ...(previous === undefined ? {} : { retryTransaction: previous }) } },
+          });
+          id = begun?.transaction ?? fail("firestore did not start a transaction");
+        } catch (error) {
+          if (isAborted(error)) continue;
+          throw error;
+        }
+        previous = id;
         const writes = new Map<string, Write>();
         const noReadAfterWrite = () => {
           if (writes.size > 0) throw new Error("a transaction must read before it writes");

@@ -318,8 +318,11 @@ const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.
 `agentic-identity/firestore` has a Firestore `Store`. It calls the Firestore REST API
 through a `fetch` you pass in, so it runs in Workers, Node, and Cloud Functions and
 needs no Firebase SDK. It passes the `Store` contract suite, including the transaction
-guards, against the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is set, and
-against an in-process fake of the REST surface when it is not.
+guards. The suite runs against the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
+set, and against an in-process fake of the REST surface when it is not. CI uses the fake.
+The fake locks every doc a transaction reads for that transaction alone, which is stricter
+than Firestore, so it does not exercise the aborts that two readers of one doc cause on
+the real service. Run the suite against the emulator before you rely on retry behavior.
 
 ```ts
 import { createFirestoreStore } from "agentic-identity/firestore";
