@@ -330,3 +330,4 @@ export function createR2Blobs(bucket: R2Like, options: R2Options): Blobs {
     },
   };
 }
+export { createStoreQueue, type StoreQueueOptions } from "./storequeue.js";

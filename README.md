@@ -446,6 +446,22 @@ const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.
   and `verifySignedBlobUrl` both throw when it is missing or short. Use one
   secret per bucket.
 
+## Queue adapter
+
+`createStoreQueue(store, { now?, leaseSeconds? })` is a `Queue` that keeps messages in any
+`Store`. Use it with D1 on Cloudflare or with Firestore. It is exported from the main entry
+point, `agentic-identity/cloudflare`, and `agentic-identity/firestore`. It passes the Queue
+contract suite on memory, on D1 (miniflare), and on Firestore (the emulator in CI).
+
+- Nothing delivers by itself. Call `run()` from a cron trigger or a loop. It delivers every
+  due message, retries included, and `dead(topic)` lists the parked bodies.
+- `run()` claims a message in a transaction with a lease (60 seconds by default). Two runners on
+  one Store do not both deliver it. A runner that crashes loses the lease, and another runner
+  delivers the message with a higher attempt. Delivery is at-least-once: write handlers that
+  cope with a repeat.
+- It is not Cloudflare Queues. A Cloudflare Queues binding has its own clock and cannot run the
+  contract suite, which sets the clock.
+
 ## Run on Firebase
 
 `agentic-identity/firestore` has a Firestore `Store` and a Firestore `Blobs`. They call the
@@ -471,7 +487,7 @@ const store = createFirestoreStore(connection);
 const blobs = createFirestoreBlobs({ ...connection, urlBase: "https://files.example/blob", urlSecret });
 ```
 
-- `Auth`, `Realtime`, `Mail`, and `Queue` have no Firestore adapter. Mix adapters as you need.
+- `Auth`, `Realtime`, and `Mail` have no Firestore adapter. `Queue` runs on it through `createStoreQueue` (see Queue adapter). Mix adapters as you need.
 - `createFirestoreBlobs` keeps an object in chunk docs (512 KiB each, `chunkBytes`) and caps it
   at 32 MiB (`maxBytes`). A put writes the chunks, then swaps the meta doc in one transaction
   that checks `ifMatch` or `ifNoneMatch`. A crash in between leaves orphan chunks that no read
