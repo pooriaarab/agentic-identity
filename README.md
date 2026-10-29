@@ -342,7 +342,7 @@ line. It is off (404) without them. OIDC is not needed.
   fails to send. Only a malformed address is a 400.
 - Budgets: 3 requests per address and 10 per IP in 10 minutes, 600 for all callers in 15 minutes,
   and 30 button presses per IP in 10 minutes (`magicVerify`). An erase of the person removes a pending link.
-  Over budget is a 429 with `Retry-After`. Set `rateLimits.magicEmail`, `magicIp`, or `magicAll`.
+  Over budget is a 429 with `Retry-After`. Set `rateLimits.magicEmail`, `magicIp`, `magicAll`, or `magicVerify`.
 - The person is `u_` plus a hash of the address, and the email is marked verified. It is a
   different person than an OIDC sign-in with the same address: the two methods are not linked.
 - Opening the link (a mail scanner, a HEAD request, a page on another site) does not use the token.
