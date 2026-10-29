@@ -3,8 +3,8 @@
 // target, so a reader sees the old bytes or the new bytes and never half of a write. File names are
 // the SHA-256 of the id or key, so any id or key (slashes, non-ASCII, long) is safe on any file system.
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, open, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
   DEFAULT_LIMIT,
   StoreConflictError,
@@ -31,8 +31,10 @@ export interface FileOptions extends AdapterOptions {
 }
 
 const LOCK_WAIT_MS = 10_000;
-/** A lock older than this belongs to a process that died. */
+/** A lock that nobody touched for this long belongs to a process that died. */
 const LOCK_STALE_MS = 60_000;
+/** The owner of a lock touches it this often. */
+const LOCK_BEAT_MS = 10_000;
 const MAX_TRANSACTION_RUNS = 50;
 const MAX_HEADER_BYTES = 1 << 20;
 
@@ -40,8 +42,29 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const isCode = (error: unknown, code: string) => (error as NodeJS.ErrnoException | undefined)?.code === code;
 
-/** Writes to a temp file, syncs it, then renames it over `path`. Returns the rename step. */
-async function stage(path: string, ...parts: Uint8Array[]): Promise<() => Promise<void>> {
+interface Staged {
+  /** Moves the temp file into place. */
+  commit(): Promise<void>;
+  /** Removes the temp file when the write is not committed. */
+  discard(): Promise<void>;
+}
+
+/** Best effort: syncs a folder so a rename survives a power loss. Some systems cannot open a folder. */
+async function syncFolder(path: string): Promise<void> {
+  try {
+    const handle = await open(path, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // Not supported here. The write still holds against a crash of the process.
+  }
+}
+
+/** Writes to a temp file next to `path` and syncs it. Nothing is visible until `commit` renames it. */
+async function stage(path: string, ...parts: Uint8Array[]): Promise<Staged> {
   const temp = `${path}.${randomUUID()}.tmp`;
   const handle = await open(temp, "wx");
   try {
@@ -53,38 +76,88 @@ async function stage(path: string, ...parts: Uint8Array[]): Promise<() => Promis
     throw error;
   }
   await handle.close();
-  return async () => {
-    try {
-      await rename(temp, path);
-    } catch (error) {
-      await rm(temp, { force: true });
-      throw error;
-    }
+  return {
+    async commit() {
+      try {
+        await rename(temp, path);
+      } catch (error) {
+        await rm(temp, { force: true });
+        throw error;
+      }
+      await syncFolder(dirname(path));
+    },
+    discard: () => rm(temp, { force: true }),
   };
 }
 
-/** One writer at a time per folder, across processes: `mkdir` is atomic, so one caller makes the lock folder. */
+/**
+ * Removes a lock that nobody touched for a minute. One taker at a time holds the `.steal` file and checks
+ * the age again, so a lock that a new owner made in the meantime is never removed.
+ */
+async function breakStale(lock: string): Promise<void> {
+  const guard = `${lock}.steal`;
+  try {
+    await writeFile(guard, "", { flag: "wx" });
+  } catch (error) {
+    if (!isCode(error, "EEXIST")) throw error;
+    // A taker that died holding the guard must not block the lock for good.
+    if ((await stat(guard).then((s) => Date.now() - s.mtimeMs, () => 0)) > LOCK_STALE_MS) await rm(guard, { force: true });
+    return;
+  }
+  try {
+    if ((await stat(lock).then((s) => Date.now() - s.mtimeMs, () => 0)) > LOCK_STALE_MS) await rm(lock, { force: true });
+  } finally {
+    await rm(guard, { force: true });
+  }
+}
+
+/**
+ * One writer at a time per folder, across processes. The lock is a file made with `wx`, so one caller
+ * makes it, and it holds the owner's token. The owner touches it while it works, so only a lock that
+ * nobody touched for a minute (a dead process) is taken, and `breakStale` takes it one taker at a time.
+ * An owner removes the lock only while the token is its own.
+ */
 async function withLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(root, { recursive: true });
   const lock = join(root, ".lock");
+  const token = randomUUID();
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
-      await mkdir(lock);
+      await writeFile(lock, token, { flag: "wx" });
       break;
     } catch (error) {
       if (!isCode(error, "EEXIST")) throw error;
     }
     const age = await stat(lock).then((s) => Date.now() - s.mtimeMs, () => 0);
-    if (age > LOCK_STALE_MS) await rm(lock, { recursive: true, force: true });
+    if (age > LOCK_STALE_MS) await breakStale(lock);
     else if (Date.now() > deadline) throw new Error(`could not take the lock on "${root}" in ${LOCK_WAIT_MS} ms`);
     else await sleep(5);
   }
+  const beat = setInterval(() => void utimes(lock, new Date(), new Date()).catch(() => {}), LOCK_BEAT_MS);
+  beat.unref();
   try {
     return await fn();
   } finally {
-    await rm(lock, { recursive: true, force: true });
+    clearInterval(beat);
+    if ((await readFile(lock, "utf8").catch(() => null)) === token) await rm(lock, { force: true });
   }
+}
+
+/** Reads a doc file. A file of the wrong shape is damage, and it is never taken for a missing doc. */
+function parseDoc(text: string, expectedId?: string): DocFile {
+  const damaged = () => new Error("doc file is damaged");
+  let found: unknown;
+  try {
+    found = JSON.parse(text);
+  } catch {
+    throw damaged();
+  }
+  const f = found as Partial<DocFile> | null;
+  if (typeof f !== "object" || f === null || typeof f.id !== "string" || typeof f.version !== "string" || f.version === "") throw damaged();
+  if (typeof f.doc !== "object" || f.doc === null || Array.isArray(f.doc)) throw damaged();
+  if (expectedId !== undefined && f.id !== expectedId) throw damaged();
+  return f as DocFile;
 }
 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -117,15 +190,15 @@ export function createFileStore(options: FileOptions): Store {
 
   const read = async (collection: string, id: string): Promise<DocFile | null> => {
     try {
-      return JSON.parse(await readFile(pathOf(collection, id), "utf8")) as DocFile;
+      return parseDoc(await readFile(pathOf(collection, id), "utf8"), id);
     } catch (error) {
       if (isCode(error, "ENOENT")) return null;
       throw error;
     }
   };
 
-  const stageWrite = async (collection: string, id: string, doc: Doc | null) => {
-    if (doc === null) return () => rm(pathOf(collection, id), { force: true });
+  const stageWrite = async (collection: string, id: string, doc: Doc | null): Promise<Staged> => {
+    if (doc === null) return { commit: () => rm(pathOf(collection, id), { force: true }), discard: async () => {} };
     await mkdir(folder(collection), { recursive: true });
     return stage(pathOf(collection, id), Buffer.from(JSON.stringify({ id, version: randomUUID(), doc } satisfies DocFile)));
   };
@@ -141,7 +214,14 @@ export function createFileStore(options: FileOptions): Store {
       assertCollection(collection);
       assertId(id);
       if (tx) tx.writes.set(key(collection, id), { collection, id, doc });
-      else await withLock(root, async () => (await stageWrite(collection, id, doc))());
+      else {
+        const staged = await stageWrite(collection, id, doc);
+        try {
+          await withLock(root, staged.commit);
+        } finally {
+          await staged.discard();
+        }
+      }
     };
     return {
       async get<T extends Doc>(collection: string, id: string) {
@@ -173,7 +253,9 @@ export function createFileStore(options: FileOptions): Store {
         for (const name of names) {
           if (!name.endsWith(".json")) continue;
           try {
-            files.push(JSON.parse(await readFile(join(folder(collection), name), "utf8")) as DocFile);
+            const f = parseDoc(await readFile(join(folder(collection), name), "utf8"));
+            if (`${hash(f.id)}.json` !== name) throw new Error("doc file is damaged");
+            files.push(f);
           } catch (error) {
             // A doc deleted after the listing is gone, as if the listing came later.
             if (!isCode(error, "ENOENT")) throw error;
@@ -213,18 +295,23 @@ export function createFileStore(options: FileOptions): Store {
       for (let run = 0; run < MAX_TRANSACTION_RUNS; run++) {
         const tx: Tx = { seen: new Map(), writes: new Map() };
         const result = await fn(ops(tx));
-        const committed = await withLock(root, async () => {
-          for (const [k, version] of tx.seen) {
-            const slash = k.indexOf("/");
-            if (((await read(k.slice(0, slash), k.slice(slash + 1)))?.version ?? "0") !== version) return false;
-          }
-          // Stage every write first, so the renames that follow are all that is left to do.
-          const steps = [];
-          for (const w of tx.writes.values()) steps.push(await stageWrite(w.collection, w.id, w.doc));
-          for (const step of steps) await step();
-          return true;
-        });
-        if (committed) return result;
+        // Stage every write first, so the renames under the lock are all that is left to do.
+        const staged: Staged[] = [];
+        try {
+          for (const w of tx.writes.values()) staged.push(await stageWrite(w.collection, w.id, w.doc));
+          const committed = await withLock(root, async () => {
+            for (const [k, version] of tx.seen) {
+              const slash = k.indexOf("/");
+              if (((await read(k.slice(0, slash), k.slice(slash + 1)))?.version ?? "0") !== version) return false;
+            }
+            for (const step of staged) await step.commit();
+            return true;
+          });
+          if (committed) return result;
+        } finally {
+          // A temp file that was renamed is gone, so this only removes what was not committed.
+          await Promise.all(staged.map((step) => step.discard()));
+        }
       }
       throw new StoreConflictError();
     },
@@ -300,12 +387,18 @@ export function createFileBlobs(options: FileBlobsOptions): Blobs {
       const text = Buffer.from(JSON.stringify(header));
       const lead = Buffer.alloc(4);
       lead.writeUInt32BE(text.length);
-      return withLock(root, async () => {
-        const current = (await load(key, false))?.header;
-        if ((opts?.ifNoneMatch === "*" && current) || (opts?.ifMatch !== undefined && current?.version !== opts.ifMatch)) return null;
-        await (await stage(pathOf(key), lead, text, data))();
-        return { version: header.version };
-      });
+      await mkdir(root, { recursive: true });
+      const staged = await stage(pathOf(key), lead, text, data);
+      try {
+        return await withLock(root, async () => {
+          const current = (await load(key, false))?.header;
+          if ((opts?.ifNoneMatch === "*" && current) || (opts?.ifMatch !== undefined && current?.version !== opts.ifMatch)) return null;
+          await staged.commit();
+          return { version: header.version };
+        });
+      } finally {
+        await staged.discard();
+      }
     },
     async get(key) {
       need(key);

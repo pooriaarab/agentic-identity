@@ -387,15 +387,23 @@ const store = createFileStore({ dir: "./.data" });
 const blobs = createFileBlobs({ dir: "./.data", urlBase: "https://files.example/blob", urlSecret });
 ```
 
-- A write goes to a temp file, is synced, and is renamed over the target. A reader never sees half
-  of a write.
+- A write goes to a temp file, is synced, and is renamed over the target. A reader of one doc or
+  object never sees half of a write. The folder is synced after the rename, as far as the system
+  allows.
 - A file name is the SHA-256 of the doc id or blob key. Keys with slashes, dots, or non-ASCII
   characters are safe, and `A` and `a` stay apart on a case-insensitive file system.
-- Every write and every transaction commit takes a lock folder in `dir`. Stores on one folder, in
-  one process or in several, share data and keep the transaction and `ifMatch` guarantees. A
-  lock that is 60 seconds old is taken as left by a dead process and removed.
-- A crash during a transaction commit can leave some of its writes applied. The files are not a
-  production database: there is one writer at a time, and a query reads every doc in a collection.
+- Every write and every transaction commit takes a lock file in `dir`. Stores on one folder, in
+  one process or in several, share data and keep the transaction and `ifMatch` guarantees. The
+  owner of the lock touches it while it works. A lock that nobody touched for 60 seconds is taken
+  as left by a dead process. A process that is paused for longer than that can lose its lock.
+- Reads take no lock. A read that runs during a commit can see some of the docs of a transaction
+  changed and others not, and a crash during a commit can leave some of its writes applied. A
+  transaction checks what it read at commit and runs again, but a query guards only the docs it
+  returned, as in every adapter.
+- A file that is damaged (it does not parse, or it has the wrong shape) makes a read throw. It is
+  never read as a missing doc.
+- These files are not a production database: there is one writer at a time, and a query reads
+  every doc in a collection.
 - `signedUrl` needs `urlBase` and `urlSecret` (32 bytes or more), as on R2. It makes an HMAC URL
   that your server checks with `verifySignedBlobUrl`. Without them, `signedUrl` throws.
 - Do not use a network file system. The lock and the rename need a local one.
