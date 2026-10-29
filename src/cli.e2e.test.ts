@@ -40,6 +40,25 @@ describe("agentic-identity CLI", () => {
     expect(run("grants", "list", "doc1", "--bogus").code).toBe(2);
   });
 
+  test("flags may come before or after the arguments, and a value is never a flag", () => {
+    expect(run("resources", "create", "doc", "--id", "d9").code).toBe(0);
+    expect(run("audit", "--limit", "5", "d9").code).toBe(0);
+    expect(run("audit", "d9", "--limit", "5").code).toBe(0);
+    const swallowed = run("resources", "create", "doc", "--id", "--version");
+    expect(swallowed.code).toBe(2);
+    expect(swallowed.out).toBe("");
+    expect(run("--as", "--help", "whoami").code).toBe(2);
+    expect(run("whoami", "--", "--help").code).toBe(2);
+    expect(run("--as", "ghost", "--as", "local", "whoami").code).toBe(2);
+    expect(run("--as", "ghost", "whoami").err).toContain("cannot act as");
+  });
+
+  test("a usage error does not echo an email", () => {
+    const r = run("invites", "accept", "abc", "ann@example.com");
+    expect(r.code).toBe(2);
+    expect(r.err).not.toContain("example.com");
+  });
+
   test("principals, grants, invites, links, and audit work across processes", () => {
     expect(run("whoami").json()).toMatchObject({ principalId: "local", kind: "human", chain: [{ id: "local", kind: "human" }] });
     expect(run("resources", "create", "doc", "--id", "doc1").json()).toEqual({ id: "doc1", type: "doc" });

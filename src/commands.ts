@@ -1,4 +1,4 @@
-// One table of commands. The CLI and the MCP server both read it, so they do the same things.
+// One table of commands. The CLI reads it, and the MCP server will read it too, so both do the same things.
 // A command acts as one principal on one Store, and returns plain JSON. It never returns a secret
 // it did not just make, and it never returns an email address.
 import { ACTIONS, hasScope, isScope, resolveChain, type Action, type Principal, type PrincipalContext } from "./core/principals.js";
@@ -85,6 +85,7 @@ export const COMMANDS: Command[] = [
   {
     path: ["principals", "list"], tool: "identity_principals_list", summary: "List the principals in the store.", args: [limit, cursor],
     run: async (app, args) => {
+      await app.actor();
       const page = await app.store.query("principals", paging(args));
       const keep = ["id", "kind", "handle", "parentId", "ownerId", "scopes", "expiresAt", "revokedAt"];
       return { principals: page.items.map((i) => Object.fromEntries(keep.filter((k) => i.data[k] !== undefined).map((k) => [k, i.data[k]]))), ...opt(page.nextCursor, "nextCursor") };

@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { runAuditContract, runStoreContract } from "../testing.js";
+import { StoreConflictError } from "../ports.js";
 import { createFileStore } from "./file.js";
 
 const dir = mkdtempSync(join(tmpdir(), "ai-file-"));
@@ -36,4 +37,79 @@ it("refuses a file that is not a store", async () => {
   const path = pathFor();
   writeFileSync(path, '{"hello":1}');
   await expect(createFileStore({ path }).get("docs", "a")).rejects.toThrow("not an agentic-identity store file");
+});
+
+const onDisk = (path: string) => JSON.parse(readFileSync(path, "utf8")).collections;
+
+it("keeps the writes of two stores made at once on a file that already has data", async () => {
+  const path = pathFor();
+  writeFileSync(path, JSON.stringify({ format: 1, collections: { docs: { seed: { x: 0 } } } }));
+  const [a, b] = [createFileStore({ path }), createFileStore({ path })];
+  await Promise.all([a.put("docs", "fromA", { x: 1 }), b.put("docs", "fromB", { x: 2 })]);
+  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["fromA", "fromB", "seed"]);
+});
+
+it("reads a change that another process made to the file", async () => {
+  const path = pathFor();
+  const store = createFileStore({ path });
+  await store.put("docs", "a", { x: 1 });
+  // Another process replaces the file, as a save does.
+  writeFileSync(`${path}.other`, JSON.stringify({ format: 1, collections: { docs: { a: { x: 1 }, theirs: { x: 9 } } } }));
+  renameSync(`${path}.other`, path);
+  expect(await store.get("docs", "theirs")).toEqual({ x: 9 });
+  await store.put("docs", "mine", { x: 2 });
+  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "mine", "theirs"]);
+});
+
+it("refuses a write that another process overtook, and keeps nothing of it", async () => {
+  const path = pathFor();
+  const store = createFileStore({ path });
+  await store.put("docs", "a", { x: 1 });
+  await expect(
+    store.transaction(async (tx) => {
+      await tx.get("docs", "a");
+      // The other process saves while this write is still pending.
+      writeFileSync(`${path}.other`, JSON.stringify({ format: 1, collections: { docs: { a: { x: 1 }, theirs: { x: 9 } } } }));
+      renameSync(`${path}.other`, path);
+      await tx.put("docs", "late", { x: 3 });
+    }),
+  ).rejects.toThrow(StoreConflictError);
+  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "theirs"]);
+  expect(await store.get("docs", "late")).toBeNull();
+  expect(await store.get("docs", "theirs")).toEqual({ x: 9 });
+});
+
+it("does not keep a write whose save failed", async () => {
+  const path = pathFor();
+  const store = createFileStore({ path });
+  await store.put("docs", "a", { x: 1 });
+  writeFileSync(`${path}.lock`, "");
+  await expect(store.put("docs", "b", { x: 2 })).rejects.toThrow("locked");
+  unlinkSync(`${path}.lock`);
+  expect(await store.get("docs", "b")).toBeNull();
+  await store.put("docs", "c", { x: 3 });
+  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "c"]);
+}, 10_000);
+
+it("writes only the run of a transaction that committed", async () => {
+  const path = pathFor();
+  const [one, two] = [createFileStore({ path }), createFileStore({ path })];
+  await one.put("docs", "a", { x: 0 });
+  let runs = 0;
+  await one.transaction(async (tx) => {
+    runs++;
+    await tx.get("docs", "a");
+    if (runs === 1) await two.put("docs", "a", { x: 5 });
+    await tx.put("docs", `run${runs}`, { runs });
+  });
+  expect(runs).toBe(2);
+  expect(Object.keys(onDisk(path).docs).sort()).toEqual(["a", "run2"]);
+});
+
+it("refuses a file that holds a doc that is not an object", async () => {
+  for (const docs of [{ local: null }, { x: "str" }, { y: [1] }]) {
+    const path = pathFor();
+    writeFileSync(path, JSON.stringify({ format: 1, collections: { principals: docs } }));
+    await expect(createFileStore({ path }).get("principals", "x")).rejects.toThrow("not an agentic-identity store file");
+  }
 });

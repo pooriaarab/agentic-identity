@@ -129,15 +129,18 @@ Every command has `--help`. The commands are:
 | `links create\|revoke\|resolve` | Makes, revokes, and checks a share link. |
 | `audit <resource>` | Reads the audit log, newest first. |
 
-- The file is `~/.agentic-identity/store.json`. Change it with `--store <file>` or
-  `AGENTIC_IDENTITY_STORE`. The file mode is `0600`.
+- The file is `~/.agentic-identity/store.json`. Change it with `--store <file>`,
+  `AGENTIC_IDENTITY_STORE`, or `AGENTIC_IDENTITY_HOME` (the folder that holds
+  `store.json`). The file mode is `0600`.
 - The first command makes a person named `local` with all rights. Each command
   acts as `local`. Use `--as <principal-id>` or `AGENTIC_IDENTITY_AS` to act as
   an agent, so its scopes and roles apply.
 - `invites accept --email` takes the email as given. The CLI does not verify it,
   because whoever holds the file is trusted. An agent accepts with its own handle.
 - `invites list` shows no email.
-- Use one process at a time on a file. Two processes do not see each other's writes.
+- Several processes can use one file. Each command reads the file again when
+  another process changed it. A write that another process overtook fails with
+  "the data changed during the transaction" and changes nothing. Run it again.
 - The same file store is available as `createFileStore` from `agentic-identity/file`.
 
 ## Principals and scopes
