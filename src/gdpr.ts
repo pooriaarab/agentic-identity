@@ -68,7 +68,8 @@ export async function exportPerson(store: Store, personId: string) {
     grants: grants.map((g) => g.data),
     resources: resources.filter((r) => r !== null),
     invites,
-    audit: (await many(store, "audit", "principalId", ids)).map((a) => a.data),
+    // Entries the person made, and entries of changes that named the person.
+    audit: [...new Map([...(await many(store, "audit", "principalId", ids)), ...(await many(store, "audit", "targetId", ids))].map((a) => [a.id, a.data])).values()],
   };
 }
 
@@ -96,8 +97,8 @@ export async function deletePerson(store: Store, personId: string): Promise<void
   const invites = await many(store, "invites", "createdBy", ids);
   if (typeof user?.email === "string") invites.push(...(await all(store, "invites", { email: user.email })));
   invites.forEach((i) => gone.add(i.id));
-  await remove("invites", invites);
   await redactTargets(store, [...gone]);
+  await remove("invites", invites);
   await remove("audit", await many(store, "audit", "principalId", ids));
   await remove("credentials", await many(store, "credentials", "principalId", ids));
   // A freed handle can be made again, so an invite to it must go, or its next owner would accept it.

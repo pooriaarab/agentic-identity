@@ -108,4 +108,10 @@ describe("export and delete", () => {
     expect(log.find((e) => e.action === "grant.set")).toMatchObject({ principalId: "bo", targetId: "erased" });
     expect(JSON.stringify(log)).not.toContain("ana");
   });
+
+  test("the export holds the log entries of changes that named the person", async () => {
+    const w = await world();
+    const audit = (await w.call("GET", "/me/export", w.ana)).body.audit as Record<string, unknown>[];
+    expect(audit.some((e) => e.action === "grant.set" && e.principalId === "bo" && e.targetId === "ana")).toBe(true);
+  });
 });

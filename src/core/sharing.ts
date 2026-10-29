@@ -184,7 +184,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
         const legacy = await legacyKeyOf(tx, resourceId, who);
-        if ((await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        const found = await requireResource(tx, resourceId);
+        const held = await tx.get("grants", grantKey(resourceId, who));
+        if (held?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        // A revoke of a grant that does not exist changes nothing, so it leaves no entry.
+        if (!held && !(legacy && (await tx.get("grants", legacy)))) return;
+        await touch(tx, found);
         if (legacy) await tx.delete("grants", legacy);
         await tx.delete("grants", grantKey(resourceId, who));
         await recordChange(tx, ctx, { action: "grant.revoke", resourceId, targetKind: who.kind, targetId: who.id }, now());
@@ -218,21 +223,22 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       if ((await store.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
       if ((await store.query("grants", { where: { resourceId, role: "owner" }, limit: MAX_OWNERS_ON_ERASE + 1 })).items.length > MAX_OWNERS_ON_ERASE) throw new EraseRefusedError("too many owners: revoke some first");
       // Every doc of the resource but an owner's grant, in pages by cursor. The owners go in the transaction.
-      for (const collection of ["links", "invites", "grants", "audit"]) {
-        for (let cursor: string | undefined; ; ) {
-          const page = await store.query(collection, { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
-          await Promise.all(page.items.filter((d) => collection !== "grants" || d.data.role !== "owner").map((d) => store.delete(collection, d.id)));
-          if ((cursor = page.nextCursor) === undefined) break;
+      const sweep = async (collections: string[]) => {
+        for (const collection of collections) {
+          for (let cursor: string | undefined; ; ) {
+            const page = await store.query(collection, { where: { resourceId }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+            await Promise.all(page.items.filter((d) => collection !== "grants" || d.data.role !== "owner").map((d) => store.delete(collection, d.id)));
+            if ((cursor = page.nextCursor) === undefined) break;
+          }
         }
-      }
+      };
+      await sweep(["links", "invites", "grants", "audit"]);
       await store.transaction(async (tx) => {
         await requireResource(tx, resourceId);
         if ((await tx.query("resources", { where: { parentId: resourceId }, limit: 1 })).items.length > 0) throw new EraseRefusedError("the resource has children");
         // What a write added since the sweep. Each write changed the resource doc, so none can land after this read and commit.
         const rest: [string, string][] = [];
-        // A change writes its audit entry in its transaction, so an entry here is guarded too. `can`
-        // writes outside a transaction: its entry can land after this read and stay.
-        for (const collection of ["grants", "links", "invites", "audit"]) {
+        for (const collection of ["grants", "links", "invites"]) {
           const cap = collection === "grants" ? 2 * MAX_OWNERS_ON_ERASE : MAX_OWNERS_ON_ERASE;
           const left = await tx.query(collection, { where: { resourceId }, limit: cap + 1 });
           if (left.items.length > cap) throw new StoreConflictError("too many docs are left on the resource, try again");
@@ -241,6 +247,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
         for (const [collection, id] of rest) await tx.delete(collection, id);
         await tx.delete("resources", resourceId);
       });
+      // A change that committed after the first sweep wrote its entry in its own transaction, and no
+      // change can commit after this one. So this sweep removes every such entry.
+      await sweep(["audit"]);
     },
 
     async createInvite(ctx: PrincipalContext, resourceId: string, input: { role: Role; email?: string; handle?: string; expiresInMs?: number }) {

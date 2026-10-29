@@ -902,6 +902,8 @@ export function runAuditContract(make: Make<Store, StoreOptions>): void {
       await expect(sharing.grant(person("bo"), "doc1", { kind: "human", id: "bo" }, "owner")).rejects.toThrow();
       await expect(sharing.revokeGrant(ana, "doc1", { kind: "human", id: "ana" })).rejects.toThrow("last owner");
       await expect(sharing.createInvite(ana, "doc1", { role: "viewer" })).rejects.toThrow();
+      // A revoke of a grant that was never made changes nothing.
+      await sharing.revokeGrant(ana, "doc1", { kind: "human", id: "nobody" });
       expect(await log(sharing, ana)).toEqual([]);
     });
 
