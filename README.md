@@ -162,6 +162,15 @@ if (result.ok && hasScope(result.scopes, "docs:write")) {
 }
 ```
 
+Import the kinds from the package. Do not copy the list into your app.
+
+```ts
+import { PRINCIPAL_KINDS, type Principal, type PrincipalKind } from "agentic-identity";
+
+const isKind = (kind: unknown): kind is PrincipalKind => PRINCIPAL_KINDS.includes(kind as PrincipalKind);
+const isPrincipal = (p: Principal) => isKind(p.kind);
+```
+
 `resolveChain` walks from the acting principal to its root. Each step can only
 narrow the rights. It returns no rights when a principal is revoked or expired,
 when the chain has a cycle or is deeper than `MAX_CHAIN_DEPTH` (5), when a

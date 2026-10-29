@@ -56,6 +56,10 @@ describe("principals list", () => {
     const { principals } = (await run(undefined, ["principals", "list"], {})) as { principals: Record<string, unknown>[] };
     expect(principals.find((p) => p.id === "ann")).toEqual({ id: "ann", kind: "human", scopes: ["doc:read"] });
     expect(JSON.stringify(principals)).not.toMatch(/example\.com|tokenHash/);
+    await store.put("principals", "bad", { id: "bad", kind: "agent", scopes: [], handle: "jo@ex.io" });
+    const again = (await run(undefined, ["principals", "list"], {})) as { principals: Record<string, unknown>[] };
+    expect(again.principals.find((p) => p.id === "bad")).toEqual({ id: "bad", kind: "agent", scopes: [] });
+    await expect(run(undefined, ["principals", "list"], { limit: 201 })).rejects.toThrow(UsageError);
   });
 });
 

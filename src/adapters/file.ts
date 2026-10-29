@@ -64,7 +64,8 @@ async function load(shared: Shared): Promise<void> {
   const seen = signature(shared.path);
   const mirror = readFile(shared.path);
   const inner = createMemoryStore();
-  for (const [name, docs] of mirror) for (const [id, doc] of docs) await inner.put(name, id, doc);
+  // The memory store refuses a bad collection name or id. Its message quotes the name, so it is not passed on.
+  for (const [name, docs] of mirror) for (const [id, doc] of docs) await inner.put(name, id, doc).catch(() => Promise.reject(new Error(`${shared.path} is not an agentic-identity store file`)));
   Object.assign(shared, { inner, mirror, seen });
 }
 

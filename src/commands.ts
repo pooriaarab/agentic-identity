@@ -90,9 +90,13 @@ export const COMMANDS: Command[] = [
     run: async (app, args) => {
       // The list names every principal with its scopes, so only an actor with all rights reads it.
       if (!hasScope((await app.actor()).scopes, "*:admin")) throw new Error("forbidden");
+      const n = args.limit;
+      if (n !== undefined && (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 200)) throw new UsageError("limit must be a whole number from 1 to 200");
       const page = await app.store.query("principals", paging(args));
-      const keep = ["id", "kind", "handle", "parentId", "ownerId", "scopes", "expiresAt", "revokedAt"];
-      return { principals: page.items.map((i) => Object.fromEntries(keep.filter((k) => i.data[k] !== undefined).map((k) => [k, i.data[k]]))), ...opt(page.nextCursor, "nextCursor") };
+      const keep = ["id", "kind", "parentId", "ownerId", "scopes", "expiresAt", "revokedAt"];
+      // A handle shows only when it has the form of one, so a bad record cannot put an address in the list.
+      const show = (d: Record<string, unknown>) => ({ ...Object.fromEntries(keep.filter((k) => d[k] !== undefined).map((k) => [k, d[k]])), ...(typeof d.handle === "string" && /^[a-z][a-z0-9_-]{1,31}$/.test(d.handle) ? { handle: d.handle } : {}) });
+      return { principals: page.items.map((i) => show(i.data)), ...opt(page.nextCursor, "nextCursor") };
     },
   },
   {

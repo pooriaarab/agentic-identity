@@ -100,6 +100,14 @@ it("refuses a file that holds a doc that is not an object", async () => {
   }
 });
 
+it("does not show a collection name from a bad file", async () => {
+  const path = pathFor();
+  writeFileSync(path, JSON.stringify({ format: 1, collections: { "a b@ex.io": { x: {} } } }));
+  const error = await createFileStore({ path }).get("docs", "a").catch((e: Error) => e);
+  expect(String(error)).toContain("not an agentic-identity store file");
+  expect(String(error)).not.toContain("ex.io");
+});
+
 it("does not show the start of a file that is not a store", async () => {
   const path = pathFor();
   writeFileSync(path, "jo@ex.io");
