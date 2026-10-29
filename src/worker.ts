@@ -333,11 +333,12 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
     return c.json({ ok: true });
   }));
 
-  // Every live invite for the caller's verified email or own handle, in one call. An invitee never sees an invite id.
+  // The live invites for the caller's verified email or own handle, a page per call. An invitee never sees an invite id.
   app.post("/me/invites/accept", authed(async (c, ctx) => {
     const user = await store.get("users", ctx.principalId);
     const agent = await store.get("principals", ctx.principalId);
-    return c.json({ accepted: await sharing.acceptPendingInvites(ctx, { ...(user?.emailVerified === true ? pick(user, "email") : {}), ...pick(agent ?? {}, "handle") }) });
+    const cursor = c.req.query("cursor");
+    return c.json(await sharing.acceptPendingInvites(ctx, { ...(user?.emailVerified === true ? pick(user, "email") : {}), ...pick(agent ?? {}, "handle") }, cursor === undefined ? {} : { cursor }));
   }));
 
   app.post("/resources/:id/links", authed(async (c, ctx) => {

@@ -206,27 +206,53 @@ describe("accept pending invites", () => {
     await sharing.createInvite(ana, "grandchild", { role: "viewer", email: "cy@example.test" });
     await sharing.createInvite(ana, "grandchild", { role: "editor", email: "bo@example.test", expiresInMs: 1000 });
     t += 1000;
-    expect(await sharing.acceptPendingInvites(bo, { email: "BO@example.test" })).toBe(2);
+    expect((await sharing.acceptPendingInvites(bo, { email: "BO@example.test" })).accepted).toBe(2);
     expect(await allowed(bo, "write", "folder")).toBe(true);
     expect(await allowed(cy, "read", "grandchild")).toBe(false);
-    expect(await sharing.acceptPendingInvites(bo, { email: "bo@example.test" })).toBe(0);
+    expect((await sharing.acceptPendingInvites(bo, { email: "bo@example.test" })).accepted).toBe(0);
   });
 
   test("an unverified person, a delegated agent, and an agent with an email get nothing", async () => {
     await sharing.createInvite(ana, "folder", { role: "viewer", email: "bo@example.test" });
-    expect(await sharing.acceptPendingInvites(bo, {})).toBe(0);
-    expect(await sharing.acceptPendingInvites(agentOf("bo", ["*:admin"]), { email: "bo@example.test" })).toBe(0);
-    expect(await sharing.acceptPendingInvites(ownAgent("a9"), { email: "bo@example.test" })).toBe(0);
+    expect((await sharing.acceptPendingInvites(bo, {})).accepted).toBe(0);
+    expect((await sharing.acceptPendingInvites(agentOf("bo", ["*:admin"]), { email: "bo@example.test" })).accepted).toBe(0);
+    expect((await sharing.acceptPendingInvites(ownAgent("a9"), { email: "bo@example.test" })).accepted).toBe(0);
     expect(await allowed(bo, "read", "folder")).toBe(false);
+  });
+
+  test("pages by cursor, so a live invite behind many taken ones is still reached", async () => {
+    for (let i = 0; i < 60; i++) {
+      const taken = await sharing.createInvite(ana, "folder", { role: "viewer", email: "bo@example.test" });
+      await sharing.acceptInvite(bo, taken.id, { email: "bo@example.test" });
+    }
+    await sharing.createInvite(ana, "child", { role: "editor", email: "bo@example.test" });
+    let accepted = 0;
+    let pages = 0;
+    for (let cursor: string | undefined; ; ) {
+      const page = await sharing.acceptPendingInvites(bo, { email: "bo@example.test" }, cursor === undefined ? {} : { cursor });
+      accepted += page.accepted;
+      pages += 1;
+      if ((cursor = page.nextCursor) === undefined) break;
+    }
+    expect(pages).toBe(2);
+    expect(accepted).toBe(1);
+    expect(await allowed(bo, "write", "child")).toBe(true);
+    await expect(sharing.acceptPendingInvites(bo, { email: "bo@example.test" }, { cursor: 5 as unknown as string })).rejects.toThrow();
+  });
+
+  test("a store failure is thrown, not counted as nothing to accept", async () => {
+    await sharing.createInvite(ana, "folder", { role: "viewer", email: "bo@example.test" });
+    const broken = createSharing({ ...store, transaction: async () => { throw new Error("disk full"); } } as Store, { now: () => t });
+    await expect(broken.acceptPendingInvites(bo, { email: "bo@example.test" })).rejects.toThrow("disk full");
   });
 
   test("an agent takes the invites for its handle, and a stronger role stays", async () => {
     await sharing.createInvite(ana, "folder", { role: "viewer", handle: "scribe" });
-    expect(await sharing.acceptPendingInvites(ownAgent("a9"), { handle: "scribe" })).toBe(1);
+    expect((await sharing.acceptPendingInvites(ownAgent("a9"), { handle: "scribe" })).accepted).toBe(1);
     expect(await allowed(ownAgent("a9"), "read", "folder")).toBe(true);
     await sharing.grant(ana, "child", { kind: "human", id: "bo" }, "editor");
     await sharing.createInvite(ana, "child", { role: "viewer", email: "bo@example.test" });
-    expect(await sharing.acceptPendingInvites(bo, { email: "bo@example.test" })).toBe(1);
+    expect((await sharing.acceptPendingInvites(bo, { email: "bo@example.test" })).accepted).toBe(1);
     expect(await allowed(bo, "write", "child")).toBe(true);
   });
 });

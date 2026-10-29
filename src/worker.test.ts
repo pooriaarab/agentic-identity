@@ -221,7 +221,12 @@ describe("sharing over HTTP", () => {
     await s.store.put("users", "cy", { id: "cy", email: "cy@example.test", emailVerified: true });
     expect(await (await s.call("POST", "/me/invites/accept", { token: cy })).json()).toEqual({ accepted: 2 });
     expect((await access(s, "plan2", "write", bearer(cy))).allowed).toBe(true);
-    expect((await s.call("POST", "/me/invites/accept", { token: bo })).status).toBe(200);
+    expect(await (await s.call("POST", "/me/invites/accept", { token: bo })).json()).toEqual({ accepted: 0 });
+    // An agent with its own handle takes the handle invite; the delegated one takes nothing.
+    const agent = await json(await s.call("POST", "/agents", { token: bo, body: { handle: "scribe2", scopes: ["doc:read"] } }));
+    await s.call("POST", "/resources/plan/invites", { token: ana, body: { role: "viewer", handle: "scribe2" } });
+    expect(await (await s.call("POST", "/me/invites/accept", { token: agent.apiKey! })).json()).toEqual({ accepted: 1 });
+    expect((await access(s, "plan", "read", bearer(agent.apiKey!))).allowed).toBe(true);
     expect((await s.call("POST", "/me/invites/accept")).status).toBe(401);
   });
 

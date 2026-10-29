@@ -288,7 +288,7 @@ the database with `--location weur`, and set `REGION` to say so. Send a key as
   `myAudit({ limit, cursor })`. Each response has an `x-request-id` header, which is the
   `requestId` of the entries that the request wrote.
 - `/resources` and the paths under `/resources/:id` expose sharing: grants, invites, links, access, and audit.
-  `/invites/:id/accept` and `/links/:id` act on one invite or link. `POST /me/invites/accept` accepts every live invite for the caller's verified email (or an agent's own handle) and answers `{ accepted }`. The SDK call is `acceptMyInvites()`, and the core call is `acceptPendingInvites(ctx, identity)`. An unverified email, a delegated agent, and an expired or taken invite give none. A grant names its subject
+  `/invites/:id/accept` and `/links/:id` act on one invite or link. `POST /me/invites/accept` accepts one page (50) of the live invites for the caller's verified email (or an agent's own handle) and answers `{ accepted, nextCursor? }`. Call it again with `?cursor=` while `nextCursor` is set. The SDK call is `acceptMyInvites({ cursor })`, and the core call is `acceptPendingInvites(ctx, identity, { cursor })`. An unverified email, a delegated agent, and an expired or taken invite give none. A person who owns a resource can invite any address, so an app that accepts at sign-in gives the invitee access with no step to refuse it. Show the shared files so the person can leave them. A grant names its subject
   by kind (`human` or `agent`) and id. `POST /resources/:id/grants` takes `subjectKind` and
   `subjectId`, and `DELETE /resources/:id/grants/:kind/:subjectId` removes one.
   `GET /resources/:id/grants?limit=&cursor=` lists them (an owner only).
