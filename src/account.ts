@@ -161,7 +161,9 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
   if (typeof subject !== "string" || subject === "") throw new Error("subject is required");
   checkApps(apps);
   const entries: { name: string; data: Uint8Array }[] = [];
-  const manifest: AccountManifest = { version: 1, subject, generatedAt: (options.now ?? Date.now)(), apps: [] };
+  const generatedAt = (options.now ?? Date.now)();
+  if (typeof generatedAt !== "number" || !Number.isFinite(generatedAt)) throw new Error("now must return a finite number");
+  const manifest: AccountManifest = { version: 1, subject, generatedAt, apps: [] };
   for (const app of [...apps].sort((a, b) => (a.id < b.id ? -1 : 1))) {
     const listed: ManifestFile[] = [];
     try {
@@ -215,7 +217,8 @@ async function isMine(store: Pick<Store, "get">, subject: string, actor: Princip
   const ids = [actor.principalId, ...actor.chain.map((step) => step.id)];
   let mine = ids.includes(subject);
   // An agent the subject made has an `ownerId` or a `parentId` that leads back to them.
-  for (let frontier = ids, depth = 0; !mine && frontier.length > 0 && depth < 8; depth++) {
+  let frontier = ids;
+  for (let depth = 0; !mine && frontier.length > 0 && depth < 8; depth++) {
     const next: string[] = [];
     for (const id of frontier) {
       const doc = await store.get("principals", id);
@@ -226,6 +229,8 @@ async function isMine(store: Pick<Store, "get">, subject: string, actor: Princip
     }
     frontier = next;
   }
+  // A search that ran out of hops without an answer is a failed lookup: the caller blanks the actor.
+  if (!mine && frontier.length > 0) throw new Error("owner search too deep");
   return mine;
 }
 
