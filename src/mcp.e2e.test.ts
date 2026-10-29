@@ -1,6 +1,6 @@
 // Spawns the real MCP server and talks to it over stdio, as a client does.
 import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -48,6 +48,18 @@ describe("agentic-identity-mcp", () => {
       expect(r.stdout).toContain("identity_whoami");
     }
     expect(spawnSync(process.execPath, [mcpBin, "--bogus"], { encoding: "utf8" }).status).toBe(2);
+  });
+
+  test("--version prints the package version and exits 0 on both bins, and does not start the server", () => {
+    const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    for (const [bin, args] of [[mcpBin, ["--version"]], [cliBin, ["mcp", "--version"]], [cliBin, ["--version"]]] as const) {
+      // No stdin is given: a server that started would wait on it, and the timeout would fail the test.
+      const r = spawnSync(process.execPath, [bin, ...args], { encoding: "utf8", input: "", timeout: 20_000 });
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(version);
+      expect(r.stderr).toBe("");
+    }
+    expect(spawnSync(process.execPath, [mcpBin, "--version=1"], { encoding: "utf8" }).status).toBe(2);
   });
 
   test("initialize, tools/list, and a tool call work over stdio", { timeout: 60_000 }, async () => {
