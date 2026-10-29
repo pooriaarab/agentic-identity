@@ -24,9 +24,25 @@ const makeStore = (options: { shared?: string; region?: string }) => createNetli
 const makeBlobs = (options: { shared?: string; region?: string }) =>
   createNetlifyBlobs(fakeFor(shareds(options)), { region: "unknown", ...options, urlBase: URL_BASE, urlSecret: SECRET } as never);
 
+// The real client retries a request that failed, and a retry of a write that had landed gets a 412.
+const makeRetryStore = (options: { shared?: string; region?: string }) => {
+  const shared = options.shared ?? crypto.randomUUID();
+  if (!fakes.has(shared)) fakes.set(shared, createFakeNetlifyStore({ retryAfterLanding: true }));
+  return createNetlifyStore(fakes.get(shared)!, options as never);
+};
+const makeRetryBlobs = (options: { shared?: string; region?: string }) => {
+  const shared = options.shared ?? crypto.randomUUID();
+  if (!fakes.has(shared)) fakes.set(shared, createFakeNetlifyStore({ retryAfterLanding: true }));
+  return createNetlifyBlobs(fakes.get(shared)!, { region: "unknown", ...options, urlBase: URL_BASE, urlSecret: SECRET } as never);
+};
+
 runStoreContract(makeStore);
 runAuditContract(makeStore);
 runBlobsContract(makeBlobs);
+describe("when a write lands and its retry is refused", () => {
+  runStoreContract(makeRetryStore);
+  runBlobsContract(makeRetryBlobs);
+});
 
 describe("Netlify store lock and journal", () => {
   const bump = (store: ReturnType<typeof createNetlifyStore>) =>
@@ -34,6 +50,9 @@ describe("Netlify store lock and journal", () => {
       const doc = (await tx.get<{ n: number }>("counters", "c"))!;
       await tx.put("counters", "c", { n: doc.n + 1 });
     });
+
+  // The journal lives in the lock key. Undefined means that no journal is left.
+  const journalOf = async (fake: NetlifyStoreLike) => (JSON.parse((await fake.get("lock", { type: "text", consistency: "strong" })) as string) as { writes?: unknown }).writes;
 
   const twoDocs = (store: ReturnType<typeof createNetlifyStore>) =>
     store.transaction(async (tx) => {
@@ -62,7 +81,7 @@ describe("Netlify store lock and journal", () => {
     await twoDocs(createNetlifyStore(breakable(fake, true).store, { waitMs: 500 }));
     const reader = createNetlifyStore(fake);
     expect([await reader.get("docs", "a"), await reader.get("docs", "b")]).toEqual([{ n: 1 }, { n: 2 }]);
-    expect(await fake.get("journal", { type: "text", consistency: "strong" })).toBeNull();
+    expect(await journalOf(fake)).toBeUndefined();
   });
 
   it("finishes the writes of a holder that stopped after it wrote the journal", async () => {
@@ -80,7 +99,7 @@ describe("Netlify store lock and journal", () => {
       expect(await tx.get("docs", "b")).toEqual({ n: 2 });
     });
     expect(await next.get("docs", "a")).toEqual({ n: 1 });
-    expect(await fake.get("journal", { type: "text", consistency: "strong" })).toBeNull();
+    expect(await journalOf(fake)).toBeUndefined();
   });
 
   it("stops a holder whose lease a rival took while it applied, so it cannot write over the rival", async () => {
@@ -105,23 +124,55 @@ describe("Netlify store lock and journal", () => {
     expect(await rival.get("docs", "b")).toEqual({ who: "rival" });
   });
 
-  it("throws StoreConflictError, with nothing written, when a rival journal appears first", async () => {
+  it("refuses the journal of a holder whose lease ran out while it waited to write it, so it cannot undo a rival", async () => {
     const fake = createFakeNetlifyStore();
-    const racing: NetlifyStoreLike = {
+    let clock = 0;
+    const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
+    const rival = createNetlifyStore(fake, options);
+    const slow: NetlifyStoreLike = {
       ...fake,
-      set: async (key, data, options) => {
-        if (key === "journal") await fake.set("journal", JSON.stringify({ writes: [] }));
-        return fake.set(key, data, options);
+      set: async (key, data, opts) => {
+        if (key === "lock" && String(data).includes('"writes"')) {
+          clock = 500; // the journal write is delayed past the lease, and a rival commits meanwhile
+          await rival.put("docs", "a", { who: "rival" });
+        }
+        return fake.set(key, data, opts);
       },
     };
-    await expect(twoDocs(createNetlifyStore(racing, { waitMs: 100 }))).rejects.toBeInstanceOf(StoreConflictError);
-    expect(await createNetlifyStore(fake).get("docs", "a")).toBeNull();
+    await expect(twoDocs(createNetlifyStore(slow, options))).rejects.toBeInstanceOf(StoreConflictError);
+    const reader = createNetlifyStore(fake, options);
+    await reader.put("docs", "z", { n: 0 }); // the next transaction would replay a journal, if one landed
+    expect([await reader.get("docs", "a"), await reader.get("docs", "b")]).toEqual([{ who: "rival" }, null]);
   });
 
   it("reports an unknown outcome when the journal write itself fails", async () => {
     const fake = createFakeNetlifyStore();
-    const lossy: NetlifyStoreLike = { ...fake, set: async (key, data, options) => (key === "journal" ? Promise.reject(new Error("dropped")) : fake.set(key, data, options)) };
+    const lossy: NetlifyStoreLike = {
+      ...fake,
+      set: async (key, data, options) => (key === "lock" && String(data).includes('"writes"') ? Promise.reject(new Error("dropped")) : fake.set(key, data, options)),
+    };
     await expect(twoDocs(createNetlifyStore(lossy, { waitMs: 100 }))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
+  });
+
+  it("fails a read-only transaction whose lease a rival took while it read", async () => {
+    const fake = createFakeNetlifyStore();
+    let clock = 0;
+    const options = { now: () => clock, leaseMs: 100, waitMs: 200 };
+    const store = createNetlifyStore(fake, options);
+    const rival = createNetlifyStore(fake, options);
+    await expect(
+      store.transaction(async (tx) => {
+        await tx.get("docs", "a");
+        clock = 500;
+        await rival.put("docs", "a", { n: 1 });
+      }),
+    ).rejects.toBeInstanceOf(StoreConflictError);
+  });
+
+  it("keeps a lock it cannot parse, or one with a bad journal, as held", async () => {
+    const fake = createFakeNetlifyStore();
+    await fake.set("lock", JSON.stringify({ owner: null, expiresAt: 0, writes: [{ collection: "Bad Name", id: "a", doc: null }] }));
+    await expect(createNetlifyStore(fake, { waitMs: 100 }).put("docs", "a", { n: 1 })).rejects.toBeInstanceOf(StoreConflictError);
   });
 
   it("refuses a doc stored under another key", async () => {
@@ -298,7 +349,7 @@ describe("the real @netlify/blobs client on the local server", () => {
     expect(second.version).not.toBe(first.version);
     const [{ key }] = (await real.list({ prefix: "b/" })).blobs;
     expect(Buffer.from((await real.get(key, { type: "arrayBuffer", consistency: "strong" })) as ArrayBuffer)).toEqual(Buffer.from([3]));
-    expect((await real.getMetadata(key, { consistency: "strong" }))!.metadata).toEqual({ size: 1 });
+    expect((await real.getMetadata(key, { consistency: "strong" }))!.metadata).toMatchObject({ size: 1 });
     await blobs.delete("k");
     await blobs.delete("k");
     expect(await real.getMetadata(key, { consistency: "strong" })).toBeNull();

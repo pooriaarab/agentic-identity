@@ -522,27 +522,38 @@ this adapter in production.
   so any key works. `signedUrl` makes an HMAC URL for your function, as the R2 adapter does.
   Call `verifySignedBlobUrl(url, { secret })` there. The secret needs 32 bytes or more.
 - Netlify Blobs has no write that spans two keys, so the `Store` builds a transaction from a
-  lease lock on one key (`leaseMs`, default 30 s) and a journal. A transaction takes the lock,
-  runs, writes the journal, applies the writes, and drops the journal. Before each write it
+  lease lock on one key (`leaseMs`, default 30 s) and a journal that sits in the same key. A
+  transaction takes the lock, runs, then makes one conditional write that checks the lease and
+  stores the journal. It applies the writes, and clears the journal. Before each doc write it
   renews the lease with a check that the lock is still its own, so a holder that stalled past
-  its lease stops. A doc key is the hash of the id, so any
-  valid id fits the key limit of Netlify (600 bytes). An id must be well-formed Unicode.
-- A holder that stops halfway leaves its journal. The next transaction on any adapter object
-  applies it first. If a write fails, the holder tries to finish the journal at once. When that
-  works, the transaction has committed and its caller gets the result. When it does not, the
-  caller gets `NetlifyCommitUncertainError`, and the transaction may still land when the next
-  transaction runs. The same error means the lease was lost after the journal was sent. Do not
-  retry such a transaction as if nothing was written. `StoreConflictError` is only for a failure
-  before the journal is sent, and then nothing is written. Outside a transaction, a `get` or
-  `query` can see part of a transaction while it applies, and until the next transaction applies
-  a journal that a crash left.
-- A transaction throws `StoreConflictError` when it cannot get the lock in `waitMs` (default
-  35 s, a little over the lease, so it outwaits a crashed holder). A lock that is not readable counts as held. A write made inside a transaction on the
-  same adapter object waits for its own transaction, so it throws after `waitMs`. Use `tx`.
-- All writes take the same lock, so they run one at a time. A write costs about eight requests
-  and two more per doc. A hot app needs a different `Store`. The lease compares the clocks of
-  the instances, so keep them within a few seconds of each other. A write that takes longer
-  than the lease, between two renewals, can still lose to a rival.
+  its lease stops. A doc key is the hash of the id, so any valid id fits the key limit of
+  Netlify (600 bytes). An id must be well-formed Unicode.
+- The real client retries a request that failed. When a write landed and its retry gets a 412,
+  the client reports `modified: false`. The adapter checks for that: a lock that names the
+  holder is the holder's own, and a blob with the write id of the caller is the caller's own.
+  The contract suites also run on a fake that does this on every conditional write.
+- A holder that stops halfway leaves its journal in the lock key. The next transaction on any
+  adapter object applies it first. If a write fails, the holder tries to finish the journal at
+  once. When that works, the transaction has committed and its caller gets the result. When it
+  does not, the caller gets `NetlifyCommitUncertainError`, and the transaction may still land
+  when the next transaction runs. The same error means the lease was lost after the journal was
+  sent. Do not retry such a transaction as if nothing was written. `StoreConflictError` is only
+  for a failure before the journal is stored, and then nothing is written. Outside a
+  transaction, a `get` or `query` can see part of a transaction while it applies, and until the
+  next transaction applies a journal that a crash left. A read-only transaction checks the lease
+  once, when `fn` ends.
+- A transaction throws `StoreConflictError` when it cannot get its turn and the lock in `waitMs`
+  in all (default 35 s, a little over the lease, so it outwaits a crashed holder). A lock that is
+  not readable, or that holds a bad journal, counts as held. To recover, find out why, then
+  delete the `lock` key by hand. A write made inside a transaction on the same adapter object
+  waits for its own transaction, so it throws after `waitMs`. Use `tx`.
+- All writes take the same lock, so they run one at a time. A write costs about six requests
+  and two more per doc. Each renew sends the journal again, so keep a transaction to a few docs.
+  A hot app needs a different `Store`. The lease compares the clocks of the instances, so keep
+  them within a few seconds of each other. The doc writes are not conditional: Netlify has no
+  conditional delete. A single doc write that stalls past the lease, after its renew, can land
+  after a rival's commit and overwrite it. The client retries a request for up to about 25 s,
+  so a long `leaseMs` is safer.
 - A `query` reads every doc of the collection, then filters in memory. Use it for small
   collections.
 - `region` is a claim. Netlify Blobs does not let you pick a region per store. Check where

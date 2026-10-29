@@ -7,8 +7,9 @@
 //   - `Blobs` maps to it directly. One key holds the bytes, and the metadata holds the size and
 //     content type. The ETag is the version.
 //   - `Store` keeps one key per doc, named by the hash of its id, so a key never passes the 600 byte
-//     limit. A transaction takes a lease lock on one key, runs, writes a journal of its writes,
-//     applies them, and drops the journal. A holder that finds a journal from a crashed holder
+//     limit. A transaction takes a lease lock on one key, runs, writes a journal of its writes into
+//     the lock key (one conditional write checks the lease and stores the journal), applies them,
+//     and clears the journal. A holder that finds a journal from a crashed holder
 //     applies it first, so for the next lock holder a transaction lands whole or not at all.
 //     A reader outside a transaction can see part of one while it applies.
 // Every read call asks for `consistency: "strong"`, because the default is eventual. `list` takes no
@@ -76,6 +77,13 @@ export interface NetlifyStoreOptions extends AdapterOptions {
 interface Lock {
   owner: string | null;
   expiresAt: number;
+  /** The journal of the holder: the writes of a transaction that is not yet applied. */
+  writes?: JournalWrite[];
+}
+
+interface Held {
+  write(writes: JournalWrite[] | undefined): Promise<void>;
+  readonly pending: JournalWrite[] | undefined;
 }
 
 type JournalWrite = { collection: string; id: string; doc: Doc | null };
@@ -151,78 +159,69 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     },
   });
 
-  const lockBody = (owner: string | null): string => JSON.stringify({ owner, expiresAt: owner === null ? 0 : now() + leaseMs } satisfies Lock);
+  const encodeLock = (owner: string | null, writes?: JournalWrite[]): string =>
+    JSON.stringify({ owner, expiresAt: owner === null ? 0 : now() + leaseMs, ...(writes ? { writes } : {}) } satisfies Lock);
 
-  /** Takes the lease. Returns the ETag of the lock key. A lock that is not readable counts as held. */
-  async function acquire(owner: string): Promise<string> {
-    const deadline = Date.now() + waitMs;
+  /** Null for a lock that is not readable. A lock that is not readable counts as held. */
+  const parseLock = (text: unknown): Lock | null => {
+    try {
+      const lock = JSON.parse(String(text)) as Partial<Lock>;
+      if (typeof lock.expiresAt !== "number" || !Number.isFinite(lock.expiresAt) || (lock.owner !== null && typeof lock.owner !== "string")) return null;
+      if (lock.writes !== undefined) {
+        if (!Array.isArray(lock.writes)) return null;
+        for (const w of lock.writes) {
+          assertCollection(w.collection);
+          assertId(w.id);
+          wellFormed(w.id, "an id");
+          if (w.doc !== null && (typeof w.doc !== "object" || Array.isArray(w.doc))) return null;
+        }
+      }
+      return lock as Lock;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Takes the lease. The lock key also holds the journal of the holder, so a write of the journal
+   * and the check of the lease are one conditional write. Returns the ETag of the lock key, and the
+   * journal of an earlier holder that must be applied. A write that landed but whose answer was
+   * lost shows as `modified: false` (the client retries it and gets a 412), so a lock that names
+   * us is ours.
+   */
+  async function acquire(owner: string, deadline: number): Promise<{ etag: string; pending?: JournalWrite[] }> {
     for (;;) {
       const current = await blobs.getWithMetadata("lock", { type: "text", ...strong });
-      let won: { modified: boolean; etag?: string };
       if (current === null) {
-        won = await blobs.set("lock", lockBody(owner), { onlyIfNew: true });
+        const won = await blobs.set("lock", encodeLock(owner), { onlyIfNew: true });
+        if (won.modified && won.etag) return { etag: won.etag };
+        if (won.modified) throw new Error("the lock write returned no ETag");
       } else {
         const held = parseLock(current.data);
-        const free = held !== null && (held.owner === null || (Number.isFinite(held.expiresAt) && held.expiresAt <= now()));
-        // An empty ETag would turn the next conditional write into an unconditional one.
-        if (free && !current.etag) throw new Error("the lock has no ETag");
-        won = free ? await blobs.set("lock", lockBody(owner), { onlyIfMatch: current.etag! }) : { modified: false };
-      }
-      if (won.modified) {
-        if (!won.etag) throw new Error("the lock write returned no ETag");
-        return won.etag;
+        if (held !== null && held.owner === owner) {
+          if (!current.etag) throw new Error("the lock has no ETag");
+          return { etag: current.etag, ...(held.writes ? { pending: held.writes } : {}) };
+        }
+        if (held !== null && (held.owner === null || held.expiresAt <= now())) {
+          // An empty ETag would turn the conditional write into an unconditional one.
+          if (!current.etag) throw new Error("the lock has no ETag");
+          const won = await blobs.set("lock", encodeLock(owner, held.writes), { onlyIfMatch: current.etag });
+          if (won.modified && won.etag) return { etag: won.etag, ...(held.writes ? { pending: held.writes } : {}) };
+          if (won.modified) throw new Error("the lock write returned no ETag");
+        }
       }
       if (Date.now() >= deadline) throw new StoreConflictError("could not get the store lock in time");
       await sleep(10 + Math.random() * 40);
     }
   }
 
-  const parseLock = (text: unknown): Lock | null => {
-    try {
-      const lock = JSON.parse(String(text)) as Partial<Lock>;
-      return typeof lock.expiresAt === "number" && (lock.owner === null || typeof lock.owner === "string") ? (lock as Lock) : null;
-    } catch {
-      return null;
-    }
-  };
-
-  // Each write renews the lease first, with a check that the lock is still ours. A holder that stalled past
-  // its lease finds the lock taken, and stops before it writes over a rival.
-  async function applyWrites(writes: JournalWrite[], renew: () => Promise<void>): Promise<void> {
-    for (const w of writes) {
-      await renew();
-      const key = await docKey(w.collection, w.id);
-      if (w.doc === null) await blobs.delete(key);
-      else await blobs.set(key, JSON.stringify({ id: w.id, doc: w.doc }));
-    }
-    await renew();
-    await blobs.delete("journal");
-  }
-
-  /** Finishes the writes of a holder that stopped after it wrote the journal. */
-  async function replayJournal(renew: () => Promise<void>): Promise<void> {
-    const text = (await blobs.get("journal", { type: "text", ...strong })) as string | null;
-    if (text === null) return;
-    let writes: JournalWrite[];
-    try {
-      writes = (JSON.parse(text) as { writes: JournalWrite[] }).writes;
-      for (const w of writes) {
-        assertCollection(w.collection);
-        assertId(w.id);
-        wellFormed(w.id, "an id");
-        if (w.doc !== null && (typeof w.doc !== "object" || Array.isArray(w.doc))) throw new Error();
-      }
-    } catch {
-      throw new Error("the store journal is not readable");
-    }
-    await applyWrites(writes, renew);
-  }
-
   // One transaction at a time per adapter object, so its own callers do not poll against each other.
-  // A call that waits longer than `waitMs` for its turn (a write made inside a transaction does) gives up.
+  // A call that has waited `waitMs` in all, for its turn and for the lock, gives up. A write made inside a
+  // transaction waits for its own transaction, so it gives up.
   let queue: Promise<unknown> = Promise.resolve();
 
-  async function locked<R>(work: (renew: () => Promise<void>, replay: () => Promise<void>) => Promise<R>): Promise<R> {
+  async function locked<R>(work: (held: Held) => Promise<R>): Promise<R> {
+    const deadline = Date.now() + waitMs;
     const previous = queue;
     let release!: () => void;
     queue = new Promise<void>((resolve) => (release = resolve));
@@ -231,33 +230,63 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
       try {
         await Promise.race([
           previous.catch(() => undefined),
-          new Promise((_, reject) => (timer = setTimeout(() => reject(new StoreConflictError("waited too long for an earlier transaction")), waitMs))),
+          new Promise((_, reject) => (timer = setTimeout(() => reject(new StoreConflictError("waited too long for an earlier transaction")), Math.max(0, deadline - Date.now())))),
         ]);
       } finally {
         clearTimeout(timer);
       }
       const owner = crypto.randomUUID();
-      let etag = await acquire(owner);
-      const renew = async () => {
-        // A write that conditions on the lock ETag fails when another holder took the lease.
-        const renewed = await blobs.set("lock", lockBody(owner), { onlyIfMatch: etag });
-        if (!renewed.modified || !renewed.etag) throw new StoreConflictError("the store lock was lost");
-        etag = renewed.etag;
+      const taken = await acquire(owner, deadline);
+      let etag = taken.etag;
+      let pending = taken.pending;
+      const held: Held = {
+        /** Writes the lock key with the given journal. It fails unless the lock is still ours. */
+        async write(writes) {
+          const done = await blobs.set("lock", encodeLock(owner, writes), { onlyIfMatch: etag });
+          if (done.modified && done.etag) {
+            etag = done.etag;
+            pending = writes;
+            return;
+          }
+          // Our write may have landed, and a retry of it was refused. Look at the lock.
+          const now = await blobs.getWithMetadata("lock", { type: "text", ...strong });
+          const lock = now === null ? null : parseLock(now.data);
+          if (now?.etag && lock !== null && lock.owner === owner && (lock.writes === undefined) === (writes === undefined)) {
+            etag = now.etag;
+            pending = lock.writes;
+            return;
+          }
+          throw new StoreConflictError("the store lock was lost");
+        },
+        get pending() {
+          return pending;
+        },
       };
       try {
-        await replayJournal(renew);
-        return await work(renew, () => replayJournal(renew));
+        if (pending) await applyWrites(pending, held);
+        return await work(held);
       } finally {
-        // Free the lock only if it is still ours. A lost lease makes this a no-op.
-        await blobs.set("lock", lockBody(null), { onlyIfMatch: etag }).catch(() => undefined);
+        // Free the lock only if it is still ours, and keep a journal that is not done. A lost lease makes this a no-op.
+        await blobs.set("lock", encodeLock(null, pending), { onlyIfMatch: etag }).catch(() => undefined);
       }
     } finally {
       release();
     }
   }
 
+  /** Applies a journal. Each write renews the lease first, with a check that the lock is still ours, so a holder that stalled stops. */
+  async function applyWrites(writes: JournalWrite[], held: Held): Promise<void> {
+    for (const w of writes) {
+      await held.write(writes);
+      const key = await docKey(w.collection, w.id);
+      if (w.doc === null) await blobs.delete(key);
+      else await blobs.set(key, JSON.stringify({ id: w.id, doc: w.doc }));
+    }
+    await held.write(undefined);
+  }
+
   async function transaction<R>(fn: (tx: StoreOps) => Promise<R>): Promise<R> {
-    return locked(async (renew, replay) => {
+    return locked(async (held) => {
       const writes = new Map<string, JournalWrite>();
       const noReadAfterWrite = () => {
         if (writes.size > 0) throw new Error("a transaction must read before it writes");
@@ -274,23 +303,26 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
         delete: (collection, id) => stage(collection, id, null),
       };
       const result = await fn(tx);
-      if (writes.size > 0) {
-        await renew();
-        // The holder replayed on entry, so the journal is empty. A refused write means a rival is here.
-        const journaled = await blobs.set("journal", JSON.stringify({ writes: [...writes.values()] }), { onlyIfNew: true }).catch((error: unknown) => {
-          throw new NetlifyCommitUncertainError(error); // the request may have landed before it failed
+      const list = [...writes.values()];
+      if (list.length === 0) {
+        await held.write(held.pending); // the lease must have held while fn read
+        return result;
+      }
+      // One conditional write checks the lease and stores the journal. If it fails with an error that is
+      // not a refusal, it may have landed.
+      await held.write(list).catch((error: unknown) => {
+        if (error instanceof StoreConflictError) throw error;
+        throw new NetlifyCommitUncertainError(error);
+      });
+      try {
+        await applyWrites(list, held);
+      } catch (error) {
+        // Finish the journal now if we can, so no reader keeps seeing half of it. If that works, the
+        // transaction did commit, and its caller gets the result. If not, the next holder finishes it.
+        if (error instanceof StoreConflictError) throw new NetlifyCommitUncertainError(error);
+        await applyWrites(list, held).catch(() => {
+          throw new NetlifyCommitUncertainError(error);
         });
-        if (!journaled.modified) throw new StoreConflictError("the store journal is held by another transaction");
-        try {
-          await applyWrites([...writes.values()], renew);
-        } catch (error) {
-          // Finish the journal now if we can, so no reader keeps seeing half of it. If that works, the
-          // transaction did commit, and its caller gets the result. If not, the next holder finishes it.
-          if (error instanceof StoreConflictError) throw new NetlifyCommitUncertainError(error);
-          await replay().catch(() => {
-            throw new NetlifyCommitUncertainError(error);
-          });
-        }
       }
       return result;
     });
@@ -320,6 +352,8 @@ export interface NetlifyBlobsOptions extends NetlifyOptions {
 interface BlobMetadata {
   size: number;
   contentType?: string;
+  /** A random id of the write. A put that was retried by the client can tell its own write from a rival's. */
+  write?: string;
 }
 
 function metadataOf(raw: Record<string, any>): BlobMetadata {
@@ -345,13 +379,20 @@ export function createNetlifyBlobs(blobs: NetlifyStoreLike, options: NetlifyBlob
     async put(key, data, opts) {
       const id = await entry(key);
       assertBlobPutOptions(opts);
-      const metadata: BlobMetadata = { size: data.length, ...(opts?.contentType ? { contentType: opts.contentType } : {}) };
+      const write = crypto.randomUUID();
+      const metadata: BlobMetadata = { size: data.length, ...(opts?.contentType ? { contentType: opts.contentType } : {}), write };
       // Netlify keeps 2 KiB of metadata, as base64 of the UTF-8 JSON.
       if (new TextEncoder().encode(JSON.stringify(metadata)).length > 1000) throw new RangeError("the content type is too long");
       const condition = opts?.ifMatch !== undefined ? { onlyIfMatch: opts.ifMatch } : opts?.ifNoneMatch === "*" ? { onlyIfNew: true } : {};
       // Netlify checks the condition and writes in one step. `modified: false` means it did not hold.
       const written = await blobs.set(id, data.slice().buffer, { metadata: { ...metadata }, ...condition });
-      if (!written.modified) return null;
+      if (!written.modified) {
+        // The client retries a request that failed. If the first try landed, the retry got a 412 and
+        // `modified: false` came back. Our write id in the metadata shows that it landed.
+        const found = await blobs.getMetadata(id, strong);
+        if (found?.etag && found.metadata.write === write) return { version: found.etag };
+        return null;
+      }
       if (!written.etag) throw new Error("the blob write returned no ETag");
       return { version: written.etag };
     },

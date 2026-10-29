@@ -27,8 +27,12 @@ function validateKey(key: string): void {
 
 const copy = (data: string | ArrayBuffer): ArrayBuffer => (typeof data === "string" ? new TextEncoder().encode(data).buffer : data.slice(0)) as ArrayBuffer;
 
-/** One fake store. Two adapters that get the same fake share data. */
-export function createFakeNetlifyStore(): NetlifyStoreLike {
+/**
+ * One fake store. Two adapters that get the same fake share data. With `retryAfterLanding`, a
+ * conditional write lands and then reports `modified: false`, as the real client does when it
+ * retries a request that had landed and gets a 412.
+ */
+export function createFakeNetlifyStore(opts: { retryAfterLanding?: boolean } = {}): NetlifyStoreLike {
   const entries = new Map<string, Entry>();
   let clock = 0;
   const present = (key: string) => entries.get(key) ?? null;
@@ -57,7 +61,7 @@ export function createFakeNetlifyStore(): NetlifyStoreLike {
       if (options.onlyIfMatch !== undefined && (!current || current.etag !== options.onlyIfMatch)) return { modified: false };
       const etag = `"${++clock}"`;
       entries.set(key, { data: copy(data), etag, metadata: structuredClone(options.metadata ?? {}) });
-      return { modified: true, etag };
+      return (options.onlyIfNew || options.onlyIfMatch !== undefined) && opts.retryAfterLanding ? { modified: false } : { modified: true, etag };
     },
     async delete(key) {
       validateKey(key);
