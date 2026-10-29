@@ -500,6 +500,32 @@ holds an address or a body.
   it against a fake binding that keeps the raw message, and parses it back. It does not call
   Cloudflare. Check your sender domain and destination rules in the Cloudflare dashboard.
 
+## Run Blobs on local files
+
+`agentic-identity/file` also has `createFileBlobs`, a `Blobs` that keeps objects in a folder on
+disk. Use it for local development and for CLIs on Node. It passes the `Blobs` contract suite,
+including the guards for two instances on one folder. For a `Store` on a file, use `createFileStore`.
+
+```ts
+import { createFileBlobs } from "agentic-identity/file";
+
+const blobs = createFileBlobs({ dir: "./.data", urlBase: "https://files.example/blob", urlSecret });
+```
+
+- A write goes to a temp file, is synced, and is renamed over the target. A reader never sees half
+  of a write.
+- A file name is the SHA-256 of the key. Keys with slashes, dots, or non-ASCII characters are safe.
+- Every write and delete takes a lock file (`blobs/.lock` in `dir`), so instances on one folder, in
+  one process or in several, keep the `ifMatch` and `ifNoneMatch` guarantees. The owner touches the
+  lock while it works. A lock that nobody touched for 60 seconds is taken as left by a dead process.
+  A process that is paused for longer than that can lose its lock.
+- Reads take no lock. A crash can leave `.tmp` files behind. They are safe to delete when no process
+  is writing.
+- A damaged object file makes a read throw. It is never read as a missing object.
+- `signedUrl` needs `urlBase` and `urlSecret` (32 bytes or more), as on R2. Without them, it throws.
+- Do not use a network file system. The lock and the rename need a local one.
+- This is not a production store: there is one writer at a time.
+
 ## Run on Firebase
 
 `agentic-identity/firestore` has a Firestore `Store` and a Firestore `Blobs`. They call the
