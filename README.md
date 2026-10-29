@@ -57,11 +57,12 @@ into `wrangler.jsonc`, set `REGION` to `eu`, and set the OIDC settings in
 [Worker API](#worker-api).
 
 To try the API without an identity provider, put `IDENTITY_UNSAFE_TEST_MINT=1` in
-`.dev.vars`. Then sign in a test person and read the person back. A `userId` works
+`.dev.vars`. Then sign in a test person. The answer is `{ "token": ... }`. Use that token to read the person back. A `userId` works
 once per local database, so use a new one each time you start again:
 
 ```sh
 curl -s -X POST http://localhost:8787/api/v1/test/token -H "content-type: application/json" -d '{"userId":"ana"}'
+# {"token":"<token>"}
 curl -s http://localhost:8787/api/v1/me -H "Authorization: Bearer <token>"
 ```
 
