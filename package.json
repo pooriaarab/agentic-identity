@@ -9,10 +9,7 @@
     "permissions",
     "sharing",
     "invites",
-    "oauth",
-    "api-keys",
     "audit-log",
-    "mcp",
     "cloudflare"
   ],
   "license": "MIT",

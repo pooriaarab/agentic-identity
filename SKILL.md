@@ -1,6 +1,6 @@
 ---
 name: agentic-identity
-description: People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail. 0.1.0 preview: principals, sharing, ports, memory and Cloudflare adapters, contract suites.
+description: "People, agents, and the access they share: sign-in, delegation, invites, links, and an audit trail. 0.1.0 preview: principals, sharing, ports, memory and Cloudflare adapters, contract suites."
 ---
 
 # agentic-identity

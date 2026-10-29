@@ -28,7 +28,7 @@ npm install agentic-identity
 - Share links with a role, an optional expiry, and a signed-in-only option.
 - An audit trail of access checks that shows who acted, and for whom. Each entry keeps the principal kind.
 - Storage behind ports (`Store`, `Blobs`, `Auth`, `Realtime`, `Mail`, `Queue`), so you can move from Cloudflare D1 to another store.
-- Region settings on every adapter, so data stays in the EU.
+- A region claim on every adapter. `assertRegion` fails at start-up when a claim is missing or wrong.
 
 ## Not in 0.1.0
 
