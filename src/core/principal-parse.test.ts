@@ -12,6 +12,15 @@ describe("parsePrincipal", () => {
   test("accepts every kind", () => {
     for (const kind of PRINCIPAL_KINDS) expect(parsePrincipal({ kind, id: "a-1.b_2" })).toEqual({ kind, id: "a-1.b_2" });
   });
+  test("accepts an id that starts with a digit, _ or -", () => {
+    for (const id of ["9a", "_ci-user", "-x"]) expect(parsePrincipal({ kind: "human", id }).id).toBe(id);
+  });
+  test("no kind name holds a colon, so kind:id stays unambiguous", () => {
+    for (const kind of PRINCIPAL_KINDS) expect(kind).not.toContain(":");
+  });
+  test("the error names its class", () => {
+    expect(() => parsePrincipal(null)).toThrow(expect.objectContaining({ name: "PrincipalParseError" }));
+  });
   test("accepts a human and an agent, and drops extra fields", () => {
     expect(parsePrincipal({ kind: "human", id: "u1", scopes: ["*:admin"] })).toEqual({ kind: "human", id: "u1" });
     expect(parsePrincipal({ kind: "agent", id: "bot" })).toEqual({ kind: "agent", id: "bot" });
@@ -25,7 +34,7 @@ describe("parsePrincipal", () => {
   test.each([undefined, "", 5, null, "a".repeat(129)])("rejects id %j", (id) => {
     expect(() => parsePrincipal({ kind: "human", id })).toThrow(/id/);
   });
-  test.each(["a b", "a:b", "a/b", "a@b.c", "a\nb", "é", "-a", ".a"])("rejects id %j", (id) => {
+  test.each(["a b", "a:b", "a/b", "a@b.c", "a\nb", "é", ".a"])("rejects id %j", (id) => {
     expect(() => parsePrincipal({ kind: "human", id })).toThrow(/id/);
   });
 });

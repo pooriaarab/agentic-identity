@@ -6,7 +6,7 @@ Status: 0.5.0 preview. Principals and delegation, sharing (roles, invites, links
 
 ## Principal input
 
-Import `PRINCIPAL_KINDS`, `parsePrincipal`, and `subjectOf` from `agentic-identity`. `parsePrincipal(input)` returns `{ kind, id }` or throws `PrincipalParseError` (kind missing or unknown; id not 1 to 128 chars of `A-Za-z0-9._-` starting with a letter or digit). `subjectOf(principal)` returns `kind:id`.
+Import `PRINCIPAL_KINDS`, `parsePrincipal`, and `subjectOf` from `agentic-identity`. `parsePrincipal(input)` returns `{ kind, id }` or throws `PrincipalParseError` (kind missing or unknown; id not 1 to 128 chars of `A-Za-z0-9._-` starting with a letter, digit, `_` or `-`). `subjectOf(principal)` returns `kind:id`.
 
 ## Docs
 

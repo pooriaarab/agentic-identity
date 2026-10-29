@@ -101,9 +101,11 @@ const PARENT_KINDS: Record<PrincipalKind, PrincipalKind[]> = {
   user_token: ["human"],
 };
 
-const PRINCIPAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PRINCIPAL_ID_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
 
-export class PrincipalParseError extends Error {}
+export class PrincipalParseError extends Error {
+  override name = "PrincipalParseError";
+}
 
 /**
  * Check untrusted input for a principal reference: a known `kind` and a safe `id`.

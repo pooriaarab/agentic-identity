@@ -129,7 +129,7 @@ const isPrincipal = (p: Principal) => isKind(p.kind);
 To check a principal that comes from outside, call `parsePrincipal`. It throws
 `PrincipalParseError` when `kind` is missing or unknown (it never defaults to
 `human`), or when `id` is not 1 to 128 characters of `A-Z a-z 0-9 . _ -` that
-start with a letter or digit. It returns only `{ kind, id }`.
+start with a letter, digit, `_` or `-`. It returns only `{ kind, id }`.
 `subjectOf` gives the stable string `kind:id`.
 
 ```ts
