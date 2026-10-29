@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { createMemoryStore } from "./adapters/memory.js";
 import { deletePerson } from "./gdpr.js";
-import { AccountExportError, eraseAccount, exportAccount, type AccountApp, type AccountFile } from "./account.js";
+import { AccountExportError, eraseAccount, exportAccount, writeZip, type AccountApp, type AccountFile } from "./account.js";
 
 const app = (id: string, files: AccountFile[] = [], erased: string[] = [], fail = false): AccountApp => ({
   id,
@@ -204,5 +204,17 @@ describe("eraseAccount", () => {
     await expect(eraseAccount("", [app("docs", [], erased)], createMemoryStore(), { now })).rejects.toThrow("subject is required");
     await expect(eraseAccount("ana", [app("docs", [], erased), app("Bad", [], erased)], createMemoryStore(), { now })).rejects.toThrow("invalid app id");
     expect(erased).toEqual([]);
+  });
+});
+
+describe("clock and zip names", () => {
+  test("eraseAccount refuses a clock that is not finite before any eraser runs", async () => {
+    const erased: string[] = [];
+    await expect(eraseAccount("ana", [app("docs", [], erased)], createMemoryStore(), { now: () => NaN })).rejects.toThrow("finite");
+    expect(erased).toEqual([]);
+  });
+  test("writeZip refuses two files with the same name", () => {
+    const one = { name: "a", data: new Uint8Array(1) };
+    expect(() => writeZip([one, one])).toThrow("same name");
   });
 });

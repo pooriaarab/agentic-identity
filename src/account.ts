@@ -97,6 +97,7 @@ function crc32(data: Uint8Array): number {
 export function writeZip(entries: { name: string; data: Uint8Array }[]): Uint8Array {
   const sorted = [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (sorted.length > FILE_LIMIT) throw new Error("too many files for a zip");
+  for (let i = 1; i < sorted.length; i++) if (sorted[i].name === sorted[i - 1].name) throw new Error("two files have the same name");
   const parts: Uint8Array[] = [];
   const central: Uint8Array[] = [];
   let offset = 0;
@@ -259,6 +260,9 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
   if (typeof subject !== "string" || subject === "") throw new Error("subject is required");
   checkApps(apps);
   const now = options.now ?? Date.now;
+  // A clock that is broken fails before any eraser runs, so no erase goes without its entry.
+  const first = now();
+  if (typeof first !== "number" || !Number.isFinite(first)) throw new Error("now must return a finite number");
   // Found before the first eraser runs: an eraser may remove the principals this reads.
   const actor = await actorFor(store, subject, options.actor ?? null);
   const results: EraseResult[] = [];
@@ -270,7 +274,8 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
       error = cause instanceof Error ? cause.message : "erase failed";
     }
     const id = crypto.randomUUID();
-    const entry = auditEntry(actor, { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
+    const later = now();
+    const entry = auditEntry(actor, { id, at: typeof later === "number" && Number.isFinite(later) ? later : first, action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
     let audited = true;
     try {
       await store.put("audit", id, entry as unknown as Doc);
