@@ -7,9 +7,9 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.5.0 preview. This code has principals and delegation chains,
+> Status: 0.6.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
-> with in-memory adapters for most, Cloudflare D1 and R2 adapters, the contract suites,
+> with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
 > personal data export and delete, and the typed SDK. The CLI and the MCP server are built. They work on a local file.
 >

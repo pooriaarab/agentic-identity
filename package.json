@@ -1,6 +1,6 @@
 {
   "name": "agentic-identity",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "People, agents, and the access they share: delegation, invites, links, and an audit trail.",
   "keywords": [
     "identity",
