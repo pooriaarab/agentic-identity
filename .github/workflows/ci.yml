@@ -37,4 +37,4 @@ jobs:
           java-version: "21"
       - run: npm ci
       - name: Run the contract suites on the Firestore emulator
-        run: npx --yes firebase-tools@14.27.0 emulators:exec --only firestore --project demo-contract "npx vitest run src/adapters/firestore.test.ts"
+        run: npx --yes firebase-tools@14.27.0 emulators:exec --only firestore --project demo-contract "npx vitest run src/adapters/firestore.test.ts src/adapters/storequeue.test.ts"

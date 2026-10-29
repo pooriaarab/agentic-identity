@@ -6,4 +6,5 @@ export * from "./core/sharing.js";
 export * from "./ports.js";
 export { createHmacRealtime } from "./adapters/hmac.js";
 export { createMemoryAuth, createMemoryBlobs, createMemoryMail, createMemoryQueue, createMemoryStore } from "./adapters/memory.js";
+export { createStoreQueue, type StoreQueueOptions } from "./adapters/storequeue.js";
 export { createStoreAuth, issueCredential, revokeCredential } from "./credentials.js";

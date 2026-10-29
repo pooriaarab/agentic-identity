@@ -28,6 +28,7 @@ import {
 import { assertSecret, signBlobUrl } from "./signedurl.js";
 
 export { verifySignedBlobUrl } from "./signedurl.js";
+export { createStoreQueue, type StoreQueueOptions } from "./storequeue.js";
 
 export interface FirestoreOptions extends AdapterOptions {
   projectId: string;

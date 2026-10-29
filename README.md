@@ -446,6 +446,42 @@ const blobs = createR2Blobs(env.BUCKET, { region: "eu", urlBase: "https://files.
   and `verifySignedBlobUrl` both throw when it is missing or short. Use one
   secret per bucket.
 
+## Queue adapter
+
+`createStoreQueue(store, { now?, leaseSeconds? })` is a `Queue` that keeps messages in any
+`Store`. Use it with D1 on Cloudflare or with Firestore. It is exported from the main entry
+point, `agentic-identity/cloudflare`, and `agentic-identity/firestore`. It passes the Queue
+contract suite on memory, on D1 (miniflare), and on Firestore (the emulator in CI).
+
+- Nothing delivers by itself. Call `run()` from a cron trigger or a loop. It delivers every
+  due message, retries included, and `dead(topic)` lists the parked bodies.
+- `run()` claims a message in a transaction with a lease (60 seconds by default). Two runners on
+  one Store do not both deliver it. A runner that crashes loses the lease, and another runner
+  delivers the message with a higher attempt. Delivery is at-least-once: write handlers that
+  cope with a repeat.
+- Runner clocks must agree to well within `leaseSeconds`. A runner that is ahead by more
+  than the lease sees a live claim as expired and delivers the message again.
+- A handler must finish within `leaseSeconds`. After that another runner may deliver the
+  message again, and the first runner's result is dropped.
+- A retry has the due time of its failure, so it goes behind messages sent after it. The order
+  is strict only for messages that succeed the first time.
+- A doc in `queue_messages` that is not a valid message is parked, and `run()` goes on. A run
+  whose claim loses a race for good (`StoreConflictError`) moves to the next topic.
+- Parked messages and parked bad docs stay in the Store. There is no purge yet, so delete them
+  from `queue_messages` yourself.
+- A Store error that is not a conflict (a network error) ends `run()`, so the fault shows.
+  The clock must return whole milliseconds, 0 or more. Any other value ends `send()`, and ends
+  `run()` when it is read at claim time, with a `RangeError` before a write. A clock that goes bad
+  between a claim and its settle writes nothing, and the message returns when its lease ends.
+- On D1 each claim scans the whole `queue_messages` collection, so a run over n messages reads
+  about n² rows. For a large queue, add an expression index on `topic`, `state`, and `due`,
+  like the `docs_team` example in the D1 schema notes.
+- Firestore needs two composite indexes on `queue_messages`: (`topic`, `state`, `due`) and
+  (`topic`, `state`, `key`), each ascending. The emulator does not check indexes. Production
+  Firestore refuses the queries until you create them.
+- It is not Cloudflare Queues. A Cloudflare Queues binding has its own clock and cannot run the
+  contract suite, which sets the clock.
+
 ## Run on Firebase
 
 `agentic-identity/firestore` has a Firestore `Store` and a Firestore `Blobs`. They call the
@@ -471,7 +507,7 @@ const store = createFirestoreStore(connection);
 const blobs = createFirestoreBlobs({ ...connection, urlBase: "https://files.example/blob", urlSecret });
 ```
 
-- `Auth`, `Realtime`, `Mail`, and `Queue` have no Firestore adapter. Mix adapters as you need.
+- `Auth`, `Realtime`, and `Mail` have no Firestore adapter. `Queue` runs on it through `createStoreQueue` (see Queue adapter). Mix adapters as you need.
 - `createFirestoreBlobs` keeps an object in chunk docs (512 KiB each, `chunkBytes`) and caps it
   at 32 MiB (`maxBytes`). A put writes the chunks, then swaps the meta doc in one transaction
   that checks `ifMatch` or `ifNoneMatch`. A crash in between leaves orphan chunks that no read
