@@ -297,3 +297,6 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
   }
   return { ok: results.every((r) => r.ok && r.audited), results };
 }
+
+export { createAccountRegistry } from "./account-registry.js";
+export type { AccountCounts, AccountPackage, AccountRecords, AccountRegistry, AccountSubject, PackageEraseReport } from "./account-registry.js";
