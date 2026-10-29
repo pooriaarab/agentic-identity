@@ -499,7 +499,7 @@ structural type for the Netlify `Store`, so pass the result of `getStore(...)` f
 import { getStore } from "@netlify/blobs";
 import { createNetlifyBlobs, createNetlifyStore } from "agentic-identity/netlify";
 
-const store = createNetlifyStore(getStore("identity-docs"), { region: "eu" });
+const store = createNetlifyStore(getStore({ name: "identity-docs", consistency: "strong" }), { region: "eu" });
 const blobs = createNetlifyBlobs(getStore("identity-files"), { region: "eu", urlBase, urlSecret });
 ```
 
@@ -513,7 +513,10 @@ it sends no ETag on a read. Run the suites on a live Netlify site before you rel
 this adapter in production.
 
 - Give the `Store` and the `Blobs` each their own Netlify store. The adapter owns every key in it.
-- Every read asks for `consistency: "strong"`. The default of Netlify Blobs is eventual.
+- Every read call asks for `consistency: "strong"`. The default of Netlify Blobs is eventual.
+  `list` has no such option, so make the `Store`'s Netlify store with `consistency: "strong"`,
+  as above. A stale list can miss a doc that was just made, so `tx.query` could miss it.
+  `createNetlifyStore` throws for a store that says it is not strong.
 - `Blobs` maps to Netlify directly. A conditional `set` (`onlyIfNew`, `onlyIfMatch`) is atomic,
   and the ETag is the version. The size and content type sit in the metadata. A key is hashed,
   so any key works. `signedUrl` makes an HMAC URL for your function, as the R2 adapter does.
@@ -522,18 +525,22 @@ this adapter in production.
   lease lock on one key (`leaseMs`, default 30 s) and a journal. A transaction takes the lock,
   runs, writes the journal, applies the writes, and drops the journal. Before each write it
   renews the lease with a check that the lock is still its own, so a holder that stalled past
-  its lease stops and throws `StoreConflictError`. A doc key is the hash of the id, so any
+  its lease stops. A doc key is the hash of the id, so any
   valid id fits the key limit of Netlify (600 bytes). An id must be well-formed Unicode.
 - A holder that stops halfway leaves its journal. The next transaction on any adapter object
   applies it first. If a write fails, the holder tries to finish the journal at once. When that
   works, the transaction has committed and its caller gets the result. When it does not, the
-  caller gets the error, and the transaction may still land when the next transaction runs.
-  Until then, a `get` or `query` can see part of it.
+  caller gets `NetlifyCommitUncertainError`, and the transaction may still land when the next
+  transaction runs. The same error means the lease was lost after the journal was sent. Do not
+  retry such a transaction as if nothing was written. `StoreConflictError` is only for a failure
+  before the journal is sent, and then nothing is written. Outside a transaction, a `get` or
+  `query` can see part of a transaction while it applies, and until the next transaction applies
+  a journal that a crash left.
 - A transaction throws `StoreConflictError` when it cannot get the lock in `waitMs` (default
-  15 s). A lock that is not readable counts as held. A write made inside a transaction on the
+  35 s, a little over the lease, so it outwaits a crashed holder). A lock that is not readable counts as held. A write made inside a transaction on the
   same adapter object waits for its own transaction, so it throws after `waitMs`. Use `tx`.
-- All writes take the same lock, so they run one at a time. A write costs about six requests
-  and one more per doc. A hot app needs a different `Store`. The lease compares the clocks of
+- All writes take the same lock, so they run one at a time. A write costs about eight requests
+  and two more per doc. A hot app needs a different `Store`. The lease compares the clocks of
   the instances, so keep them within a few seconds of each other. A write that takes longer
   than the lease, between two renewals, can still lose to a rival.
 - A `query` reads every doc of the collection, then filters in memory. Use it for small

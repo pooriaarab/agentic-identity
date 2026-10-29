@@ -5,6 +5,7 @@
 //   - Every write gives the key a new ETag, even for equal bytes. (The local `BlobsServer` of
 //     `@netlify/blobs` builds an ETag from the file mtime, so two writes in one millisecond share one.)
 //   - A read of a missing key returns null. `list` returns the keys under a prefix.
+//   - Metadata is capped near 2 KiB, as base64 of its UTF-8 JSON.
 //   - A key must pass the client's `validateKey`: not empty, not starting with `/` or `%2F`, at most 600 bytes of UTF-8.
 // One thing no test here proves: that the live service returns, on a read, the ETag string that it takes in
 // `If-Match`. The adapters depend on it. The real client reads the `etag` header, and the local server sends none.
@@ -50,6 +51,7 @@ export function createFakeNetlifyStore(): NetlifyStoreLike {
     },
     async set(key, data, options = {}) {
       validateKey(key);
+      if (btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(options.metadata ?? {})))).length > 1900) throw new Error("Metadata object exceeds the 2 KiB limit.");
       const current = present(key);
       if (options.onlyIfNew && current) return { modified: false };
       if (options.onlyIfMatch !== undefined && (!current || current.etag !== options.onlyIfMatch)) return { modified: false };

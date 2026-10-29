@@ -11,7 +11,7 @@ import { BlobsServer } from "@netlify/blobs/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { StoreConflictError } from "../ports.js";
 import { runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
-import { createNetlifyBlobs, createNetlifyStore, verifySignedBlobUrl, type NetlifyStoreLike } from "./netlify.js";
+import { NetlifyCommitUncertainError, createNetlifyBlobs, createNetlifyStore, verifySignedBlobUrl, type NetlifyStoreLike } from "./netlify.js";
 import { createFakeNetlifyStore } from "./netlify.fake.js";
 
 const SECRET = "s".repeat(32);
@@ -68,7 +68,10 @@ describe("Netlify store lock and journal", () => {
   it("finishes the writes of a holder that stopped after it wrote the journal", async () => {
     const fake = createFakeNetlifyStore();
     const { store, broken } = breakable(fake);
-    await expect(twoDocs(createNetlifyStore(store, { waitMs: 500 }))).rejects.toThrow("write failed");
+    const failure = await twoDocs(createNetlifyStore(store, { waitMs: 500 })).catch((e: unknown) => e);
+    // The caller learns that the outcome is unknown, and that no retry is safe to assume.
+    expect(failure).toBeInstanceOf(NetlifyCommitUncertainError);
+    expect(((failure as Error).cause as Error).message).toBe("write failed");
     expect(await createNetlifyStore(fake).get("docs", "b")).toBeNull();
     broken.on = false;
     // The next transaction on any adapter replays the journal before its own reads.
@@ -97,9 +100,45 @@ describe("Netlify store lock and journal", () => {
         return result;
       },
     };
-    await expect(twoDocs(createNetlifyStore(stalling, options))).rejects.toBeInstanceOf(StoreConflictError);
+    await expect(twoDocs(createNetlifyStore(stalling, options))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
     expect(await rival.get("docs", "a")).toEqual({ n: 1 });
     expect(await rival.get("docs", "b")).toEqual({ who: "rival" });
+  });
+
+  it("throws StoreConflictError, with nothing written, when a rival journal appears first", async () => {
+    const fake = createFakeNetlifyStore();
+    const racing: NetlifyStoreLike = {
+      ...fake,
+      set: async (key, data, options) => {
+        if (key === "journal") await fake.set("journal", JSON.stringify({ writes: [] }));
+        return fake.set(key, data, options);
+      },
+    };
+    await expect(twoDocs(createNetlifyStore(racing, { waitMs: 100 }))).rejects.toBeInstanceOf(StoreConflictError);
+    expect(await createNetlifyStore(fake).get("docs", "a")).toBeNull();
+  });
+
+  it("reports an unknown outcome when the journal write itself fails", async () => {
+    const fake = createFakeNetlifyStore();
+    const lossy: NetlifyStoreLike = { ...fake, set: async (key, data, options) => (key === "journal" ? Promise.reject(new Error("dropped")) : fake.set(key, data, options)) };
+    await expect(twoDocs(createNetlifyStore(lossy, { waitMs: 100 }))).rejects.toBeInstanceOf(NetlifyCommitUncertainError);
+  });
+
+  it("refuses a doc stored under another key", async () => {
+    const fake = createFakeNetlifyStore();
+    const store = createNetlifyStore(fake);
+    await store.put("docs", "a", { n: 1 });
+    await store.put("docs", "b", { n: 2 });
+    const [one, two] = (await fake.list({ prefix: "d/docs/" })).blobs;
+    await fake.set(one!.key, (await fake.get(two!.key, { type: "text", consistency: "strong" })) as string);
+    await expect(store.query("docs", {})).rejects.toThrow("wrong key");
+  });
+
+  it("refuses a Netlify store that is not strongly consistent", () => {
+    for (const consistency of ["eventual", "other"]) {
+      expect(() => createNetlifyStore({ ...createFakeNetlifyStore(), client: { consistency } } as never)).toThrow("strong");
+    }
+    expect(() => createNetlifyStore({ ...createFakeNetlifyStore(), client: { consistency: "strong" } } as never)).not.toThrow();
   });
 
   it("gives up on a write made inside a transaction, and does not hang", async () => {
@@ -216,7 +255,8 @@ describe("Netlify blobs", () => {
     await blobs.put("k".repeat(5001), Uint8Array.of(2));
     expect([(await blobs.get("k".repeat(5000)))!.data[0], (await blobs.get("k".repeat(5001)))!.data[0]]).toEqual([1, 2]);
     await expect(blobs.put("a\uD800", Uint8Array.of(1))).rejects.toThrow("well-formed");
-    await expect(blobs.put("c", Uint8Array.of(1), { contentType: `text/${"x".repeat(2000)}` })).rejects.toThrow();
+    await expect(blobs.put("c", Uint8Array.of(1), { contentType: `text/${"x".repeat(2000)}` })).rejects.toThrow(RangeError);
+    await expect(blobs.put("c", Uint8Array.of(1), { contentType: `text/${"é".repeat(600)}` })).rejects.toThrow(RangeError);
     const [{ key }] = (await fake.list({ prefix: "b/" })).blobs;
     await fake.set(key, new ArrayBuffer(1), { metadata: { size: "1" } });
     await expect(blobs.get("k".repeat(5000))).rejects.toThrow("bad metadata");
@@ -239,6 +279,13 @@ describe("the real @netlify/blobs client on the local server", () => {
   afterAll(async () => {
     await server.stop();
     rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("tells an eventual store from a strong one", () => {
+    const url = "http://localhost:1";
+    const make = (consistency?: "strong") => getStore({ name: "c", siteID: "site", token: "t", apiURL: url, edgeURL: url, uncachedEdgeURL: url, ...(consistency ? { consistency } : {}) });
+    expect(() => createNetlifyStore(make() as unknown as NetlifyStoreLike)).toThrow("strong");
+    expect(() => createNetlifyStore(make("strong") as unknown as NetlifyStoreLike)).not.toThrow();
   });
 
   it("runs a conditional put, a refused put, and a delete through the adapter", async () => {

@@ -6,10 +6,14 @@
 // `onlyIfMatch`), and that check is atomic. Nothing spans two keys.
 //   - `Blobs` maps to it directly. One key holds the bytes, and the metadata holds the size and
 //     content type. The ETag is the version.
-//   - `Store` keeps one key per doc, named by the hash of its id, so a key never passes the 600 byte limit. A transaction takes a lease lock on one key, runs, writes a
-//     journal of its writes, applies them, and drops the journal. A holder that finds a journal
-//     from a crashed holder applies it first, so a transaction lands whole or not at all.
-// Every read asks for `consistency: "strong"`, because the default is eventual.
+//   - `Store` keeps one key per doc, named by the hash of its id, so a key never passes the 600 byte
+//     limit. A transaction takes a lease lock on one key, runs, writes a journal of its writes,
+//     applies them, and drops the journal. A holder that finds a journal from a crashed holder
+//     applies it first, so for the next lock holder a transaction lands whole or not at all.
+//     A reader outside a transaction can see part of one while it applies.
+// Every read call asks for `consistency: "strong"`, because the default is eventual. `list` takes no
+// such option, so the Netlify store you pass to `createNetlifyStore` must be made with
+// `getStore({ name, consistency: "strong" })`. The adapter refuses a store that says it is not.
 import {
   StoreConflictError,
   assertBlobPutOptions,
@@ -39,6 +43,17 @@ export interface NetlifyStoreLike {
   list(options: { prefix: string }): Promise<{ blobs: { key: string; etag: string }[] }>;
 }
 
+/**
+ * The outcome of a transaction is not known: it failed after its journal was sent. It may still
+ * commit, when the next transaction applies the journal. Do not run it again as if nothing happened.
+ */
+export class NetlifyCommitUncertainError extends Error {
+  constructor(cause: unknown) {
+    super("the transaction failed after it was journaled, and it may still commit", { cause });
+    this.name = "NetlifyCommitUncertainError";
+  }
+}
+
 export interface NetlifyOptions extends AdapterOptions {
   region: NonNullable<AdapterOptions["region"]>;
 }
@@ -54,7 +69,7 @@ const wellFormed = (text: string, what: string) => {
 export interface NetlifyStoreOptions extends AdapterOptions {
   /** How long a holder owns the lock before another may take it. Defaults to 30000. */
   leaseMs?: number;
-  /** How long a transaction waits for the lock before it throws `StoreConflictError`. Defaults to 15000. */
+  /** How long a transaction waits for the lock before it throws `StoreConflictError`. Defaults to 35000, a little over `leaseMs`, so it outwaits a crashed holder. */
   waitMs?: number;
 }
 
@@ -75,10 +90,13 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
   const region = options.region === undefined ? "unknown" : parseRegion(options.region);
   const now = options.now ?? Date.now;
   const leaseMs = options.leaseMs ?? 30_000;
-  const waitMs = options.waitMs ?? 15_000;
+  const waitMs = options.waitMs ?? 35_000;
   for (const [name, value] of [["leaseMs", leaseMs], ["waitMs", waitMs]] as const) {
     if (!Number.isInteger(value) || value < 1) throw new RangeError(`${name} must be an integer of 1 or more`);
   }
+  // `list` has no consistency option, so it uses the store's own. Refuse a store that says it is eventual.
+  const own = (blobs as { client?: { consistency?: unknown } }).client?.consistency;
+  if (own !== undefined && own !== "strong") throw new Error('make the Netlify store with getStore({ name, consistency: "strong" })');
   const strong = { consistency: "strong" } as const;
   const docKey = async (collection: string, id: string) => {
     assertCollection(collection);
@@ -94,6 +112,8 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
     const stored = JSON.parse(text) as { id?: unknown; doc?: unknown };
     const { id, doc } = stored;
     if (typeof id !== "string" || typeof doc !== "object" || doc === null || Array.isArray(doc)) throw new Error("a stored doc is not readable");
+    // The key names the hash of the id. A value under another key is not this doc.
+    if (key !== `${key.slice(0, key.lastIndexOf("/") + 1)}${await sha256Hex(id)}`) throw new Error("a stored doc is under the wrong key");
     return { id, doc: doc as Doc };
   };
 
@@ -256,15 +276,19 @@ export function createNetlifyStore(blobs: NetlifyStoreLike, options: NetlifyStor
       const result = await fn(tx);
       if (writes.size > 0) {
         await renew();
-        await blobs.set("journal", JSON.stringify({ writes: [...writes.values()] }));
+        // The holder replayed on entry, so the journal is empty. A refused write means a rival is here.
+        const journaled = await blobs.set("journal", JSON.stringify({ writes: [...writes.values()] }), { onlyIfNew: true }).catch((error: unknown) => {
+          throw new NetlifyCommitUncertainError(error); // the request may have landed before it failed
+        });
+        if (!journaled.modified) throw new StoreConflictError("the store journal is held by another transaction");
         try {
           await applyWrites([...writes.values()], renew);
         } catch (error) {
           // Finish the journal now if we can, so no reader keeps seeing half of it. If that works, the
           // transaction did commit, and its caller gets the result. If not, the next holder finishes it.
-          if (error instanceof StoreConflictError) throw error;
+          if (error instanceof StoreConflictError) throw new NetlifyCommitUncertainError(error);
           await replay().catch(() => {
-            throw error;
+            throw new NetlifyCommitUncertainError(error);
           });
         }
       }
@@ -322,7 +346,8 @@ export function createNetlifyBlobs(blobs: NetlifyStoreLike, options: NetlifyBlob
       const id = await entry(key);
       assertBlobPutOptions(opts);
       const metadata: BlobMetadata = { size: data.length, ...(opts?.contentType ? { contentType: opts.contentType } : {}) };
-      if (JSON.stringify(metadata).length > 1500) throw new RangeError("the content type is too long");
+      // Netlify keeps 2 KiB of metadata, as base64 of the UTF-8 JSON.
+      if (new TextEncoder().encode(JSON.stringify(metadata)).length > 1000) throw new RangeError("the content type is too long");
       const condition = opts?.ifMatch !== undefined ? { onlyIfMatch: opts.ifMatch } : opts?.ifNoneMatch === "*" ? { onlyIfNew: true } : {};
       // Netlify checks the condition and writes in one step. `modified: false` means it did not hold.
       const written = await blobs.set(id, data.slice().buffer, { metadata: { ...metadata }, ...condition });
