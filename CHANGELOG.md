@@ -8,7 +8,10 @@
 
 ### Changed
 
-- The Netlify contract suites (`Store`, audit, `Blobs`, lock and journal) run on the real `@netlify/blobs` client and its local server in CI. The local server checks a condition and writes in two steps, as the service does.
+- The Netlify contract suites (`Store`, audit, `Blobs`, lock and journal) run on the real `@netlify/blobs` client and its local server in CI. A test `fetch` wrapper makes the local server check a condition and write in one step, as the Netlify service does.
+
+### Internal
+
 - Publish runs for one ref wait for each other, so two runs cannot both publish the same version. A running publish is not cancelled.
 
 ## 0.7.0 - 2026-10-29
