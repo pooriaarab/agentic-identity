@@ -11,7 +11,7 @@
 //  9. A failing audit write is reported, and the erase goes on.
 // 10. An empty subject is refused.
 // 11. A path under a file ("x" and "x/y"), a bad content type, and a name over 65,535 bytes fail as
-//     an AccountExportError (or an error) and make no zip.
+//     an AccountExportError and make no zip.
 // 12. When the actor is the subject or acts for them, the entries name no one, and they survive
 //     `deletePerson`. An admin actor stays in the entry.
 import { execFileSync } from "node:child_process";
@@ -86,7 +86,7 @@ describe("exportAccount", () => {
     await expect(bad([{ path: "x/y", content: "2" }, { path: "x", content: "1" }])).rejects.toBeInstanceOf(AccountExportError);
     await expect(bad([{ path: "x", content: 5 }])).rejects.toBeInstanceOf(AccountExportError);
     await expect(bad("nope")).rejects.toBeInstanceOf(AccountExportError);
-    await expect(bad([{ path: "n".repeat(70_000), content: "1" }])).rejects.toThrow("too long");
+    await expect(bad([{ path: "n".repeat(70_000), content: "1" }])).rejects.toBeInstanceOf(AccountExportError);
   });
 
   test("refuses an empty subject", async () => {
@@ -117,19 +117,28 @@ describe("eraseAccount", () => {
     await store.put("users", "ana", { id: "ana" });
     const self = { principalId: "ana", kind: "human", chain: [{ id: "ana", kind: "human" }], scopes: [] } as never;
     const viaAgent = { principalId: "bot", kind: "agent_of_human", chain: [{ id: "ana", kind: "human" }, { id: "bot", kind: "agent_of_human" }], scopes: [] } as never;
+    await store.put("principals", "p_bot", { id: "p_bot", kind: "agent", ownerId: "ana" });
+    await store.put("principals", "p_sub", { id: "p_sub", kind: "agent_of_agent", parentId: "p_bot" });
+    const owned = { principalId: "p_bot", kind: "agent", chain: [{ id: "p_bot", kind: "agent" }], scopes: [] } as never;
+    const deep = { principalId: "p_sub", kind: "agent_of_agent", chain: [{ id: "p_bot", kind: "agent" }, { id: "p_sub", kind: "agent_of_agent" }], scopes: [] } as never;
     const admin = { principalId: "root", kind: "human", chain: [{ id: "root", kind: "human" }], scopes: [] } as never;
     await eraseAccount("ana", [app("docs")], store, { now, actor: self });
     await eraseAccount("ana", [app("tasks")], store, { now, actor: viaAgent });
     await eraseAccount("ana", [app("forms")], store, { now, actor: admin });
+    await eraseAccount("ana", [app("mail")], store, { now, actor: owned });
+    await eraseAccount("ana", [app("sheets")], store, { now, actor: deep });
     await deletePerson(store, "ana", { now });
     const log = (await entries(store)).filter((e) => e.targetKind === "app");
     expect(log.map((e) => [e.targetId, e.principalId, e.rootId]).sort()).toEqual([
       ["docs", "(erased)", "(erased)"],
       ["forms", "root", "root"],
+      ["mail", "(erased)", "(erased)"],
+      ["sheets", "(erased)", "(erased)"],
       ["tasks", "(erased)", "(erased)"],
     ]);
     expect(JSON.stringify(log)).not.toContain("ana");
     expect(JSON.stringify(log)).not.toContain("bot");
+    expect(JSON.stringify(log)).not.toContain("p_sub");
   });
 
   test("a failing eraser is reported and the rest still run", async () => {
@@ -146,7 +155,7 @@ describe("eraseAccount", () => {
 
   test("a failing audit write is reported and the erase goes on", async () => {
     const erased: string[] = [];
-    const store = { put: async () => { throw new Error("audit down"); } };
+    const store = { get: async () => null, put: async () => { throw new Error("audit down"); } };
     const report = await eraseAccount("ana", [app("docs", [], erased), app("tasks", [], erased)], store, { now });
     expect(report.ok).toBe(false);
     expect(report.results.map((r) => [r.ok, r.audited])).toEqual([[true, false], [true, false]]);

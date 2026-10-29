@@ -165,6 +165,7 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
     try {
       const files = await app.exportFor(subject);
       const paths = new Set<string>();
+      const folders = new Set<string>();
       for (const file of files) {
         checkPath(file.path);
         if (paths.has(file.path)) throw new Error("duplicate file path");
@@ -172,13 +173,15 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
           if (paths.has(file.path.slice(0, cut))) throw new Error("file path under a file");
         }
         paths.add(file.path);
+        for (let cut = file.path.indexOf("/"); cut !== -1; cut = file.path.indexOf("/", cut + 1)) folders.add(file.path.slice(0, cut));
+        if (folders.has(file.path)) throw new Error("file path over a file");
         const data = bytesOf(file.content);
         if (!(data instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
-        entries.push({ name: `${app.id}/${file.path}`, data });
+        const name = `${app.id}/${file.path}`;
+        if (encoder.encode(name).length > NAME_LIMIT) throw new Error("file name too long for a zip");
+        entries.push({ name, data });
         listed.push({ path: file.path, bytes: data.length, sha256: await sha256(data) });
       }
-      const sorted = [...paths];
-      if (sorted.some((p) => sorted.some((q) => q.startsWith(`${p}/`)))) throw new Error("file path over a file");
     } catch (cause) {
       throw new AccountExportError(app.id, { cause });
     }
@@ -191,12 +194,26 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
 
 /**
  * `deletePerson` removes every audit entry that names the person or their agents, so an entry that
- * kept those ids would vanish. When the actor is the subject, or acts for the subject, the entry is
+ * kept those ids would vanish. When the actor is the subject, acts for the subject, or is an agent the subject owns, the entry is
  * written like the `deletePerson` tombstone: it names no one. Any other actor (an admin) stays.
  */
-function actorFor(subject: string, actor: PrincipalContext | null): PrincipalContext | null {
+async function actorFor(store: Pick<Store, "get">, subject: string, actor: PrincipalContext | null): Promise<PrincipalContext | null> {
   if (actor === null) return null;
-  if (actor.principalId !== subject && !actor.chain.some((step) => step.id === subject)) return actor;
+  const ids = [actor.principalId, ...actor.chain.map((step) => step.id)];
+  let mine = ids.includes(subject);
+  // An agent the subject made has an `ownerId` or a `parentId` that leads back to them.
+  for (let frontier = ids, depth = 0; !mine && frontier.length > 0 && depth < 8; depth++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      const doc = await store.get("principals", id);
+      for (const up of [doc?.ownerId, doc?.parentId]) {
+        if (up === subject) mine = true;
+        else if (typeof up === "string") next.push(up);
+      }
+    }
+    frontier = next;
+  }
+  if (!mine) return actor;
   return { principalId: ERASED, kind: "human", chain: [], ...(actor.requestId === undefined ? {} : { requestId: actor.requestId }) } as unknown as PrincipalContext;
 }
 
@@ -221,7 +238,7 @@ export interface EraseReport {
  * audit entry, `person.erase` on target `app:<id>`, `allowed` or `denied`. The entry holds no
  * subject id. The caller erases the sign-in (see `deletePerson`) only when `ok` is true.
  */
-export async function eraseAccount(subject: string, apps: AccountApp[], store: Pick<Store, "put">, options: AccountOptions = {}): Promise<EraseReport> {
+export async function eraseAccount(subject: string, apps: AccountApp[], store: Pick<Store, "put" | "get">, options: AccountOptions = {}): Promise<EraseReport> {
   if (typeof subject !== "string" || subject === "") throw new Error("subject is required");
   checkApps(apps);
   const now = options.now ?? Date.now;
@@ -234,7 +251,7 @@ export async function eraseAccount(subject: string, apps: AccountApp[], store: P
       error = cause instanceof Error ? cause.message : "erase failed";
     }
     const id = crypto.randomUUID();
-    const entry = auditEntry(actorFor(subject, options.actor ?? null), { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
+    const entry = auditEntry(await actorFor(store, subject, options.actor ?? null), { id, at: now(), action: "person.erase", outcome: error === undefined ? "allowed" : "denied", targetKind: "app", targetId: app.id });
     let audited = true;
     try {
       await store.put("audit", id, entry as unknown as Doc);
