@@ -60,6 +60,10 @@
       "types": "./dist/sdk.d.ts",
       "import": "./dist/sdk.js"
     },
+    "./file": {
+      "types": "./dist/adapters/file.d.ts",
+      "import": "./dist/adapters/file.js"
+    },
     "./http": {
       "types": "./dist/http.d.ts",
       "import": "./dist/http.js"
@@ -92,5 +96,8 @@
   },
   "dependencies": {
     "hono": "^4.13.14"
+  },
+  "bin": {
+    "agentic-identity": "./dist/cli-bin.js"
   }
 }
