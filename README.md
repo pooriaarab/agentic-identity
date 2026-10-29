@@ -9,7 +9,7 @@ People, agents, and the access they share: sign-in, delegation, invites, links, 
 
 > Status: 0.1.0 preview. This release has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
-> with memory adapters, Cloudflare D1 and R2 adapters, and the contract suites.
+> with in-memory adapters for most, Cloudflare D1 and R2 adapters, and the contract suites.
 > OIDC sign-in, the SDK, the CLI, the MCP server, and the HTTP API are not in
 > this release.
 
@@ -87,8 +87,9 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
-`Auth`, `Realtime`, `Mail`, and `Queue`. Each has a memory adapter and a
-contract suite.
+`Auth`, `Realtime`, `Mail`, and `Queue`. Each has a contract suite. `Store`,
+`Blobs`, `Auth`, `Mail`, and `Queue` have memory adapters. `Realtime` has
+`createHmacRealtime`, which you can also use in tests.
 
 - `Store` keeps JSON docs in named collections. It has `get`, `put`, `delete`,
   `query`, and `transaction`. A query takes equality filters, one `orderBy`, a
@@ -100,7 +101,7 @@ contract suite.
   can rotate. `Mail` sends one message and refuses a bad address or a header
   injection. `Queue` sends a JSON body to a topic, with a delay. A handler that
   throws gets the message again, up to 3 attempts, and then the message is parked.
-- Every adapter takes a `region` option (`"eu"`, `"us"`, or `"unknown"`) and
+- Every adapter except `Auth` takes a `region` option (`"eu"`, `"us"`, or `"unknown"`) and
   exposes it. The default is `"unknown"`. The region is a claim that you make:
   an adapter cannot always see where its data lives. Call
   `assertRegion("eu", store, blobs)` at start-up to fail when a claim is

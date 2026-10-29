@@ -6,8 +6,8 @@ People, agents, and the access they share: sign-in, delegation, invites, links, 
 
 Release 0.1.0 is a preview. It has principals and delegation chains, the
 sharing model (roles, invites, links, audit), the `Store`, `Blobs`, `Auth`,
-`Realtime`, `Mail`, and `Queue` ports with memory adapters, Cloudflare D1 and R2
-adapters, and the port contract suites (`agentic-identity/testing`). OIDC
+`Realtime`, `Mail`, and `Queue` ports with memory adapters (and an HMAC
+`Realtime`), Cloudflare D1 and R2 adapters, and the port contract suites (`agentic-identity/testing`). OIDC
 sign-in, the SDK, the CLI, the MCP server, and the HTTP API do not exist yet. Do
 not call a tool that is not here.
 
