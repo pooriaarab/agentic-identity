@@ -3,7 +3,7 @@
 // The suites use vitest, an optional peer dependency.
 import { describe, expect, it } from "vitest";
 import type { PrincipalContext } from "./core/principals.js";
-import type { AdapterOptions, Auth, Blobs, Doc, Json, Mail, MailMessage, Page, Query, Queue, Realtime, Region, RoomKey, Store, StoreOps } from "./ports.js";
+import { StoreConflictError, type AdapterOptions, type Auth, type Blobs, type Doc, type Json, type Mail, type MailMessage, type Page, type Query, type Queue, type Realtime, type Region, type RoomKey, type Store, type StoreOps } from "./ports.js";
 
 type Make<T, O = AdapterOptions> = (options: O) => T | Promise<T>;
 
@@ -27,6 +27,30 @@ async function walk(store: Store, collection: string, query: Query): Promise<str
     if (cursor === undefined) return seen;
   }
   throw new Error("cursor did not reach the last page in 50 pages");
+}
+
+const HOLD_MS = 100;
+
+/**
+ * A write from another store that starts while a transaction runs. The transaction waits a
+ * short time for it, then goes on, so no backend can hang the test. `landed` says whether the
+ * write took effect in that time.
+ *
+ * An optimistic backend lets the write land, then runs the transaction again or gives up with
+ * `StoreConflictError`. A pessimistic backend (a Firestore server SDK locks every doc a
+ * transaction reads) holds the write until the transaction ends. Both are correct. A lost
+ * update is not: a run that a landed write overtook must never commit.
+ */
+function raceWrite(write: () => Promise<unknown>) {
+  const pending: Promise<unknown>[] = [];
+  return {
+    async start(): Promise<boolean> {
+      const done = write();
+      pending.push(done);
+      return Promise.race([done.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), HOLD_MS))]);
+    },
+    settle: () => Promise.all(pending),
+  };
 }
 
 function regionTests<T extends { region: Region }>(make: Make<T>) {
@@ -183,48 +207,65 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(await two.get("counters", "c")).toEqual({ n: 20 });
     });
 
-    it("runs a transaction again when another store changed a doc it read", async () => {
+    // The next four cases race a write from another store against a transaction. A backend that
+    // retries ends one way, and a backend that locks ends the other way. No update may be lost.
+    it("never commits a run that another store's write overtook, for a doc it read", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("docs", "a", { x: 1 });
+      const race = raceWrite(() => two.put("docs", "a", { x: 10 }));
       let runs = 0;
+      let landed = false;
       await one.transaction(async (tx) => {
+        landed = false;
         const doc = (await tx.get<{ x: number }>("docs", "a"))!;
-        if (++runs === 1) await two.put("docs", "a", { x: 10 });
+        if (++runs === 1) landed = await race.start();
         await tx.put("docs", "b", { x: doc.x + 1 });
       });
-      expect(runs).toBe(2);
-      expect(await one.get("docs", "b")).toEqual({ x: 11 });
+      expect(landed).toBe(false);
+      await race.settle();
+      expect(await one.get("docs", "a")).toEqual({ x: 10 });
+      expect(await one.get("docs", "b")).toEqual(runs === 2 ? { x: 11 } : { x: 2 });
     });
 
-    it("runs a read-only transaction again when another store changed a doc it read", async () => {
+    it("never commits a read-only run that another store's write overtook", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("docs", "a", { x: 1 });
+      const race = raceWrite(() => two.put("docs", "a", { x: 2 }));
       const seen: number[] = [];
+      let landed = false;
       await one.transaction(async (tx) => {
+        landed = false;
         seen.push((await tx.get<{ x: number }>("docs", "a"))!.x);
-        if (seen.length === 1) await two.put("docs", "a", { x: 2 });
+        if (seen.length === 1) landed = await race.start();
       });
-      expect(seen).toEqual([1, 2]);
+      expect(landed).toBe(false);
+      await race.settle();
+      expect(seen).toEqual(seen.length === 2 ? [1, 2] : [1]);
     });
 
     // A doc that was deleted and made again must not look unchanged.
-    it("runs a transaction again when another store deleted and made the doc again", async () => {
+    it("never commits a run that another store's delete and write overtook", async () => {
       const shared = crypto.randomUUID();
       const [one, two] = [await make({ shared }), await make({ shared })];
       await one.put("members", "x", { role: "viewer" });
+      const race = raceWrite(async () => {
+        await two.delete("members", "x");
+        await two.put("members", "x", { role: "owner" });
+      });
       let runs = 0;
+      let landed = false;
       await one.transaction(async (tx) => {
+        landed = false;
         const doc = (await tx.get("members", "x"))!;
-        if (++runs === 1) {
-          await two.delete("members", "x");
-          await two.put("members", "x", { role: "owner" });
-        }
+        if (++runs === 1) landed = await race.start();
         await tx.put("members", "x", { ...doc, note: "n" });
       });
-      expect(runs).toBe(2);
-      expect(await one.get("members", "x")).toEqual({ role: "owner", note: "n" });
+      expect(landed).toBe(false);
+      await race.settle();
+      // The write ends last in both cases. A rerun sees its doc, and the other order loses nothing.
+      expect(await one.get("members", "x")).toEqual(runs === 2 ? { role: "owner", note: "n" } : { role: "owner" });
     });
 
     // The rule Firestore sets, so that one app behaves the same on every adapter.
@@ -250,6 +291,77 @@ export function runStoreContract(make: Make<Store, StoreOptions>): void {
       expect(await s.get("docs", "new")).toBeNull();
     });
 
+    // A doc id is how an app keeps a name unique, so two stores must not both claim it.
+    it("lets only one of two stores claim the same doc id at the same time", async () => {
+      for (let round = 0; round < 10; round++) {
+        const shared = crypto.randomUUID();
+        const [one, two] = [await make({ shared }), await make({ shared })];
+        const claim = (store: Store, by: string) =>
+          store.transaction(async (tx) => {
+            if (await tx.get("names", "folder-1:report")) return false;
+            await tx.put("names", "folder-1:report", { by });
+            await tx.put("nodes", by, { name: "report" });
+            return true;
+          });
+        const won = await Promise.all([claim(one, "a"), claim(two, "b"), claim(one, "c"), claim(two, "d")]);
+        expect(won.filter(Boolean)).toHaveLength(1);
+        expect((await one.query("nodes")).items).toHaveLength(1);
+      }
+    });
+
+    // The read-modify-write of one doc, with the work done between the read and the write.
+    it("keeps a read-modify-write of one doc whole when another store edits it in between", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("decks", "d", { parts: [] });
+      const add = (store: Store, part: string) =>
+        store.transaction(async (tx) => {
+          const deck = (await tx.get<{ parts: string[] }>("decks", "d"))!;
+          await new Promise((r) => setTimeout(r, 5));
+          await tx.put("decks", "d", { parts: [...deck.parts, part] });
+        });
+      await Promise.all(["a", "b", "c", "d", "e", "f"].map((part, i) => add(i % 2 === 0 ? one : two, part)));
+      expect(((await one.get<{ parts: string[] }>("decks", "d"))!.parts).sort()).toEqual(["a", "b", "c", "d", "e", "f"]);
+    });
+
+    // Every run is overtaken, or none is. A transaction ends in one of two ways. It gives up with
+    // StoreConflictError and writes nothing, or it commits before the other write lands.
+    it("gives up with StoreConflictError and writes nothing, or commits before a rival write lands", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("counters", "k", { v: 0 });
+      let runs = 0;
+      const rivals: ReturnType<typeof raceWrite>[] = [];
+      let landed = false;
+      const outcome = await one
+        .transaction(async (tx) => {
+          landed = false;
+          const read = (await tx.get<{ v: number }>("counters", "k"))!;
+          const rival = raceWrite(() => two.put("counters", "k", { v: 100 + ++runs }));
+          rivals.push(rival);
+          landed = await rival.start();
+          await tx.put("counters", "k", { v: read.v + 1 });
+          await tx.put("counters", "out", { v: 1 });
+        })
+        .then(
+          () => "committed",
+          (error: unknown) => {
+            if (error instanceof StoreConflictError) return "gave up";
+            throw error;
+          },
+        );
+      await Promise.all(rivals.map((r) => r.settle()));
+      // Every rival write lands, and the last one wins. The transaction's write never covers it.
+      expect(await one.get("counters", "k")).toEqual({ v: 100 + runs });
+      if (outcome === "gave up") {
+        expect(await one.get("counters", "out")).toBeNull();
+        expect(runs).toBeGreaterThan(1);
+      } else {
+        expect(landed).toBe(false);
+        expect(await one.get("counters", "out")).toEqual({ v: 1 });
+      }
+    }, 15_000);
+
     it("allows reads before writes, and many writes after the reads", async () => {
       const s = await make({});
       await s.put("docs", "a", { x: 1 });
@@ -272,9 +384,105 @@ const bump = (store: Store) =>
     await tx.put("counters", "c", { n: doc.n + 1 });
   });
 
-export function runBlobsContract(make: Make<Blobs>): void {
+export function runBlobsContract(make: Make<Blobs, StoreOptions>): void {
   describe("Blobs contract", () => {
     regionTests(make);
+
+    it("gives every object a version on put, get, and head, and head holds no data", async () => {
+      const b = await make({});
+      const put = (await b.put("k", Uint8Array.of(1, 2, 3), { contentType: "text/plain" }))!;
+      expect(typeof put.version).toBe("string");
+      expect(put.version).not.toBe("");
+      expect((await b.get("k"))!.version).toBe(put.version);
+      const head = (await b.head("k"))!;
+      expect(head).toEqual({ size: 3, contentType: "text/plain", version: put.version });
+      expect(head).not.toHaveProperty("data");
+      expect(await b.head("missing")).toBeNull();
+      const next = (await b.put("k", Uint8Array.of(9)))!;
+      expect(next.version).not.toBe(put.version);
+    });
+
+    it("writes with ifNoneMatch only when the key is absent", async () => {
+      const b = await make({});
+      expect(await b.put("k", Uint8Array.of(1), { ifNoneMatch: "*", contentType: "text/plain" })).not.toBeNull();
+      expect(await b.put("k", Uint8Array.of(2), { ifNoneMatch: "*", contentType: "text/html" })).toBeNull();
+      const kept = (await b.get("k"))!;
+      expect([...kept.data, kept.contentType]).toEqual([1, "text/plain"]);
+      await b.delete("k");
+      expect(await b.put("k", Uint8Array.of(3), { ifNoneMatch: "*" })).not.toBeNull();
+    });
+
+    it("writes with ifMatch only when the version is the current one", async () => {
+      const b = await make({});
+      expect(await b.put("k", Uint8Array.of(1), { ifMatch: "anything" })).toBeNull();
+      expect(await b.get("k")).toBeNull();
+      const v1 = (await b.put("k", Uint8Array.of(1), { contentType: "text/plain" }))!.version;
+      const v2 = (await b.put("k", Uint8Array.of(2), { ifMatch: v1 }))!.version;
+      expect(v2).not.toBe(v1);
+      expect(await b.put("k", Uint8Array.of(3), { ifMatch: v1, contentType: "text/html" })).toBeNull();
+      const kept = (await b.get("k"))!;
+      expect([...kept.data, kept.version]).toEqual([2, v2]);
+      expect(kept.contentType).toBeUndefined();
+      await b.delete("k");
+      expect(await b.put("k", Uint8Array.of(4), { ifMatch: v2 })).toBeNull();
+      expect(await b.get("k")).toBeNull();
+    });
+
+    it("refuses a bad condition before it writes", async () => {
+      const b = await make({});
+      const bad: unknown[] = [{ ifMatch: "" }, { ifMatch: 1 }, { ifMatch: null }, { ifNoneMatch: "x" }, { ifNoneMatch: "" }, { ifMatch: "v", ifNoneMatch: "*" }];
+      for (const options of bad) await expect(b.put("k", Uint8Array.of(1), options as never)).rejects.toThrow();
+      expect(await b.get("k")).toBeNull();
+    });
+
+    // Two instances on one backend, as two Worker isolates on one bucket.
+    it("lets only one of two instances create a key at the same time", async () => {
+      for (let round = 0; round < 5; round++) {
+        const shared = crypto.randomUUID();
+        const [one, two] = [await make({ shared }), await make({ shared })];
+        const results = await Promise.all([one, two, one, two].map((b, i) => b.put("k", Uint8Array.of(i), { ifNoneMatch: "*" })));
+        expect(results.filter((r) => r !== null)).toHaveLength(1);
+      }
+    });
+
+    it("loses no update when two instances run a compare-and-swap loop on one key", async () => {
+      const shared = crypto.randomUUID();
+      const [one, two] = [await make({ shared }), await make({ shared })];
+      await one.put("counter", Uint8Array.of(0));
+      const bump = async (b: Blobs) => {
+        for (let tries = 0; tries < 100; tries++) {
+          const current = (await b.get("counter"))!;
+          if (await b.put("counter", Uint8Array.of(current.data[0]! + 1), { ifMatch: current.version })) return;
+        }
+        throw new Error("could not win a write in 100 tries");
+      };
+      await Promise.all(Array.from({ length: 12 }, (_, i) => bump(i % 2 === 0 ? one : two)));
+      expect((await one.get("counter"))!.data[0]).toBe(12);
+    });
+
+    it("signs the response headers into a download URL", async () => {
+      const b = await make({});
+      const get = (extra: object = {}) => b.signedUrl("a", { method: "GET", expiresInSeconds: 60, ...extra });
+      const urls = await Promise.all([
+        get(),
+        get({ responseContentDisposition: "attachment" }),
+        get({ responseContentDisposition: 'attachment; filename="a.csv"' }),
+        get({ responseContentType: "text/csv" }),
+        get({ responseContentType: "text/csv; charset=utf-8" }),
+        get({ responseContentDisposition: "attachment", responseContentType: "text/csv" }),
+      ]);
+      expect(new Set(urls).size).toBe(6);
+    });
+
+    it("refuses a response header that could split the response or is not a header value", async () => {
+      const b = await make({});
+      const sign = (extra: object) => b.signedUrl("a", { method: "GET", expiresInSeconds: 60, ...extra });
+      const disposition = ["", "attachment\r\nSet-Cookie: x=1", "attachment\n", "a\u0000b", "attachment; filename=é", "x".repeat(1025), 5];
+      const type = ["", "text", "text/csv\r\nX: y", "text/csv\u0000", "/csv", "text/", "x/".concat("y".repeat(300)), 5];
+      for (const responseContentDisposition of disposition) await expect(sign({ responseContentDisposition })).rejects.toThrow();
+      for (const responseContentType of type) await expect(sign({ responseContentType })).rejects.toThrow();
+      await expect(b.signedUrl("a", { method: "PUT", expiresInSeconds: 60, responseContentType: "text/csv" })).rejects.toThrow();
+    });
 
     it("returns null for a missing key, deletes a key, and accepts a delete of a missing one", async () => {
       const b = await make({});

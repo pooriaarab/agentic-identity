@@ -3,7 +3,10 @@ import type { PrincipalContext } from "../core/principals.js";
 import {
   DEFAULT_LIMIT,
   QUEUE_MAX_ATTEMPTS,
+  StoreConflictError,
+  assertBlobPutOptions,
   assertCollection,
+  assertResponseHeaders,
   assertField,
   assertId,
   assertMailMessage,
@@ -148,13 +151,24 @@ export function createMemoryStore(options: AdapterOptions & { shared?: string } 
         for (const w of tx.writes.values()) applyWrite(backend, w.collection, w.id, w.doc);
         return result;
       }
-      throw new Error("transaction kept conflicting");
+      throw new StoreConflictError();
     },
   };
 }
 
-export function createMemoryBlobs(options: AdapterOptions = {}): Blobs {
-  const objects = new Map<string, BlobObject>();
+interface BlobBackend {
+  objects: Map<string, { data: Uint8Array; contentType?: string; version: string }>;
+  /** Every write takes the next number, so a version never repeats on a key that is deleted and made again. */
+  clock: number;
+}
+const blobBackends = new Map<string, BlobBackend>();
+
+/** Blobs made with the same `shared` name use one dataset. A check and its write run with no await between them. */
+export function createMemoryBlobs(options: AdapterOptions & { shared?: string } = {}): Blobs {
+  const backend: BlobBackend =
+    options.shared === undefined
+      ? { objects: new Map(), clock: 0 }
+      : (blobBackends.get(options.shared) ?? blobBackends.set(options.shared, { objects: new Map(), clock: 0 }).get(options.shared)!);
   const now = options.now ?? Date.now;
   const need = (key: string) => {
     if (key === "") throw new Error("blob key must not be empty");
@@ -163,23 +177,39 @@ export function createMemoryBlobs(options: AdapterOptions = {}): Blobs {
     region: options.region === undefined ? "unknown" : parseRegion(options.region),
     async put(key, data, opts) {
       need(key);
-      objects.set(key, { data: data.slice(), ...(opts?.contentType ? { contentType: opts.contentType } : {}) });
+      assertBlobPutOptions(opts);
+      const current = backend.objects.get(key);
+      if ((opts?.ifNoneMatch === "*" && current) || (opts?.ifMatch !== undefined && current?.version !== opts.ifMatch)) return null;
+      const version = String(++backend.clock);
+      backend.objects.set(key, { data: data.slice(), version, ...(opts?.contentType ? { contentType: opts.contentType } : {}) });
+      return { version };
     },
     async get(key) {
       need(key);
-      const found = objects.get(key);
+      const found = backend.objects.get(key);
       return found ? { ...found, data: found.data.slice() } : null;
+    },
+    async head(key) {
+      need(key);
+      const found = backend.objects.get(key);
+      return found ? { size: found.data.length, version: found.version, ...(found.contentType ? { contentType: found.contentType } : {}) } : null;
     },
     async delete(key) {
       need(key);
-      objects.delete(key);
+      backend.objects.delete(key);
     },
-    async signedUrl(key, { method, expiresInSeconds }) {
+    async signedUrl(key, opts) {
       need(key);
+      const { method, expiresInSeconds } = opts;
       if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 1 || expiresInSeconds > 604800) {
         throw new RangeError("expiresInSeconds must be an integer from 1 to 604800");
       }
-      return `memory://blobs/${encodeURIComponent(key)}?method=${method}&expires=${now() + expiresInSeconds * 1000}`;
+      assertResponseHeaders(opts);
+      const extra = [
+        opts.responseContentDisposition === undefined ? "" : `&disposition=${encodeURIComponent(opts.responseContentDisposition)}`,
+        opts.responseContentType === undefined ? "" : `&type=${encodeURIComponent(opts.responseContentType)}`,
+      ].join("");
+      return `memory://blobs/${encodeURIComponent(key)}?method=${method}&expires=${now() + expiresInSeconds * 1000}${extra}`;
     },
   };
 }

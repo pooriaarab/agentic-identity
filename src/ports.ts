@@ -61,6 +61,19 @@ export interface Page<T extends Doc = Doc> {
 
 export const DEFAULT_LIMIT = 100;
 
+/**
+ * A transaction kept conflicting with other writers, so it gave up. Nothing was written. Try
+ * again later. An optimistic backend (memory, D1) throws it. A pessimistic backend (Firestore
+ * server SDKs) holds a rival write until the transaction ends, so it may never throw it. An
+ * adapter for such a backend maps an ABORTED result after its last retry to this error.
+ */
+export class StoreConflictError extends Error {
+  constructor(message = "the data changed during the transaction") {
+    super(message);
+    this.name = "StoreConflictError";
+  }
+}
+
 export interface StoreOps {
   get<T extends Doc = Doc>(collection: string, id: string): Promise<T | null>;
   /** Replaces the whole doc. Docs must be plain JSON. */
@@ -80,6 +93,11 @@ export interface Store extends StoreOps {
    * Every read must come before the first write. A `get` or `query` after a
    * `put` or `delete` throws. This is the Firestore rule. It is the only rule
    * that every adapter can follow, so an app behaves the same on all of them.
+   *
+   * When a write from another store races the transaction, there are two correct endings.
+   * The transaction runs again, or throws `StoreConflictError` and writes nothing (optimistic).
+   * Or the rival write waits for the lock and lands after the commit (pessimistic). A run that
+   * a landed write overtook never commits, so no update is lost.
    *
    * A `query` guards only the docs it returned. To keep a value unique, use it
    * as the doc id, and do not check for a match with a query.
@@ -105,16 +123,69 @@ export function assertField(name: string): void {
 export interface BlobObject {
   data: Uint8Array;
   contentType?: string;
+  /** See `Blobs.put`. */
+  version: string;
+}
+
+export interface BlobHead {
+  size: number;
+  contentType?: string;
+  version: string;
+}
+
+export interface BlobPutOptions {
+  contentType?: string;
+  /** Write only when the key holds this version. A missing key never matches. */
+  ifMatch?: string;
+  /** `"*"` writes only when the key is absent. */
+  ifNoneMatch?: "*";
+}
+
+/** Letters, digits, and `!#$&^_.+-`, as a header would carry them. A type has one slash. */
+const MEDIA_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*(;[ -~]*)?$/;
+const DISPOSITION = /^(attachment|inline)(;[ -~]*)?$/i;
+
+export function assertBlobPutOptions(options: BlobPutOptions | undefined): void {
+  if (options === undefined) return;
+  const { ifMatch, ifNoneMatch } = options;
+  if (ifMatch !== undefined && (typeof ifMatch !== "string" || ifMatch === "")) throw new Error("ifMatch must be a version");
+  if (ifNoneMatch !== undefined && ifNoneMatch !== "*") throw new Error('ifNoneMatch must be "*"');
+  if (ifMatch !== undefined && ifNoneMatch !== undefined) throw new Error("give ifMatch or ifNoneMatch, not both");
+}
+
+/** The response headers a download URL may fix. Printable ASCII only, so a value cannot split a response. */
+export function assertResponseHeaders(options: { method: string; responseContentDisposition?: unknown; responseContentType?: unknown }): void {
+  const { responseContentDisposition: disposition, responseContentType: type } = options;
+  if (disposition === undefined && type === undefined) return;
+  if (options.method !== "GET") throw new Error("response headers apply to a GET URL");
+  if (disposition !== undefined && (typeof disposition !== "string" || disposition.length > 1024 || !DISPOSITION.test(disposition))) throw new Error("invalid responseContentDisposition");
+  if (type !== undefined && (typeof type !== "string" || type.length > 255 || !MEDIA_TYPE.test(type))) throw new Error("invalid responseContentType");
 }
 
 export interface Blobs {
   readonly region: Region;
-  put(key: string, data: Uint8Array, options?: { contentType?: string }): Promise<void>;
+  /**
+   * Returns the new version, or null when `ifMatch` or `ifNoneMatch` did not hold. A refused put
+   * changes nothing. The check and the write are one step, so two writers cannot both win.
+   *
+   * A version names the stored bytes. It differs after a write of other bytes, and it is opaque:
+   * an R2 etag, a GCS generation, a counter. Do not compare versions for order.
+   */
+  put(key: string, data: Uint8Array, options?: BlobPutOptions): Promise<{ version: string } | null>;
   get(key: string): Promise<BlobObject | null>;
+  /** The size, content type, and version, without the data. */
+  head(key: string): Promise<BlobHead | null>;
   /** Deleting a missing key is not an error. */
   delete(key: string): Promise<void>;
-  /** A time-limited URL. `expiresInSeconds` runs from 1 to 604800 (7 days). */
-  signedUrl(key: string, options: { method: "GET" | "PUT"; expiresInSeconds: number }): Promise<string>;
+  /**
+   * A time-limited URL. `expiresInSeconds` runs from 1 to 604800 (7 days). On a GET URL,
+   * `responseContentDisposition` and `responseContentType` are signed in, so the holder of the
+   * link cannot change how the bytes are served. Each is printable ASCII.
+   */
+  signedUrl(
+    key: string,
+    options: { method: "GET" | "PUT"; expiresInSeconds: number; responseContentDisposition?: string; responseContentType?: string },
+  ): Promise<string>;
 }
 
 export interface Auth {

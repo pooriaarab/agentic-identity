@@ -13,6 +13,11 @@
 //  7. A doc deleted and made again must not look unchanged to a stale transaction.
 //  8. A region is required. A database that reports another region than the one declared is refused.
 //  9. A long text sort value must not break the cursor.
+// The Blobs port has conditional puts and signed response headers:
+// 10. A put with ifMatch or ifNoneMatch uses the bucket's own precondition, so two isolates
+//     cannot both win. A refused put returns null and changes nothing.
+// 11. The response headers in a download URL (disposition, type) are signed. A URL changed in
+//     those, or given them after it was signed, fails. Each one is returned to the Worker.
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runBlobsContract, runStoreContract } from "../testing.js";
@@ -58,10 +63,11 @@ it("loses no update when two store instances share one database", async () => {
 });
 
 runBlobsContract((options) => {
-  const prefix = `${crypto.randomUUID()}/`;
+  const prefix = `${options.shared ?? crypto.randomUUID()}/`;
   const scoped: R2Like = {
     put: (key, value, opts) => bucket.put(prefix + key, value, opts),
     get: (key) => bucket.get(prefix + key),
+    head: (key) => bucket.head(prefix + key),
     delete: (key) => bucket.delete(prefix + key),
   };
   return createR2Blobs(scoped, { region: "unknown", ...options, urlBase: URL_BASE, urlSecret: SECRET });
@@ -89,6 +95,41 @@ describe("signed blob URLs", () => {
     ["sig", "00".repeat(32)],
   ])("rejects a changed %s", async (name, value) => {
     expect(await verify(change(await sign(), name, value))).toBeNull();
+  });
+
+  describe("response headers", () => {
+    const headers = { responseContentDisposition: 'attachment; filename="a.csv"', responseContentType: "text/csv" };
+    const signWith = (extra: object, method: "GET" | "PUT" = "GET") =>
+      createR2Blobs({} as R2Like, { region: "eu", now, urlBase: URL_BASE, urlSecret: SECRET }).signedUrl("k", { method, expiresInSeconds: 60, ...extra });
+
+    it("returns the signed disposition and type with the key and method", async () => {
+      expect(await verify(await signWith(headers))).toEqual({ key: "k", method: "GET", ...headers });
+      expect(await verify(await signWith({ responseContentType: "text/csv" }))).toEqual({ key: "k", method: "GET", responseContentType: "text/csv" });
+      expect(await verify(await signWith({}))).toEqual({ key: "k", method: "GET" });
+    });
+
+    it.each([
+      ["a changed disposition", (u: URL) => u.searchParams.set("disposition", "inline")],
+      ["a changed type", (u: URL) => u.searchParams.set("type", "text/html")],
+      ["a removed disposition", (u: URL) => u.searchParams.delete("disposition")],
+      ["a removed type", (u: URL) => u.searchParams.delete("type")],
+      ["a swapped pair", (u: URL) => { u.searchParams.set("disposition", "text/csv"); u.searchParams.set("type", "attachment"); }],
+    ])("rejects %s", async (_name, edit) => {
+      const url = new URL(await signWith(headers));
+      edit(url);
+      expect(await verify(url.toString())).toBeNull();
+    });
+
+    it("rejects a header added to a URL that was signed without one", async () => {
+      for (const [name, value] of [["disposition", "attachment"], ["type", "text/html"]] as const) expect(await verify(change(await signWith({}), name, value))).toBeNull();
+    });
+
+    it("rejects a signed-looking header that is not a header value, and never signs a PUT with one", async () => {
+      const url = new URL(await signWith(headers));
+      url.searchParams.set("type", "text/csv\r\nSet-Cookie: x=1");
+      expect(await verify(url.toString())).toBeNull();
+      await expect(signWith(headers, "PUT")).rejects.toThrow();
+    });
   });
 
   it("rejects an expired URL, including at the exact expiry time", async () => {
