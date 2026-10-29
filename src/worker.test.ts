@@ -124,6 +124,10 @@ describe("sharing over HTTP", () => {
     expect((await access(s, "plan", "write", bearer(small.apiKey!))).allowed).toBe(false);
     expect((await access(s, "plan", "read", bearer(small.apiKey!))).allowed).toBe(true);
     expect((await s.call("POST", "/resources/plan/grants", { token: bo, body: { subjectKind: "human", subjectId: "cy", role: "viewer" } })).status).toBe(403);
+    for (const bad of [{ subjectId: "bo", role: "viewer" }, { subjectKind: "user_token", subjectId: "bo", role: "viewer" }, { subjectKind: "human", role: "viewer" }, { subjectKind: "human", subjectId: 5, role: "viewer" }]) {
+      expect((await s.call("POST", "/resources/plan/grants", { token: ana, body: bad })).status).toBe(400);
+    }
+    expect((await s.call("DELETE", "/resources/plan/grants/bo", { token: ana })).status).toBe(404);
     await s.call("DELETE", "/resources/plan/grants/human/bo", { token: ana });
     expect((await access(s, "plan", "read", bearer(bo))).allowed).toBe(false);
   });

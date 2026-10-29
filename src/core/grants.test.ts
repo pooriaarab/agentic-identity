@@ -6,7 +6,8 @@
 //  5. The last-owner guard counts subjects, not ids: an owner of the other kind is another owner.
 //  6. A grant stored before kinds is not honored, and it does not count as an owner.
 //  7. The migration gives each stored grant the kind of the principal with its id, keeps the
-//     stronger role when the new grant exists, leaves what it cannot place, and is safe to repeat.
+//     role of the new grant when it exists, never brings back a grant that a revoke removed or a
+//     downgrade lowered, leaves what it cannot place, and is safe to repeat.
 //  8. An erase of a person removes grants of the person and their agents, with a kind or without,
 //     and leaves a grant of the other kind that has the same id.
 import { describe, expect, test } from "vitest";
@@ -92,7 +93,7 @@ describe("migrateGrants", () => {
       store.put("principals", "sub", { id: "sub", kind: "agent_of_human", scopes: [] }),
     ]);
 
-  test("gives each grant the kind of its principal and keeps the stronger role", async () => {
+  test("gives each grant the kind of its principal and keeps the role of the new grant", async () => {
     const { store, can } = await setup();
     await principals(store);
     await store.put("grants", "doc:pat", { resourceId: "doc", subjectId: "pat", role: "editor" });
@@ -104,12 +105,48 @@ describe("migrateGrants", () => {
     const result = await migrateGrants(store);
     expect(result.migrated).toBe(2);
     expect(result.unresolved.sort()).toEqual(["doc:odd", "doc:orphan", "doc:sub"]);
-    expect(await store.get("grants", "doc:human:pat")).toEqual({ resourceId: "doc", subjectKind: "human", subjectId: "pat", role: "editor" });
+    expect(await store.get("grants", "doc:human:pat")).toEqual({ resourceId: "doc", subjectKind: "human", subjectId: "pat", role: "viewer" });
     expect(await store.get("grants", "doc:agent:bot")).toEqual({ resourceId: "doc", subjectKind: "agent", subjectId: "bot", role: "viewer" });
     expect(await store.get("grants", "doc:pat")).toBeNull();
-    expect(await can(same, "write")).toBe(true);
+    expect(await can(same, "write")).toBe(false);
+    expect(await can(same, "read")).toBe(true);
     expect(await can(root("bot", "agent"), "read")).toBe(true);
     expect(await can(sameAgent, "read")).toBe(false);
+  });
+
+  test("a revoke before the migration is not undone by it", async () => {
+    const { store, sharing, can } = await setup();
+    await principals(store);
+    await store.put("grants", "doc:pat", { resourceId: "doc", subjectId: "pat", role: "editor" });
+    await sharing.revokeGrant(ana, "doc", human("pat"));
+    expect(await migrateGrants(store)).toEqual({ migrated: 0, unresolved: [] });
+    expect(await can(same, "read")).toBe(false);
+  });
+
+  test("a downgrade before the migration is not undone by it", async () => {
+    const { store, sharing, can } = await setup();
+    await principals(store);
+    await store.put("grants", "doc:pat", { resourceId: "doc", subjectId: "pat", role: "editor" });
+    await sharing.grant(ana, "doc", human("pat"), "viewer");
+    await migrateGrants(store);
+    expect(await can(same, "write")).toBe(false);
+    expect(await can(same, "read")).toBe(true);
+  });
+
+  test("a revoke of one kind leaves the legacy grant of a principal of the other kind", async () => {
+    const { store, sharing } = await setup();
+    await principals(store);
+    await store.put("grants", "doc:bot", { resourceId: "doc", subjectId: "bot", role: "viewer" });
+    await sharing.revokeGrant(ana, "doc", human("bot")).catch(() => undefined);
+    expect(await store.get("grants", "doc:bot")).not.toBeNull();
+  });
+
+  test("a doc at a new key without a valid kind is left, not deleted", async () => {
+    const { store } = await setup();
+    await principals(store);
+    await store.put("grants", "doc:human:pat", { resourceId: "doc", subjectId: "pat", role: "owner" });
+    expect(await migrateGrants(store)).toEqual({ migrated: 0, unresolved: ["doc:human:pat"] });
+    expect(await store.get("grants", "doc:human:pat")).not.toBeNull();
   });
 
   test("a second run changes nothing more", async () => {

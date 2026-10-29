@@ -119,6 +119,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     if (!another) throw new Error("the last owner cannot be removed");
   };
 
+  // A grant stored before kinds sits at `<resource>:<id>`. A later grant or revoke is the newer
+  // decision, so it removes that doc when the principal with that id is of this kind, and the
+  // migration cannot bring it back.
+  const legacyKeyOf = async (tx: StoreOps, resourceId: string, who: Subject) =>
+    (await tx.get("principals", who.id))?.kind === who.kind ? `${resourceId}:${who.id}` : undefined;
+
   return {
     async createResource(ctx: PrincipalContext, input: { id?: string; type: string; parentId?: string }): Promise<Resource> {
       const resource: Resource = { id: input.id ?? crypto.randomUUID(), type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}) };
@@ -139,7 +145,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const who = assertSubject(subject);
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
+        const legacy = await legacyKeyOf(tx, resourceId, who);
         if (role !== "owner" && (await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        if (legacy) await tx.delete("grants", legacy);
         await putGrant(tx, resourceId, who, role);
       });
     },
@@ -148,7 +156,9 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       const who = assertSubject(subject);
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
+        const legacy = await legacyKeyOf(tx, resourceId, who);
         if ((await tx.get("grants", grantKey(resourceId, who)))?.role === "owner") await keepAnotherOwner(tx, resourceId, who);
+        if (legacy) await tx.delete("grants", legacy);
         await tx.delete("grants", grantKey(resourceId, who));
       });
     },
@@ -227,7 +237,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
 /**
  * Rewrites grants stored before grants had a kind. They were keyed `<resource>:<id>`. The kind
  * comes from the principal with that id: `human` or `agent`. Until a grant is rewritten it is not
- * honored. A grant whose principal is missing or has another kind is left as it is, and is listed
+ * honored. A grant that exists at the new key keeps its role: it is the later decision. A grant whose principal is missing or has another kind is left as it is, and is listed
  * in `unresolved` as its doc id. Run it again after a failure: it skips what is done.
  */
 export async function migrateGrants(store: Store): Promise<{ migrated: number; unresolved: string[] }> {
@@ -242,12 +252,14 @@ export async function migrateGrants(store: Store): Promise<{ migrated: number; u
   for (const id of legacy) {
     const done = await store.transaction(async (tx) => {
       const old = await tx.get("grants", id);
-      if (!old || typeof old.resourceId !== "string" || typeof old.subjectId !== "string") return false;
+      if (!old || SUBJECT_KINDS.includes(old.subjectKind as SubjectKind) || typeof old.resourceId !== "string" || typeof old.subjectId !== "string") return false;
       const kind = (await tx.get("principals", old.subjectId))?.kind;
       if (!SUBJECT_KINDS.includes(kind as SubjectKind) || rank(old.role) < 0 || !SAFE_ID.test(old.subjectId) || !SAFE_ID.test(old.resourceId)) return false;
       const subject: Subject = { kind: kind as SubjectKind, id: old.subjectId };
+      if (grantKey(old.resourceId, subject) === id) return false;
+      // A grant that exists at the new key is the later decision, so it keeps its role.
       const present = await tx.get("grants", grantKey(old.resourceId, subject));
-      await putGrant(tx, old.resourceId, subject, ROLES[Math.max(rank(old.role), rank(present?.role))] as Role);
+      await putGrant(tx, old.resourceId, subject, rank(present?.role) >= 0 ? (present!.role as Role) : (old.role as Role));
       await tx.delete("grants", id);
       return true;
     });

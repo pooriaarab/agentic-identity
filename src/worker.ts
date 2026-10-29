@@ -253,7 +253,8 @@ export function createApp(deps: { store: Store; config: WorkerConfig; now?: () =
 
   app.post("/resources/:id/grants", authed(async (c, ctx) => {
     const input = await body(c);
-    await sharing.grant(ctx, id(c), { kind: input.subjectKind as SubjectKind, id: String(input.subjectId) }, input.role as Role);
+    if (typeof input.subjectId !== "string") return fail(400, "subjectId must be a string");
+    await sharing.grant(ctx, id(c), { kind: input.subjectKind as SubjectKind, id: input.subjectId }, input.role as Role);
     return c.json({ ok: true });
   }));
 
