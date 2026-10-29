@@ -122,8 +122,8 @@ Import the kinds from the package. Do not copy the list into your app.
 ```ts
 import { PRINCIPAL_KINDS, type Principal, type PrincipalKind } from "agentic-identity";
 
-// PRINCIPAL_KINDS is ["human", "agent_of_human", "agent_of_agent", "agent", "user_token"].
-const valid = (kind: unknown): kind is PrincipalKind => PRINCIPAL_KINDS.includes(kind as PrincipalKind);
+const isKind = (kind: unknown): kind is PrincipalKind => PRINCIPAL_KINDS.includes(kind as PrincipalKind);
+const isPrincipal = (p: Principal) => isKind(p.kind);
 ```
 
 `resolveChain` walks from the acting principal to its root. Each step can only
