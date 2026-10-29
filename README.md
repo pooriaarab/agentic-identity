@@ -52,6 +52,31 @@ when the chain has a cycle or is deeper than `MAX_CHAIN_DEPTH` (5), when a
 parent is missing, or when a kind has the wrong parent kind. Audit entries keep
 the principal kind and the whole chain, and hold no email address.
 
+## Sharing
+
+`createSharing(store)` keeps resources, roles, invites, share links, and the
+audit log in a `Store`. The roles are `viewer`, `commenter`, `editor`, and
+`owner`. A grant on a folder passes down to what is inside. It never passes up.
+
+```ts
+const sharing = createSharing(store);
+await sharing.createResource(ctx, { id: "plan", type: "doc" }); // the caller owns it
+await sharing.grant(ctx, "plan", "ana", "editor");
+const link = await sharing.createLink(ctx, "plan", { role: "viewer", signedInOnly: true });
+const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link.token });
+```
+
+- `can` joins two checks: the scopes that `resolveChain` left, and the role of
+  the chain root. A delegated agent gets its owner's role, cut down by scopes.
+- An invite is by email for a person, or by handle for an agent. It never makes
+  an owner. The caller passes the verified email or the agent handle to
+  `acceptInvite`. A delegated agent cannot accept for its owner.
+- A link has a role, an optional expiry, and an optional signed-in-only flag.
+  The token is shown once. The store keeps only its hash.
+- `can` writes an audit entry for every allow and deny. It keeps the chain and
+  a machine label, and holds no email address. Grants, invites, and links do not
+  write audit entries yet.
+
 ## Ports
 
 App code talks to ports, not to a vendor. Six ports exist: `Store`, `Blobs`,
