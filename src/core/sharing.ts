@@ -1,7 +1,7 @@
 // Sharing: resources, roles, folders, invites, links, and `can`.
 // Roles belong to the root of a chain (the person, or an agent with its own
 // identity). A delegated agent gets that role, cut down by its scopes.
-import type { Doc, Store } from "../ports.js";
+import type { Doc, Store, StoreOps } from "../ports.js";
 import { auditEntry, hasScope, type Action, type AuditEntry, type PrincipalContext } from "./principals.js";
 
 export const ROLES = ["viewer", "commenter", "editor", "owner"] as const;
@@ -83,6 +83,12 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     if (!safeTime(ms) || !safeTime(now() + (ms as number))) throw new Error("expiresInMs must be a whole number of milliseconds above 0");
     return now() + (ms as number);
   };
+  // The query guards the owner docs it returns. A rival demotion of one of them makes this
+  // transaction run again, so two demotions never both pass on the same owner.
+  const keepAnotherOwner = async (tx: StoreOps, resourceId: string, subjectId: string) => {
+    const owners = await tx.query("grants", { where: { resourceId, role: "owner" }, limit: 2 });
+    if (!owners.items.some((o) => o.data.subjectId !== subjectId)) throw new Error("the last owner cannot be removed");
+  };
   const putGrant = (tx: Pick<Store, "put">, resourceId: string, subjectId: string, role: Role) =>
     tx.put("grants", `${resourceId}:${subjectId}`, { resourceId, subjectId, role });
 
@@ -105,14 +111,16 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
       assertRole(role);
       if (!SAFE_ID.test(subjectId)) throw new Error("invalid subject");
       await requireAdmin(ctx, resourceId);
-      await putGrant(store, resourceId, subjectId, role);
+      await store.transaction(async (tx) => {
+        if (role !== "owner" && (await tx.get("grants", `${resourceId}:${subjectId}`))?.role === "owner") await keepAnotherOwner(tx, resourceId, subjectId);
+        await putGrant(tx, resourceId, subjectId, role);
+      });
     },
 
     async revokeGrant(ctx: PrincipalContext, resourceId: string, subjectId: string): Promise<void> {
       await requireAdmin(ctx, resourceId);
       await store.transaction(async (tx) => {
-        const owners = await tx.query("grants", { where: { resourceId, role: "owner" } });
-        if (owners.items.length === 1 && owners.items[0]!.data.subjectId === subjectId) throw new Error("the last owner cannot be removed");
+        if ((await tx.get("grants", `${resourceId}:${subjectId}`))?.role === "owner") await keepAnotherOwner(tx, resourceId, subjectId);
         await tx.delete("grants", `${resourceId}:${subjectId}`);
       });
     },
