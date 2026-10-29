@@ -172,9 +172,10 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
       const paths = new Set<string>();
       const folders = new Set<string>();
       for (const file of files) {
-        checkPath(file.path);
+        const { path, content } = file; // read once: a getter must not show one value to the check and another to the zip
+        checkPath(path);
         // Compared without case: a Windows or macOS unzip would let one file overwrite the other.
-        const key = file.path.normalize("NFC").toLowerCase();
+        const key = path.normalize("NFC").toLowerCase();
         if (paths.has(key)) throw new Error("duplicate file path");
         for (let cut = key.indexOf("/"); cut !== -1; cut = key.indexOf("/", cut + 1)) {
           if (paths.has(key.slice(0, cut))) throw new Error("file path under a file");
@@ -182,14 +183,14 @@ export async function exportAccount(subject: string, apps: AccountApp[], options
         paths.add(key);
         for (let cut = key.indexOf("/"); cut !== -1; cut = key.indexOf("/", cut + 1)) folders.add(key.slice(0, cut));
         if (folders.has(key)) throw new Error("file path over a file");
-        if (typeof file.content === "string" && decoder.decode(encoder.encode(file.content)) !== file.content) throw new Error("file content is not valid text");
-        const given = bytesOf(file.content);
+        if (typeof content === "string" && decoder.decode(encoder.encode(content)) !== content) throw new Error("file content is not valid text");
+        const given = bytesOf(content);
         if (!(given instanceof Uint8Array)) throw new Error("file content must be a string or bytes");
-        const data = typeof file.content === "string" ? given : new Uint8Array(given); // a later change to the exporter's buffer must not split the hash from the zip
-        const name = `${app.id}/${file.path}`;
+        const data = typeof content === "string" ? given : new Uint8Array(given); // a later change to the exporter's buffer must not split the hash from the zip
+        const name = `${app.id}/${path}`;
         if (encoder.encode(name).length > NAME_LIMIT) throw new Error("file name too long for a zip");
         entries.push({ name, data });
-        listed.push({ path: file.path, bytes: data.length, sha256: await sha256(data) });
+        listed.push({ path: path, bytes: data.length, sha256: await sha256(data) });
       }
     } catch (cause) {
       throw new AccountExportError(app.id, { cause });
