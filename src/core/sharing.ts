@@ -1,7 +1,7 @@
 // Sharing: resources, roles, folders, invites, links, and `can`.
 // Roles belong to the root of a chain (the person, or an agent with its own
 // identity). A delegated agent gets that role, cut down by its scopes.
-import { StoreConflictError, type Doc, type Store, type StoreOps } from "../ports.js";
+import { StoreConflictError, type Doc, type Page, type Store, type StoreOps } from "../ports.js";
 import { recordChange } from "./audit.js";
 import { auditEntry, hasScope, type Action, type AuditEntry, type PrincipalContext } from "./principals.js";
 
@@ -49,9 +49,15 @@ export class ResourceClaimConflictError extends Error {
 
 /** Keep a claim small enough for every Store adapter. */
 export const MAX_RESOURCE_CLAIM_REFERENCES = 256;
-type ResourceClaim = { subjectKind: SubjectKind; subjectId: string; references: string[] };
+type ResourceClaim = { subjectKind: SubjectKind; subjectId: string; references: string[]; ownership?: string };
 /** Host-only callback. Use tx, finish reads before writes, and allow transaction retries. */
-export type ClaimMutation = (tx: StoreOps) => Promise<void>;
+export type ClaimMutation = (tx: StoreOps, sharing: ClaimSharingOps) => Promise<void>;
+/** Trusted host operations bound to the claim resource, subject, and transaction. */
+export type ClaimSharingOps = {
+  /** Ensure a root resource and its owner. Existing resources must already have this owner. */
+  ensureOwner(type: string): Resource;
+};
+type ClaimResource = Resource & { claimOwnership?: string };
 
 export type Resource = { id: string; type: string; parentId?: string | null };
 export type Decision = { allowed: boolean; role?: Role };
@@ -172,7 +178,11 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     if (!found) throw forbidden();
     return found;
   };
-  const touch = (tx: StoreOps, found: Resource) => tx.put("resources", found.id, found);
+  const touch = (tx: StoreOps, found: ClaimResource) => {
+    // Any sharing change ends automatic cleanup, even if the share is later revoked.
+    const { claimOwnership: _ownership, ...resource } = found;
+    return tx.put("resources", found.id, resource);
+  };
 
   /** `identity` comes from the verified sign-in: the email claim, or the agent's handle. */
   const accept = async (ctx: PrincipalContext, inviteId: string, identity: Identity): Promise<void> => {
@@ -193,22 +203,65 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
   };
 
   // Failure cases: rival subjects, stale releases, duplicate references, failed mutations,
-  // and malformed stored claims. No claim grants access. Only trusted hosts call this API.
+  // and malformed stored claims. Ownership must not escape rollback, replace existing
+  // rights, treat a child as a root, survive its last private reference, or erase
+  // shares made since creation.
+  // Only trusted hosts call this API; a reservation alone never grants access.
   async function changeClaim(resourceId: string, subject: Subject, referenceId: string, release: boolean, mutate: ClaimMutation) {
     const who = assertSubject(subject);
     if (typeof resourceId !== "string" || !SAFE_ID.test(resourceId) || typeof referenceId !== "string" || !SAFE_ID.test(referenceId)) throw new Error("invalid claim id");
     await store.transaction(async (tx) => {
       const held = await tx.get<ResourceClaim>("resource_claims", resourceId);
-      if (held && (held.subjectKind !== who.kind || held.subjectId !== who.id || !Array.isArray(held.references) || held.references.length === 0 || held.references.some((id) => typeof id !== "string" || !SAFE_ID.test(id)) || new Set(held.references).size !== held.references.length)) throw new ResourceClaimConflictError();
+      if (held && (held.subjectKind !== who.kind || held.subjectId !== who.id || !Array.isArray(held.references) || held.references.length === 0 || held.references.some((id) => typeof id !== "string" || !SAFE_ID.test(id)) || new Set(held.references).size !== held.references.length || (held.ownership !== undefined && (typeof held.ownership !== "string" || !SAFE_ID.test(held.ownership))))) throw new ResourceClaimConflictError();
       if (release && held && !held.references.includes(referenceId)) throw new ResourceClaimConflictError();
       const references = new Set(held?.references ?? []);
       if (release) references.delete(referenceId);
       else references.add(referenceId);
       if (!release && references.size > MAX_RESOURCE_CLAIM_REFERENCES) throw new ResourceClaimConflictError();
-      // Read the claim before the host callback. The callback can read its reference and then
-      // write it. Both writes commit together, even if a backend retries this callback.
-      await mutate(tx);
-      if (references.size) await tx.put("resource_claims", resourceId, { subjectKind: who.kind, subjectId: who.id, references: [...references] });
+      // Read sharing state before the host can write. Store adapters require reads first.
+      const resource = await tx.get<ClaimResource>("resources", resourceId);
+      const owner = await tx.get<Grant>("grants", grantKey(resourceId, who));
+      const shares: Page<Doc>[] = [];
+      for (const collection of ["grants", "invites", "links", "audit"]) {
+        shares.push(await tx.query(collection, { where: { resourceId, ...(collection === "audit" ? { outcome: "allowed" } : {}) }, limit: 2 }));
+      }
+      const children = await tx.query("resources", { where: { parentId: resourceId }, limit: 1 });
+      let requested: Resource | undefined;
+      let active = true;
+      const sharing: ClaimSharingOps = {
+        ensureOwner(type) {
+          if (!active || release) throw new Error("claim ownership is unavailable");
+          if (typeof type !== "string" || !/^[a-z][a-z0-9_-]*$/.test(type)) throw new Error("invalid resource");
+          if (resource) {
+            if (resource.parentId != null || resource.type !== type || owner?.role !== "owner" || owner.resourceId !== resourceId || owner.subjectKind !== who.kind || owner.subjectId !== who.id) throw new ResourceClaimConflictError();
+          } else if (shares.some((page) => page.items.length) || children.items.length) {
+            throw new ResourceClaimConflictError();
+          }
+          if (requested && requested.type !== type) throw new ResourceClaimConflictError();
+          requested = { id: resourceId, type };
+          return { ...requested };
+        },
+      };
+      try {
+        await mutate(tx, sharing);
+      } finally {
+        active = false;
+      }
+      let ownership = held?.ownership;
+      if (requested && !resource) {
+        ownership = crypto.randomUUID();
+        await tx.put("resources", resourceId, { ...requested, claimOwnership: ownership });
+        await putGrant(tx, resourceId, who, "owner");
+      }
+      // Sharing writers touch the resource, removing its creation token. This also
+      // serializes a concurrent grant, invite, link, or child against this deletion.
+      if (release && held && references.size === 0 && ownership && resource?.claimOwnership === ownership &&
+          shares[0]!.items.length === 1 && shares[0]!.items[0]!.id === grantKey(resourceId, who) && owner?.role === "owner" &&
+          shares[1]!.items.length === 0 && shares[2]!.items.length === 0 && shares[3]!.items.length === 0 && children.items.length === 0) {
+        await tx.delete("grants", grantKey(resourceId, who));
+        await tx.delete("resources", resourceId);
+      }
+      if (references.size) await tx.put("resource_claims", resourceId, { subjectKind: who.kind, subjectId: who.id, references: [...references], ...(ownership ? { ownership } : {}) });
       else await tx.delete("resource_claims", resourceId);
     });
   }

@@ -7,7 +7,7 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.11.0 preview. This code has principals and delegation chains,
+> Status: 0.12.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, a Netlify Store and Blobs, a file Store and Blobs, a Store-backed Queue, Mail adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
@@ -281,9 +281,10 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
 ### Host resource claims
 
 A trusted host uses `claimResource(resourceId, subject, referenceId, mutate)` to
-reserve a resource for a subject. Claims do not grant access or create sharing
-resources. The host checks access before it calls this API. Do not expose it as
-an unchecked HTTP, SDK, CLI, or MCP action.
+reserve a resource for a subject. A reservation alone does not grant access.
+The callback can call `claimSharing.ensureOwner(type)` to create a root sharing
+resource and its owner grant in the same transaction. The host checks access
+before it calls this API. Do not expose it as an unchecked HTTP, SDK, CLI, or MCP action.
 
 One subject can hold several live references to the same resource. A repeated
 claim for the same subject and reference succeeds. Another subject gets
@@ -294,7 +295,8 @@ claims it again and can conflict if another subject now holds it.
 ```ts
 const subject = { kind: "human", id: "ana" } as const;
 // Use the same Store for the claim and the host reference.
-await sharing.claimResource("document-1", subject, "reference-1", async (tx) => {
+await sharing.claimResource("document-1", subject, "reference-1", async (tx, claimSharing) => {
+  claimSharing.ensureOwner("doc");
   const ref = await tx.get("references", "reference-1");
   if (ref && (ref.resourceId !== "document-1" || ref.owner !== subject.id || ref.ownerKind !== subject.kind)) {
     throw new Error("reference conflict");
@@ -313,9 +315,22 @@ await sharing.releaseResourceClaim("document-1", subject, "reference-1", async (
 // Restore uses claimResource with the first callback again.
 ```
 
-The claim and the callback writes commit in one Store transaction. If the
-callback throws, both roll back. A release for an absent claim succeeds. A
-release for another subject or an unknown reference on a live claim conflicts.
+The claim, ownership, and callback writes commit in one Store transaction. If
+the callback throws, all roll back. `ensureOwner` is synchronous and stages its
+writes until the callback ends. It only targets the claim resource and subject.
+An existing resource must be a root, have the same type, and already grant
+this subject owner access. It does not take ownership from another subject. Missing resources
+with old grants, invites, links, children, or allowed audit entries conflict.
+
+The last release removes the owner grant and resource only if this claim created
+both and no sharing change has touched the resource. A grant, invite, link, or
+child ends automatic cleanup, even if later revoked. Allowed access audit entries
+also prevent cleanup, so a reused id cannot expose old audit data. Existing
+resources and their shares stay. Use the normal sharing API to manage them.
+`ensureOwner` is unavailable in a release callback or after a callback ends.
+Use the callback argument, not a separate `sharing.grant` call, for atomic ownership.
+
+A release for an absent claim succeeds. A release for another subject or an unknown reference on a live claim conflicts.
 The callback must check its reference state in `tx`, finish reads before writes,
 and allow retries. Do not send mail or write to another backend in the callback.
 Use an outbox for such work. Claims have no timeout. A claim holds at most 256 references
