@@ -39,6 +39,18 @@ export type SubjectKind = (typeof SUBJECT_KINDS)[number];
 export type Subject = { kind: SubjectKind; id: string };
 export type Grant = { resourceId: string; subjectKind: SubjectKind; subjectId: string; role: Role };
 
+/** A host claim conflicts with another subject, reference, or malformed stored claim. */
+export class ResourceClaimConflictError extends Error {
+  constructor() {
+    super("resource claim conflict");
+    this.name = "ResourceClaimConflictError";
+  }
+}
+
+type ResourceClaim = { subject: Subject; references: string[] };
+/** Host-only callback. Use tx, finish reads before writes, and allow transaction retries. */
+export type ClaimMutation = (tx: StoreOps) => Promise<void>;
+
 export type Resource = { id: string; type: string; parentId?: string | null };
 export type Decision = { allowed: boolean; role?: Role };
 export type InviteSummary = { id: string; resourceId: string; role: Role; for: "email" | "handle"; handle?: string; expiresAt?: number; acceptedAt?: number; revokedAt?: number };
@@ -178,7 +190,37 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     });
   };
 
+  // Failure cases: rival subjects, stale releases, duplicate references, failed mutations,
+  // and malformed stored claims. No claim grants access. Only trusted hosts call this API.
+  async function changeClaim(resourceId: string, subject: Subject, referenceId: string, release: boolean, mutate: ClaimMutation) {
+    const who = assertSubject(subject);
+    if (typeof resourceId !== "string" || !SAFE_ID.test(resourceId) || typeof referenceId !== "string" || !SAFE_ID.test(referenceId)) throw new Error("invalid claim id");
+    await store.transaction(async (tx) => {
+      const held = await tx.get<ResourceClaim>("resource_claims", resourceId);
+      if (held && (held.subject?.kind !== who.kind || held.subject?.id !== who.id || !Array.isArray(held.references) || held.references.length === 0 || held.references.some((id) => typeof id !== "string" || !SAFE_ID.test(id)) || new Set(held.references).size !== held.references.length)) throw new ResourceClaimConflictError();
+      if (release && held && !held.references.includes(referenceId)) throw new ResourceClaimConflictError();
+      const references = new Set(held?.references ?? []);
+      if (release) references.delete(referenceId);
+      else references.add(referenceId);
+      // Read the claim before the host callback. The callback can read its reference and then
+      // write it. Both writes commit together, even if a backend retries this callback.
+      await mutate(tx);
+      if (references.size) await tx.put("resource_claims", resourceId, { subject: who, references: [...references] });
+      else await tx.delete("resource_claims", resourceId);
+    });
+  }
+
   return {
+    /** Reserve a resource for a subject and reference, atomically with the host mutation. */
+    claimResource(resourceId: string, subject: Subject, referenceId: string, mutate: ClaimMutation): Promise<void> {
+      return changeClaim(resourceId, subject, referenceId, false, mutate);
+    },
+
+    /** Release one reference. The last release frees the resource for another subject. */
+    releaseResourceClaim(resourceId: string, subject: Subject, referenceId: string, mutate: ClaimMutation): Promise<void> {
+      return changeClaim(resourceId, subject, referenceId, true, mutate);
+    },
+
     async createResource(ctx: PrincipalContext, input: { id?: string; type: string; parentId?: string }): Promise<Resource> {
       const resource: Resource = { id: input.id ?? crypto.randomUUID(), type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}) };
       if (!/^[a-z][a-z0-9_-]*$/.test(resource.type) || !SAFE_ID.test(resource.id)) throw new Error("invalid resource");

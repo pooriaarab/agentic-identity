@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
+import { runResourceClaimContract, runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
 import { StoreConflictError } from "../ports.js";
 import { createFirestoreBlobs, createFirestoreStore, verifySignedBlobUrl } from "./firestore.js";
 import { createFakeFirestore } from "./firestore.fake.js";
@@ -34,6 +34,7 @@ const makeBlobs = (options: { shared?: string; region?: string } = {}, extra: { 
 
 runStoreContract((options) => make(options));
 runAuditContract((options) => make(options));
+runResourceClaimContract((options) => make(options));
 runBlobsContract((options) => makeBlobs(options));
 
 describe("Firestore blobs", () => {

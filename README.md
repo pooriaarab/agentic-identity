@@ -278,6 +278,51 @@ const { allowed } = await sharing.can(visitor, "read", "plan", { linkToken: link
   (default 50). `nextCursor` is set only when more entries exist. Pass it as `cursor`
   to read the next page. A bad `limit` or `cursor` throws.
 
+### Host resource claims
+
+A trusted host uses `claimResource(resourceId, subject, referenceId, mutate)` to
+reserve a resource for a subject. Claims do not grant access or create sharing
+resources. The host checks access before it calls this API. Do not expose it as
+an unchecked HTTP, SDK, CLI, or MCP action.
+
+One subject can hold several live references to the same resource. A repeated
+claim for the same subject and reference succeeds. Another subject gets
+`ResourceClaimConflictError`. A human and an agent with the same id are distinct.
+Trash releases one reference. The last release frees the resource. Restore
+claims it again and can conflict if another subject now holds it.
+
+```ts
+const subject = { kind: "human", id: "ana" } as const;
+// Use the same Store for the claim and the host reference.
+await sharing.claimResource("document-1", subject, "reference-1", async (tx) => {
+  const ref = await tx.get("references", "reference-1");
+  if (ref && (ref.resourceId !== "document-1" || ref.owner !== subject.id)) {
+    throw new Error("reference conflict");
+  }
+  await tx.put("references", "reference-1", {
+    resourceId: "document-1", owner: subject.id, trashed: false,
+  });
+});
+await sharing.releaseResourceClaim("document-1", subject, "reference-1", async (tx) => {
+  const ref = await tx.get("references", "reference-1");
+  if (!ref || ref.resourceId !== "document-1" || ref.owner !== subject.id) {
+    throw new Error("reference conflict");
+  }
+  await tx.put("references", "reference-1", { ...ref, trashed: true });
+});
+// Restore uses claimResource with the first callback again.
+```
+
+The claim and the callback writes commit in one Store transaction. If the
+callback throws, both roll back. A release for an absent claim succeeds. A
+release for another subject or an unknown reference on a live claim conflicts.
+The callback must check its reference state in `tx`, finish reads before writes,
+and allow retries. Do not send mail or write to another backend in the callback.
+Use an outbox for such work. Claims have no timeout. Keep a claim while its
+reference is live. A host must release claims as part of its hard-delete flow;
+`deleteResource` does not release host claims. Store commit uncertainty has the
+same meaning as it does for other transactions on that adapter.
+
 ## Worker API
 
 `agentic-identity/worker` is a Hono Worker under `/api/v1`, with data in D1. Create
