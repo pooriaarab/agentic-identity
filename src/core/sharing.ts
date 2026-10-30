@@ -47,7 +47,9 @@ export class ResourceClaimConflictError extends Error {
   }
 }
 
-type ResourceClaim = { subject: Subject; references: string[] };
+/** Keep a claim small enough for every Store adapter. */
+export const MAX_RESOURCE_CLAIM_REFERENCES = 256;
+type ResourceClaim = { subjectKind: SubjectKind; subjectId: string; references: string[] };
 /** Host-only callback. Use tx, finish reads before writes, and allow transaction retries. */
 export type ClaimMutation = (tx: StoreOps) => Promise<void>;
 
@@ -197,15 +199,16 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
     if (typeof resourceId !== "string" || !SAFE_ID.test(resourceId) || typeof referenceId !== "string" || !SAFE_ID.test(referenceId)) throw new Error("invalid claim id");
     await store.transaction(async (tx) => {
       const held = await tx.get<ResourceClaim>("resource_claims", resourceId);
-      if (held && (held.subject?.kind !== who.kind || held.subject?.id !== who.id || !Array.isArray(held.references) || held.references.length === 0 || held.references.some((id) => typeof id !== "string" || !SAFE_ID.test(id)) || new Set(held.references).size !== held.references.length)) throw new ResourceClaimConflictError();
+      if (held && (held.subjectKind !== who.kind || held.subjectId !== who.id || !Array.isArray(held.references) || held.references.length === 0 || held.references.some((id) => typeof id !== "string" || !SAFE_ID.test(id)) || new Set(held.references).size !== held.references.length)) throw new ResourceClaimConflictError();
       if (release && held && !held.references.includes(referenceId)) throw new ResourceClaimConflictError();
       const references = new Set(held?.references ?? []);
       if (release) references.delete(referenceId);
       else references.add(referenceId);
+      if (!release && references.size > MAX_RESOURCE_CLAIM_REFERENCES) throw new ResourceClaimConflictError();
       // Read the claim before the host callback. The callback can read its reference and then
       // write it. Both writes commit together, even if a backend retries this callback.
       await mutate(tx);
-      if (references.size) await tx.put("resource_claims", resourceId, { subject: who, references: [...references] });
+      if (references.size) await tx.put("resource_claims", resourceId, { subjectKind: who.kind, subjectId: who.id, references: [...references] });
       else await tx.delete("resource_claims", resourceId);
     });
   }

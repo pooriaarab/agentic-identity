@@ -4,7 +4,7 @@
 
 ### Added
 
-- Host resource claims in the sharing API. Claims support atomic reference create, trash, and restore, idempotent reclaim by the same subject, typed conflicts, and rollback with the host transaction. The shared contract runs on every Store adapter.
+- Host resource claims in the sharing API. Claims support atomic reference create, trash, and restore, idempotent reclaim by the same subject, typed conflicts, and rollback with the host transaction. The shared contract runs on every Store adapter. Account export and erase include claims. Each claim holds at most 256 references.
 
 ### Fixed
 

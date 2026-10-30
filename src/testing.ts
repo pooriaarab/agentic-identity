@@ -2,7 +2,8 @@
 //   runStoreContract((options) => new MyStore(options));
 // The suites use vitest, an optional peer dependency.
 import { describe, expect, it } from "vitest";
-import { ResourceClaimConflictError, createSharing } from "./core/sharing.js";
+import { deletePerson, exportPerson } from "./gdpr.js";
+import { MAX_RESOURCE_CLAIM_REFERENCES, ResourceClaimConflictError, createSharing } from "./core/sharing.js";
 import type { AuditEntry, PrincipalContext } from "./core/principals.js";
 import { StoreConflictError, type AdapterOptions, type Auth, type Blobs, type Doc, type Json, type Mail, type MailMessage, type Page, type Query, type Queue, type Realtime, type Region, type RoomKey, type Store, type StoreOps } from "./ports.js";
 
@@ -997,6 +998,7 @@ export function runResourceClaimContract(make: Make<Store, StoreOptions>): void 
     it("reclaims idempotently and keeps the owner until the last reference releases", async () => {
       const { a, b } = await setup();
       await a.claimResource("doc", ana, "ref-a", noop);
+      await expect(b.claimResource("doc", { kind: "agent", id: ana.id }, "ref-a", noop)).rejects.toBeInstanceOf(ResourceClaimConflictError);
       await b.claimResource("doc", ana, "ref-a", noop);
       await b.claimResource("doc", ana, "ref-b", noop);
       await a.releaseResourceClaim("doc", ana, "ref-a", noop);
@@ -1042,9 +1044,32 @@ export function runResourceClaimContract(make: Make<Store, StoreOptions>): void 
       expect(await store.get("refs", "ref")).toEqual({ active: false });
     });
 
+    it("exports and erases claims without touching another subject kind", async () => {
+      const { store, a } = await setup();
+      await a.claimResource("doc", ana, "ref", noop);
+      await a.claimResource("other", { kind: "agent", id: ana.id }, "ref", noop);
+      expect((await exportPerson(store, ana.id)).resourceClaims).toEqual([
+        { resourceId: "doc", subjectKind: ana.kind, subjectId: ana.id, references: ["ref"] },
+      ]);
+      await deletePerson(store, ana.id);
+      expect(await store.get("resource_claims", "doc")).toBeNull();
+      expect(await store.get("resource_claims", "other")).not.toBeNull();
+      await a.claimResource("doc", bo, "new", noop);
+    });
+
+    it("caps references with a typed conflict and still permits release", async () => {
+      const { store, a } = await setup();
+      const references = Array.from({ length: MAX_RESOURCE_CLAIM_REFERENCES }, (_, i) => `ref-${i}`);
+      await store.put("resource_claims", "doc", { subjectKind: ana.kind, subjectId: ana.id, references });
+      await a.claimResource("doc", ana, "ref-0", noop);
+      await expect(a.claimResource("doc", ana, "extra", noop)).rejects.toBeInstanceOf(ResourceClaimConflictError);
+      await a.releaseResourceClaim("doc", ana, "ref-0", noop);
+      await a.claimResource("doc", ana, "extra", noop);
+    });
+
     it("fails closed on corrupt claims and rejects invalid subjects or ids", async () => {
       const { store, a } = await setup();
-      for (const held of ([{}, { subject: ana, references: null }, { subject: ana, references: [] }, { subject: ana, references: ["ref", "ref"] }] as Doc[])) {
+      for (const held of ([{}, { subjectKind: ana.kind, subjectId: ana.id, references: null }, { subjectKind: ana.kind, subjectId: ana.id, references: [] }, { subjectKind: ana.kind, subjectId: ana.id, references: ["ref", "ref"] }] as Doc[])) {
         await store.put("resource_claims", "doc", held);
         await expect(a.claimResource("doc", ana, "ref", noop)).rejects.toBeInstanceOf(ResourceClaimConflictError);
         await expect(a.releaseResourceClaim("doc", ana, "ref", noop)).rejects.toBeInstanceOf(ResourceClaimConflictError);

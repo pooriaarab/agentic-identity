@@ -7,7 +7,7 @@
 
 People, agents, and the access they share: delegation, invites, links, and an audit trail.
 
-> Status: 0.10.0 preview. This code has principals and delegation chains,
+> Status: 0.11.0 preview. This code has principals and delegation chains,
 > the sharing model (roles, invites, share links, audit), six backend ports
 > with in-memory adapters for most, Cloudflare D1 and R2 adapters, a Firestore Store and Blobs, a Netlify Store and Blobs, a file Store and Blobs, a Store-backed Queue, Mail adapters, the contract suites,
 > and the HTTP API (a Cloudflare Worker) with OIDC sign-in, API keys and personal access tokens,
@@ -296,16 +296,16 @@ const subject = { kind: "human", id: "ana" } as const;
 // Use the same Store for the claim and the host reference.
 await sharing.claimResource("document-1", subject, "reference-1", async (tx) => {
   const ref = await tx.get("references", "reference-1");
-  if (ref && (ref.resourceId !== "document-1" || ref.owner !== subject.id)) {
+  if (ref && (ref.resourceId !== "document-1" || ref.owner !== subject.id || ref.ownerKind !== subject.kind)) {
     throw new Error("reference conflict");
   }
   await tx.put("references", "reference-1", {
-    resourceId: "document-1", owner: subject.id, trashed: false,
+    resourceId: "document-1", owner: subject.id, ownerKind: subject.kind, trashed: false,
   });
 });
 await sharing.releaseResourceClaim("document-1", subject, "reference-1", async (tx) => {
   const ref = await tx.get("references", "reference-1");
-  if (!ref || ref.resourceId !== "document-1" || ref.owner !== subject.id) {
+  if (!ref || ref.resourceId !== "document-1" || ref.owner !== subject.id || ref.ownerKind !== subject.kind) {
     throw new Error("reference conflict");
   }
   await tx.put("references", "reference-1", { ...ref, trashed: true });
@@ -318,9 +318,12 @@ callback throws, both roll back. A release for an absent claim succeeds. A
 release for another subject or an unknown reference on a live claim conflicts.
 The callback must check its reference state in `tx`, finish reads before writes,
 and allow retries. Do not send mail or write to another backend in the callback.
-Use an outbox for such work. Claims have no timeout. Keep a claim while its
+Use an outbox for such work. Claims have no timeout. A claim holds at most 256 references
+(`MAX_RESOURCE_CLAIM_REFERENCES`); adding another gives
+`ResourceClaimConflictError`. Existing references can still release. Keep a claim while its
 reference is live. A host must release claims as part of its hard-delete flow;
-`deleteResource` does not release host claims. Store commit uncertainty has the
+`deleteResource` does not release host claims. Account export includes
+`resourceClaims`, and account erase removes the subject's claims. Store commit uncertainty has the
 same meaning as it does for other transactions on that adapter.
 
 ## Worker API
