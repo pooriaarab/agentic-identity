@@ -6,7 +6,7 @@ import { COMMANDS, openApp, storePath } from "./commands.js";
 import { serveStdio } from "./mcp.js";
 import { VERSION } from "./version.js";
 
-export const MCP_HELP = `Usage: agentic-identity-mcp [options]
+export const MCP_HELP = `Usage: agentic-identity-mcp [mcp] [options]
 
 Serves the agentic-identity commands as MCP tools over stdio (JSON-RPC, one message per line).
 Add it to an MCP client as the command \`npx agentic-identity-mcp\` (or \`npx agentic-identity mcp\`).

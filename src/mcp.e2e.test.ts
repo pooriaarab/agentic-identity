@@ -72,6 +72,10 @@ describe("agentic-identity-mcp", () => {
       expect(r.stdout).toContain("identity_whoami");
     }
     expect(spawnSync(process.execPath, [mcpBin, "--bogus"], { encoding: "utf8" }).status).toBe(2);
+    const doubled = spawnSync(process.execPath, [cliBin, "mcp", "mcp", "--help"], { encoding: "utf8", timeout: 20_000 });
+    expect(doubled.status).toBe(2);
+    expect(doubled.stdout).toBe("");
+    expect(doubled.stderr.trim()).toBe("error: bad option or value. Run with --help.");
   });
 
   test("--version prints the package version and exits 0 on both bins, and does not start the server", () => {
