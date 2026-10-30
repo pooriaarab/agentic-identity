@@ -4,7 +4,7 @@ People, agents, and the access they share: delegation, invites, links, and an au
 
 ## Status
 
-Release 0.12.0 is a preview. It has principals and delegation chains, the
+Release 0.12.1 is a preview. It has principals and delegation chains, the
 sharing model (roles, invites, links, audit), the `Store`, `Blobs`, `Auth`,
 `Realtime`, `Mail`, and `Queue` ports with memory adapters (and an HMAC
 `Realtime`), Cloudflare D1 and R2 adapters, and the port contract suites
