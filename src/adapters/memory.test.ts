@@ -1,10 +1,11 @@
 import { expect, it } from "vitest";
-import { runAuthContract, runAuditContract, runBlobsContract, runMailContract, runQueueContract, runRealtimeContract, runStoreContract } from "../testing.js";
+import { runResourceClaimContract, runAuthContract, runAuditContract, runBlobsContract, runMailContract, runQueueContract, runRealtimeContract, runStoreContract } from "../testing.js";
 import { createHmacRealtime } from "./hmac.js";
 import { createMemoryAuth, createMemoryBlobs, createMemoryMail, createMemoryQueue, createMemoryStore } from "./memory.js";
 
 runStoreContract((options) => createMemoryStore(options));
 runAuditContract((options) => createMemoryStore(options));
+runResourceClaimContract((options) => createMemoryStore(options));
 runBlobsContract((options) => createMemoryBlobs(options));
 runAuthContract((options) => createMemoryAuth(options));
 runRealtimeContract((options) => createHmacRealtime(options));

@@ -23,7 +23,7 @@
 //     those, or given them after it was signed, fails. Each one is returned to the Worker.
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runBlobsContract, runAuditContract, runStoreContract } from "../testing.js";
+import { runResourceClaimContract, runBlobsContract, runAuditContract, runStoreContract } from "../testing.js";
 import { D1_SCHEMA, createD1Store, createR2Blobs, verifySignedBlobUrl, type D1Like, type D1Statement, type R2Like } from "./cloudflare.js";
 
 const SECRET = "0123456789abcdef0123456789abcdef-secret";
@@ -54,6 +54,15 @@ runStoreContract(async (options) => {
 
 runAuditContract(async (options) => {
   await db.prepare("DELETE FROM store_docs").run();
+  return createD1Store(db, { region: "unknown", ...options });
+});
+
+const claimDatasets = new Set<string | undefined>();
+runResourceClaimContract(async (options) => {
+  if (!claimDatasets.has(options.shared)) {
+    claimDatasets.add(options.shared);
+    await db.prepare("DELETE FROM store_docs").run();
+  }
   return createD1Store(db, { region: "unknown", ...options });
 });
 

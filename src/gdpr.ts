@@ -43,6 +43,13 @@ async function grantsOf(store: Store, personId: string, principals: Docs): Promi
   });
 }
 
+/** Host claims use the same subject kinds as grants. */
+async function claimsOf(store: Store, personId: string, principals: Docs): Promise<Docs> {
+  const kinds = new Map(principals.map((p) => [p.id, p.id === personId ? "human" : p.data.kind]));
+  return (await many(store, "resource_claims", "subjectId", principals.map((p) => p.id)))
+    .filter((c) => c.data.subjectKind === kinds.get(c.data.subjectId as string));
+}
+
 /** The resources that only these people own. A resource that someone else owns stays, even inside a deleted folder. */
 async function soleOwned(store: Store, mine: Docs): Promise<string[]> {
   const gone = new Set(mine.map((g) => g.id));
@@ -65,6 +72,7 @@ export async function exportPerson(store: Store, personId: string) {
     user: await store.get("users", personId),
     principals: principals.map((p) => p.data),
     credentials,
+    resourceClaims: (await claimsOf(store, personId, principals)).map((c) => ({ resourceId: c.id, ...c.data })),
     grants: grants.map((g) => g.data),
     resources: resources.filter((r) => r !== null),
     invites,
@@ -92,6 +100,13 @@ export async function deletePerson(store: Store, personId: string, options: { re
   for (const collection of ["grants", "links", "invites", "audit"]) await remove(collection, await many(store, collection, "resourceId", owned));
   await Promise.all(owned.map((id) => store.delete("resources", id)));
   await remove("grants", mine);
+  for (const claim of await claimsOf(store, personId, principals)) {
+    await store.transaction(async (tx) => {
+      const current = await tx.get("resource_claims", claim.id);
+      // A release and a new subject's claim can race erase. Keep the new subject's data.
+      if (current?.subjectKind === claim.data.subjectKind && current?.subjectId === claim.data.subjectId) await tx.delete("resource_claims", claim.id);
+    });
+  }
   // Entries about a person or an invite that goes are kept, with the target blanked, so a log of
   // changes on a resource that stays does not name what was erased.
   const gone = new Set(ids);

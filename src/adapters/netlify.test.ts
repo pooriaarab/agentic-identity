@@ -11,7 +11,7 @@ import { getStore } from "@netlify/blobs";
 import { BlobsServer } from "@netlify/blobs/server";
 import { afterAll, describe, expect, it } from "vitest";
 import { StoreConflictError } from "../ports.js";
-import { runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
+import { runResourceClaimContract, runAuditContract, runBlobsContract, runStoreContract } from "../testing.js";
 import { NetlifyCommitUncertainError, createNetlifyBlobs, createNetlifyStore, verifySignedBlobUrl, type NetlifyStoreLike } from "./netlify.js";
 import { createFakeNetlifyStore } from "./netlify.fake.js";
 import { createLocalServiceFetch } from "./netlify.localservice.js";
@@ -69,6 +69,7 @@ const makeRetryBlobs = (options: { shared?: string; region?: string }) => {
 
 runStoreContract(makeStore);
 runAuditContract(makeStore);
+runResourceClaimContract(makeStore);
 runBlobsContract(makeBlobs);
 describe("when a write lands and its retry is refused", () => {
   runStoreContract(makeRetryStore);

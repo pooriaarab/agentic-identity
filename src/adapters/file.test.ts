@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, statSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { runAuditContract, runStoreContract } from "../testing.js";
+import { runResourceClaimContract, runAuditContract, runStoreContract } from "../testing.js";
 import { StoreConflictError } from "../ports.js";
 import { createFileStore } from "./file.js";
 
@@ -12,6 +12,7 @@ const pathFor = (shared?: string) => join(dir, `${shared ?? `own-${n++}`}.json`)
 
 runStoreContract((options) => createFileStore({ ...options, path: pathFor(options.shared) }));
 runAuditContract((options) => createFileStore({ ...options, path: pathFor(options.shared) }));
+runResourceClaimContract((options) => createFileStore({ ...options, path: pathFor(options.shared) }));
 
 it("writes a private file that a fresh process would read back", async () => {
   const path = pathFor();
