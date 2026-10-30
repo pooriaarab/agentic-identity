@@ -1,12 +1,18 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { expect, test } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { beforeAll, expect, test } from "vitest";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string; bin: Record<string, string> };
 const bins = Object.entries(pkg.bin);
+// Direct vitest runs need a fresh build; npm test builds first.
+beforeAll(() => {
+  for (const [, path] of bins) {
+    if (!existsSync(fileURLToPath(new URL(`../${path}`, import.meta.url)))) throw new Error("Run npm run build first");
+  }
+});
 test.each(bins)("%s supports its MCP executable forms", (name, path) => {
-  const run = (args: string[], input = "") => spawnSync(resolve(path), args, { input, encoding: "utf8", timeout: 20_000 });
+  const run = (args: string[], input = "") => spawnSync(fileURLToPath(new URL(`../${path}`, import.meta.url)), args, { input, encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH ?? "" } });
   const help = run(["--help"]);
   expect(help.status).toBe(0);
   expect(help.stdout).toContain(`Usage: ${name}`);
@@ -38,4 +44,4 @@ test.each(bins)("%s supports its MCP executable forms", (name, path) => {
     expect(repeated.stdout).toBe("");
     expect(repeated.stderr).toContain("bad option");
   }
-});
+}, 60_000);

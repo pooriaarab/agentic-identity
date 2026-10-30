@@ -81,10 +81,11 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
     "test": "vitest run",
     "prepack": "npm run build",
     "clean": "rm -rf dist",
-    "ci:local": "npm run build && npm run typecheck && npm test"
+    "ci:local": "npm run typecheck && npm test"
   },
   "peerDependencies": {
     "vitest": ">=3"
