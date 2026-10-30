@@ -10,6 +10,8 @@ export const MCP_HELP = `Usage: agentic-identity-mcp [options]
 
 Serves the agentic-identity commands as MCP tools over stdio (JSON-RPC, one message per line).
 Add it to an MCP client as the command \`npx agentic-identity-mcp\` (or \`npx agentic-identity mcp\`).
+The agentic-identity-mcp bin also accepts one leading mcp argument.
+The agentic-identity mcp form does not accept another mcp argument.
 The tools are: ${COMMANDS.map((c) => c.tool).join(", ")}.
 
 Options:
