@@ -204,7 +204,8 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
 
   // Failure cases: rival subjects, stale releases, duplicate references, failed mutations,
   // and malformed stored claims. Ownership must not escape rollback, replace existing
-  // rights, survive its last private reference, or erase shares made since creation.
+  // rights, treat a child as a root, survive its last private reference, or erase
+  // shares made since creation.
   // Only trusted hosts call this API; a reservation alone never grants access.
   async function changeClaim(resourceId: string, subject: Subject, referenceId: string, release: boolean, mutate: ClaimMutation) {
     const who = assertSubject(subject);
@@ -232,7 +233,7 @@ export function createSharing(store: Store, options: { now?: () => number } = {}
           if (!active || release) throw new Error("claim ownership is unavailable");
           if (typeof type !== "string" || !/^[a-z][a-z0-9_-]*$/.test(type)) throw new Error("invalid resource");
           if (resource) {
-            if (resource.type !== type || owner?.role !== "owner" || owner.resourceId !== resourceId || owner.subjectKind !== who.kind || owner.subjectId !== who.id) throw new ResourceClaimConflictError();
+            if (resource.parentId != null || resource.type !== type || owner?.role !== "owner" || owner.resourceId !== resourceId || owner.subjectKind !== who.kind || owner.subjectId !== who.id) throw new ResourceClaimConflictError();
           } else if (shares.some((page) => page.items.length) || children.items.length) {
             throw new ResourceClaimConflictError();
           }

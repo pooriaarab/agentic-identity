@@ -973,7 +973,8 @@ export function runAuditContract(make: Make<Store, StoreOptions>): void {
 // Claim failure cases are listed before the contract: rival owners, duplicate references,
 // failed creates/trash, lost claims during trash/restore, stale release, and corrupt data.
 // Ownership failures: leaked grants on callback failure, erasing pre-existing shares,
-// repeated-reference cleanup, concurrent grant/release, stale creation provenance.
+// repeated-reference cleanup, concurrent grant/release, stale creation provenance,
+// and mistaking an existing child for a root resource.
 export function runResourceClaimContract(make: Make<Store, StoreOptions>): void {
   describe("Resource claim contract", () => {
     const ana = { kind: "human", id: "ana" } as const;
@@ -1043,6 +1044,17 @@ export function runResourceClaimContract(make: Make<Store, StoreOptions>): void 
       await a.releaseResourceClaim(mode, ana, "ref", noop);
       expect(await store.get("resources", mode)).not.toBeNull();
       expect(await store.get("grants", `${mode}:human:ana`)).not.toBeNull();
+    });
+
+    it("refuses an existing child instead of returning it as a root resource", async () => {
+      const { store, a } = await setup();
+      await a.createResource(owner(), { id: "folder", type: "folder" });
+      await a.createResource(owner(), { id: "child", type: "doc", parentId: "folder" });
+      await expect(a.claimResource("child", ana, "ref", async (_tx, sharing) => {
+        sharing.ensureOwner("doc");
+      })).rejects.toBeInstanceOf(ResourceClaimConflictError);
+      expect(await store.get("resource_claims", "child")).toBeNull();
+      expect(await store.get("resources", "child")).toMatchObject({ parentId: "folder" });
     });
 
     it("retains audit history and does not erase a resource recreated outside the claim", async () => {

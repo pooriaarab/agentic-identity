@@ -318,8 +318,8 @@ await sharing.releaseResourceClaim("document-1", subject, "reference-1", async (
 The claim, ownership, and callback writes commit in one Store transaction. If
 the callback throws, all roll back. `ensureOwner` is synchronous and stages its
 writes until the callback ends. It only targets the claim resource and subject.
-An existing resource must have the same type and already grant this subject
-owner access. It does not take ownership from another subject. Missing resources
+An existing resource must be a root, have the same type, and already grant
+this subject owner access. It does not take ownership from another subject. Missing resources
 with old grants, invites, links, children, or allowed audit entries conflict.
 
 The last release removes the owner grant and resource only if this claim created
