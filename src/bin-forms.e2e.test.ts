@@ -1,15 +1,21 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, expect, test } from "vitest";
+import { afterAll, beforeAll, expect, test } from "vitest";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string; bin: Record<string, string> };
 const bins = Object.entries(pkg.bin);
+const dir = mkdtempSync(join(tmpdir(), "identity-bins-"));
 beforeAll(() => {
-  execFileSync("npm", ["run", "build"], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: "pipe" });
+  execFileSync(process.execPath, [fileURLToPath(new URL("../node_modules/tsup/dist/cli-default.js", import.meta.url)), "--out-dir", dir], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: "pipe" });
+  writeFileSync(join(dir, "package.json"), '{"type":"module"}');
 }, 60_000);
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 test.each(bins)("%s supports its MCP executable forms", (name, path) => {
-  const run = (args: string[], input = "") => spawnSync(fileURLToPath(new URL(`../${path}`, import.meta.url)), args, { input, encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH ?? "" } });
+  const bin = join(dir, path.replace(/^\.\/dist\//, ""));
+  const run = (args: string[], input = "") => spawnSync(process.platform === "win32" ? process.execPath : bin, process.platform === "win32" ? [bin, ...args] : args, { input, encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH ?? "" } });
   const help = run(["--help"]);
   expect(help.status).toBe(0);
   expect(help.stdout).toContain(`Usage: ${name}`);
