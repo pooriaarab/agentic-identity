@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1 - 2026-10-30
+
+### Fixed
+
+- Both executable entries accept `--mcp` to start the MCP server.
+
 ## 0.12.0 - 2026-10-30
 
 ### Added

@@ -26,7 +26,7 @@ function commandHelp(c: Command): string {
 }
 
 function mainHelp(): string {
-  return ["Usage: agentic-identity <command> [options]", "", "People, agents, and the access they share. Works on a local file store.", "", "Commands:", ...COMMANDS.map((c) => `  ${(words(c) + flagOf(c)).padEnd(46)}${c.summary}`), `  ${"mcp".padEnd(46)}Serve the commands as MCP tools over stdio (same as agentic-identity-mcp).`, "", GLOBAL_OPTIONS].join("\n");
+  return ["Usage: agentic-identity <command> [options]", "", "People, agents, and the access they share. Works on a local file store.", "", "Commands:", ...COMMANDS.map((c) => `  ${(words(c) + flagOf(c)).padEnd(46)}${c.summary}`), `  ${"mcp, --mcp".padEnd(46)}Serve the commands as MCP tools over stdio (same as agentic-identity-mcp).`, "", GLOBAL_OPTIONS].join("\n");
 }
 
 /** Options that take a value. A value is not a command word, and not a flag. */

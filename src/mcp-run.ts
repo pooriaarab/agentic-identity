@@ -1,4 +1,4 @@
-// Starts the MCP server for a store file. `agentic-identity-mcp` and `agentic-identity mcp` both call it.
+// Starts the MCP server for both bins and their `mcp` and `--mcp` forms.
 import type { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { createFileStore } from "./adapters/file.js";
@@ -6,12 +6,12 @@ import { COMMANDS, openApp, storePath } from "./commands.js";
 import { serveStdio } from "./mcp.js";
 import { VERSION } from "./version.js";
 
-export const MCP_HELP = `Usage: agentic-identity-mcp [mcp] [options]
+export const MCP_HELP = `Usage: agentic-identity-mcp [mcp|--mcp] [options]
 
 Serves the agentic-identity commands as MCP tools over stdio (JSON-RPC, one message per line).
 Add it to an MCP client as the command \`npx agentic-identity-mcp\` (or \`npx agentic-identity mcp\`).
-The agentic-identity-mcp bin also accepts one leading mcp argument.
-The agentic-identity mcp form does not accept another mcp argument.
+Both bins accept --mcp to start the server. The agentic-identity-mcp bin also accepts one leading mcp argument.
+Only one leading mcp or --mcp argument is accepted.
 The tools are: ${COMMANDS.map((c) => c.tool).join(", ")}.
 
 Options:
