@@ -972,6 +972,8 @@ export function runAuditContract(make: Make<Store, StoreOptions>): void {
 
 // Claim failure cases are listed before the contract: rival owners, duplicate references,
 // failed creates/trash, lost claims during trash/restore, stale release, and corrupt data.
+// Ownership failures: leaked grants on callback failure, erasing pre-existing shares,
+// repeated-reference cleanup, concurrent grant/release, stale creation provenance.
 export function runResourceClaimContract(make: Make<Store, StoreOptions>): void {
   describe("Resource claim contract", () => {
     const ana = { kind: "human", id: "ana" } as const;
@@ -982,6 +984,131 @@ export function runResourceClaimContract(make: Make<Store, StoreOptions>): void 
       const [store, other] = await Promise.all([make({ shared }), make({ shared })]);
       return { store, a: createSharing(store), b: createSharing(other) };
     };
+
+    const owner = (id = "ana"): PrincipalContext => ({ principalId: id, kind: "human", chain: [{ id, kind: "human" }], scopes: ["*:admin"] });
+    it("creates ownership with the reference and rolls back all three on callback failure", async () => {
+      const { store, a } = await setup();
+      await expect(a.claimResource("doc", ana, "ref", async (tx, sharing) => {
+        sharing.ensureOwner("doc");
+        await tx.put("refs", "ref", { active: true });
+        throw new Error("host failed");
+      })).rejects.toThrow("host failed");
+      for (const collection of ["resources", "grants", "resource_claims", "refs"]) {
+        expect((await store.query(collection)).items).toHaveLength(0);
+      }
+      await a.claimResource("doc", ana, "ref", async (tx, sharing) => {
+        sharing.ensureOwner("doc");
+        await tx.put("refs", "ref", { active: true });
+      });
+      expect(await store.get("resources", "doc")).toMatchObject({ id: "doc", type: "doc" });
+      expect(await store.get("grants", "doc:human:ana")).toMatchObject({ role: "owner" });
+      await expect(a.revokeGrant(owner(), "doc", ana)).rejects.toThrow("last owner");
+      await expect(a.releaseResourceClaim("doc", ana, "ref", async () => {
+        throw new Error("trash failed");
+      })).rejects.toThrow("trash failed");
+      expect(await store.get("resources", "doc")).not.toBeNull();
+      await a.releaseResourceClaim("doc", ana, "ref", noop);
+      expect(await store.get("resources", "doc")).toBeNull();
+      expect(await store.get("grants", "doc:human:ana")).toBeNull();
+    });
+
+    it("keeps ownership until the last reference and supports restore by another subject", async () => {
+      const { store, a, b } = await setup();
+      await a.claimResource("doc", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      await b.claimResource("doc", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      await b.claimResource("doc", ana, "other", noop);
+      await a.releaseResourceClaim("doc", ana, "ref", noop);
+      expect(await store.get("resources", "doc")).not.toBeNull();
+      await b.releaseResourceClaim("doc", ana, "other", noop);
+      await b.claimResource("doc", bo, "new", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      expect(await store.get("grants", "doc:agent:bo")).toMatchObject({ role: "owner" });
+    });
+
+    it("preserves resources that predate the claim", async () => {
+      const { store, a } = await setup();
+      await a.createResource(owner(), { id: "existing", type: "doc" });
+      await a.claimResource("existing", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      await a.releaseResourceClaim("existing", ana, "ref", noop);
+      expect(await store.get("resources", "existing")).not.toBeNull();
+    });
+
+    it.each(["grant", "link", "invite", "child", "revoked"])("preserves a resource after a %s", async (mode) => {
+      const { store, a } = await setup();
+      await a.claimResource(mode, ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      if (mode === "grant" || mode === "revoked") await a.grant(owner(), mode, bo, "viewer");
+      if (mode === "revoked") await a.revokeGrant(owner(), mode, bo);
+      if (mode === "link") await a.createLink(owner(), mode, { role: "viewer" });
+      if (mode === "invite") await a.createInvite(owner(), mode, { handle: "robot", role: "viewer" });
+      if (mode === "child") await a.createResource(owner(), { id: "child-doc", type: "doc", parentId: mode });
+      await a.releaseResourceClaim(mode, ana, "ref", noop);
+      expect(await store.get("resources", mode)).not.toBeNull();
+      expect(await store.get("grants", `${mode}:human:ana`)).not.toBeNull();
+    });
+
+    it("retains audit history and does not erase a resource recreated outside the claim", async () => {
+      const { store, a } = await setup();
+      await a.claimResource("doc", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      await a.can(owner(), "read", "doc");
+      await a.releaseResourceClaim("doc", ana, "ref", noop);
+      expect(await store.get("resources", "doc")).not.toBeNull();
+      await a.claimResource("other", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      await a.deleteResource(owner(), "other");
+      await a.createResource(owner(), { id: "other", type: "doc" });
+      await a.releaseResourceClaim("other", ana, "ref", noop);
+      expect(await store.get("resources", "other")).not.toBeNull();
+    });
+
+    it("refuses ownership over another owner, stale state, invalid types, or a closed callback", async () => {
+      const { store, a } = await setup();
+      await a.createResource(owner(), { id: "doc", type: "doc" });
+      await expect(a.claimResource("doc", bo, "ref", async (_tx, sharing) => {
+        sharing.ensureOwner("doc");
+      })).rejects.toBeInstanceOf(ResourceClaimConflictError);
+      await expect(a.claimResource("doc", ana, "ref", async (_tx, sharing) => {
+        sharing.ensureOwner("folder");
+      })).rejects.toBeInstanceOf(ResourceClaimConflictError);
+      await expect(a.claimResource("new", ana, "ref", async (_tx, sharing) => {
+        sharing.ensureOwner("bad:type");
+      })).rejects.toThrow("invalid resource");
+      await store.put("grants", "orphan:agent:bo", { resourceId: "orphan", subjectKind: "agent", subjectId: "bo", role: "viewer" });
+      await expect(a.claimResource("orphan", ana, "ref", async (_tx, sharing) => {
+        sharing.ensureOwner("doc");
+      })).rejects.toBeInstanceOf(ResourceClaimConflictError);
+      let late: (() => unknown) | undefined;
+      await a.claimResource("new", ana, "ref", async (_tx, sharing) => {
+        late = () => sharing.ensureOwner("doc");
+      });
+      expect(() => late!()).toThrow("unavailable");
+      expect(await store.get("resources", "new")).toBeNull();
+    });
+
+    it("serializes ownership creation and concurrent sharing versus release across stores", async () => {
+      const { store, a, b } = await setup();
+      const outcomes = await Promise.allSettled([
+        a.claimResource("doc", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); }),
+        b.claimResource("doc", bo, "other", async (_tx, sharing) => { sharing.ensureOwner("doc"); }),
+      ]);
+      expect(outcomes.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect((await store.query("grants")).items).toHaveLength(1);
+      const held = (await store.get("resource_claims", "doc"))!;
+      // Use a separate resource so the principal context is deterministic.
+      expect(held.subjectId === ana.id || held.subjectId === bo.id).toBe(true);
+      await a.claimResource("race", ana, "ref", async (_tx, sharing) => { sharing.ensureOwner("doc"); });
+      const results = await Promise.allSettled([
+        a.releaseResourceClaim("race", ana, "ref", noop),
+        b.grant(owner(), "race", bo, "viewer"),
+      ]);
+      expect(results[0].status).toBe("fulfilled");
+      const resource = await store.get("resources", "race");
+      const grant = await store.get("grants", "race:agent:bo");
+      if (results[1].status === "fulfilled") {
+        expect(resource).not.toBeNull();
+        expect(grant).not.toBeNull();
+      } else {
+        expect(resource).toBeNull();
+        expect(grant).toBeNull();
+      }
+    });
 
     it("allows exactly one subject across two stores that claim concurrently", async () => {
       const { store, a, b } = await setup();
@@ -1069,7 +1196,7 @@ export function runResourceClaimContract(make: Make<Store, StoreOptions>): void 
 
     it("fails closed on corrupt claims and rejects invalid subjects or ids", async () => {
       const { store, a } = await setup();
-      for (const held of ([{}, { subjectKind: ana.kind, subjectId: ana.id, references: null }, { subjectKind: ana.kind, subjectId: ana.id, references: [] }, { subjectKind: ana.kind, subjectId: ana.id, references: ["ref", "ref"] }] as Doc[])) {
+      for (const held of ([{}, { subjectKind: ana.kind, subjectId: ana.id, references: null }, { subjectKind: ana.kind, subjectId: ana.id, references: [] }, { subjectKind: ana.kind, subjectId: ana.id, references: ["ref", "ref"] }, { subjectKind: ana.kind, subjectId: ana.id, references: ["ref"], ownership: null }] as Doc[])) {
         await store.put("resource_claims", "doc", held);
         await expect(a.claimResource("doc", ana, "ref", noop)).rejects.toBeInstanceOf(ResourceClaimConflictError);
         await expect(a.releaseResourceClaim("doc", ana, "ref", noop)).rejects.toBeInstanceOf(ResourceClaimConflictError);

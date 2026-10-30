@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0 - 2026-10-30
+
+### Added
+
+- Transaction-bound `ClaimSharingOps.ensureOwner(type)` in host claim callbacks. Resource creation, owner grants, reservations, and host writes commit or roll back together. The last release removes untouched claim-created ownership. Existing resources and later shares stay. The shared contract covers rollback and concurrency on every Store adapter.
+
 ## 0.11.0 - 2026-10-30
 
 ### Added
