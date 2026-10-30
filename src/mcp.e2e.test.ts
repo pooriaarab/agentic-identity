@@ -41,6 +41,30 @@ function client(bin: string, args: string[]) {
 }
 
 describe("agentic-identity-mcp", () => {
+  test.each(["--help", "--version"])("the MCP bin accepts one leading mcp with %s", (flag) => {
+    const run = (args: string[]) => spawnSync(process.execPath, [mcpBin, ...args], { encoding: "utf8", input: "", timeout: 20_000 });
+    const direct = run([flag]);
+    const redundant = run(["mcp", flag]);
+    expect(direct.status).toBe(0);
+    expect(redundant.status).toBe(0);
+    expect(redundant.stdout).toBe(direct.stdout);
+    expect(direct.stderr).toBe("");
+    expect(redundant.stderr).toBe("");
+    const doubled = run(["mcp", "mcp", flag]);
+    expect(doubled.status).toBe(2);
+    expect(doubled.stdout).toBe("");
+    expect(doubled.stderr.trim()).toBe("error: bad option or value. Run with --help.");
+  });
+
+  test("the MCP bin serves requests with a leading mcp", { timeout: 60_000 }, async () => {
+    const c = client(mcpBin, ["mcp", "--store", join(dir, "redundant.json")]);
+    const init = await c.request(1, "initialize", { protocolVersion: "2025-06-18" });
+    expect(init.result).toMatchObject({ serverInfo: { name: "agentic-identity" } });
+    const who = (await c.request(2, "tools/call", { name: "identity_whoami", arguments: {} })).result as { structuredContent: { principalId: string } };
+    expect(who.structuredContent.principalId).toBe("local");
+    expect(await c.close()).toBe(0);
+  });
+
   test("--help exits 0 on both entry points", () => {
     for (const [bin, args] of [[mcpBin, ["--help"]], [cliBin, ["mcp", "--help"]]] as const) {
       const r = spawnSync(process.execPath, [bin, ...args], { encoding: "utf8" });
@@ -48,6 +72,10 @@ describe("agentic-identity-mcp", () => {
       expect(r.stdout).toContain("identity_whoami");
     }
     expect(spawnSync(process.execPath, [mcpBin, "--bogus"], { encoding: "utf8" }).status).toBe(2);
+    const doubled = spawnSync(process.execPath, [cliBin, "mcp", "mcp", "--help"], { encoding: "utf8", timeout: 20_000 });
+    expect(doubled.status).toBe(2);
+    expect(doubled.stdout).toBe("");
+    expect(doubled.stderr.trim()).toBe("error: bad option or value. Run with --help.");
   });
 
   test("--version prints the package version and exits 0 on both bins, and does not start the server", () => {
