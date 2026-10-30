@@ -1,21 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { beforeAll, expect, test } from "vitest";
-import { bundleEntry } from "./test-bundle.js";
+import { resolve } from "node:path";
+import { expect, test } from "vitest";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string; bin: Record<string, string> };
 const bins = Object.entries(pkg.bin);
-const built = new Map<string, string>();
-
-beforeAll(async () => {
-  await Promise.all(bins.map(async ([name, path]) => {
-    const entry = path.replace(/^\.\/dist\//, "src/").replace(/\.js$/, ".ts");
-    built.set(name, await bundleEntry(entry));
-  }));
-}, 60_000);
-
-test.each(bins)("%s supports its MCP executable forms", (name) => {
-  const run = (args: string[], input = "") => spawnSync(process.execPath, [built.get(name)!, ...args], { input, encoding: "utf8", timeout: 20_000 });
+test.each(bins)("%s supports its MCP executable forms", (name, path) => {
+  const run = (args: string[], input = "") => spawnSync(resolve(path), args, { input, encoding: "utf8", timeout: 20_000 });
   const help = run(["--help"]);
   expect(help.status).toBe(0);
   expect(help.stdout).toContain(`Usage: ${name}`);
@@ -40,5 +31,11 @@ test.each(bins)("%s supports its MCP executable forms", (name) => {
     expect(bad.status).toBe(2);
     expect(bad.stdout).toBe("");
     expect(bad.stderr).toContain("bad option");
+  }
+  for (const first of ["mcp", "--mcp"]) for (const second of ["mcp", "--mcp"]) {
+    const repeated = run([first, second]);
+    expect(repeated.status).toBe(2);
+    expect(repeated.stdout).toBe("");
+    expect(repeated.stderr).toContain("bad option");
   }
 });

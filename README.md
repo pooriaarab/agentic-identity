@@ -158,8 +158,9 @@ Every command has `--help`. `agentic-identity --version` prints the version. The
 ## MCP server
 
 `agentic-identity-mcp` (also `agentic-identity mcp`) serves the CLI commands as
-MCP tools over stdio. The `agentic-identity-mcp` bin also accepts one leading
-`mcp` argument. The `agentic-identity mcp` form does not accept another `mcp`.
+MCP tools over stdio. Both bins accept `--mcp` to start the server. The
+`agentic-identity-mcp` bin also accepts one leading `mcp` argument. Only one
+leading `mcp` or `--mcp` argument is accepted.
 It speaks JSON-RPC 2.0, one JSON message per line. It works on the same store
 file as the CLI, with the same options (`--store`, `--as`) and the same
 environment variables. `--help` and `--version` print and exit 0, and do not start the server.
