@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- The MCP bin accepts one redundant leading `mcp` argument.
+
 ## 0.10.0 - 2026-10-29
 
 ### Added

@@ -41,6 +41,18 @@ function client(bin: string, args: string[]) {
 }
 
 describe("agentic-identity-mcp", () => {
+  test.each(["--help", "--version"])("the MCP bin accepts one leading mcp with %s", (flag) => {
+    const run = (args: string[]) => spawnSync(process.execPath, [mcpBin, ...args], { encoding: "utf8", input: "", timeout: 20_000 });
+    const direct = run([flag]);
+    const redundant = run(["mcp", flag]);
+    expect(direct.status).toBe(0);
+    expect(redundant.status).toBe(0);
+    expect(redundant.stdout).toBe(direct.stdout);
+    expect(direct.stderr).toBe("");
+    expect(redundant.stderr).toBe("");
+    expect(run(["mcp", "mcp", flag]).status).toBe(2);
+  });
+
   test("--help exits 0 on both entry points", () => {
     for (const [bin, args] of [[mcpBin, ["--help"]], [cliBin, ["mcp", "--help"]]] as const) {
       const r = spawnSync(process.execPath, [bin, ...args], { encoding: "utf8" });
