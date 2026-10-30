@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, test } from "vitest";
 
@@ -9,7 +10,9 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const bins = Object.entries(pkg.bin);
 const dir = mkdtempSync(join(tmpdir(), "identity-bins-"));
 beforeAll(() => {
-  execFileSync(process.execPath, [fileURLToPath(new URL("../node_modules/tsup/dist/cli-default.js", import.meta.url)), "--out-dir", dir], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: "pipe" });
+  const manifest = createRequire(import.meta.url).resolve("tsup/package.json");
+  const tsup = JSON.parse(readFileSync(manifest, "utf8")) as { bin: { tsup: string } };
+  execFileSync(process.execPath, [join(dirname(manifest), tsup.bin.tsup), "--no-dts", "--out-dir", dir], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: "pipe" });
   writeFileSync(join(dir, "package.json"), '{"type":"module"}');
 }, 60_000);
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
