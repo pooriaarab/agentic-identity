@@ -50,7 +50,19 @@ describe("agentic-identity-mcp", () => {
     expect(redundant.stdout).toBe(direct.stdout);
     expect(direct.stderr).toBe("");
     expect(redundant.stderr).toBe("");
-    expect(run(["mcp", "mcp", flag]).status).toBe(2);
+    const doubled = run(["mcp", "mcp", flag]);
+    expect(doubled.status).toBe(2);
+    expect(doubled.stdout).toBe("");
+    expect(doubled.stderr.trim()).toBe("error: bad option or value. Run with --help.");
+  });
+
+  test("the MCP bin serves requests with a leading mcp", { timeout: 60_000 }, async () => {
+    const c = client(mcpBin, ["mcp", "--store", join(dir, "redundant.json")]);
+    const init = await c.request(1, "initialize", { protocolVersion: "2025-06-18" });
+    expect(init.result).toMatchObject({ serverInfo: { name: "agentic-identity" } });
+    const who = (await c.request(2, "tools/call", { name: "identity_whoami", arguments: {} })).result as { structuredContent: { principalId: string } };
+    expect(who.structuredContent.principalId).toBe("local");
+    expect(await c.close()).toBe(0);
   });
 
   test("--help exits 0 on both entry points", () => {
